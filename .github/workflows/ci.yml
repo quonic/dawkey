@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request replaces its run; runs on main all finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Format, lint and test
+    runs-on: ubuntu-latest
+    # The same distribution Dawkey is developed on, so the Rust toolchain and
+    # system libraries match.
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    env:
+      # Line tables are enough for backtraces, and keep target/ small enough
+      # for the runner's disk and the cache. Debug assertions (and so the
+      # real-time allocation checks) stay on.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: '0'
+
+    steps:
+      # Before checkout, which clones with git when the image has it.
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          dnf install -y -q --setopt=install_weak_deps=False \
+            cargo \
+            clang-devel \
+            clippy \
+            gcc \
+            gcc-c++ \
+            git-core \
+            libxkbcommon-devel \
+            lilv-devel \
+            mesa-vulkan-drivers \
+            pipewire-devel \
+            pkgconf-pkg-config \
+            qt5-qtbase-devel \
+            qt6-qtbase-devel \
+            rust \
+            rustfmt \
+            vulkan-loader \
+            wayland-devel
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Cache dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: fedora-44-${{ hashFiles('Cargo.lock') }}
+          restore-keys: fedora-44-
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Tests that need a PipeWire daemon are #[ignore]d and don't run here.
+      # Screenshot tests render on lavapipe (mesa-vulkan-drivers).
+      - name: Test
+        run: cargo test --workspace --locked

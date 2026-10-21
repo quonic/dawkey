@@ -1,0 +1,98 @@
+name: Release
+
+# Builds Dawkey's packages with packaging/build-*.sh, each in a container of
+# the distribution it's for. Pushing a tag v<version> (Cargo.toml's version;
+# the build scripts check it) attaches them, with their checksums, to that
+# tag's GitHub release, which is made if it isn't there yet. A manual run
+# only builds them, kept as the run's artifacts.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Debian 13 also builds the generic tarball: its glibc is older than
+          # most distributions', so the binary runs on more of them.
+          - name: debian-13
+            image: debian:trixie
+            script: packaging/build-deb.sh && packaging/build-tarball.sh
+          - name: ubuntu-26.04
+            image: ubuntu:26.04
+            script: packaging/build-deb.sh
+          - name: fedora-44
+            image: registry.fedoraproject.org/fedora:44
+            script: packaging/build-rpm.sh
+          - name: arch
+            image: archlinux:latest
+            script: packaging/build-arch.sh
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      # In a container of our own rather than the job's: the runner keeps a
+      # job container up with `tail -f /dev/null`, which Ubuntu 26.04's tail
+      # (uutils) refuses. The scripts install what they need and run as root.
+      - name: Build
+        run: >
+          docker run --rm
+          --volume "$PWD:/src" --workdir /src
+          --env GITHUB_REF_TYPE --env GITHUB_REF_NAME
+          ${{ matrix.image }}
+          bash -c '${{ matrix.script }}'
+
+      - name: Keep packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Fetch packages
+        uses: actions/download-artifact@v8
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS
+
+      # Running again for the same tag (say, after a build failed) replaces
+      # the release's files rather than failing.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --verify-tag \
+              --title "Dawkey ${TAG#v}" \
+              --generate-notes \
+              --notes "Install the package for your distribution as [packaging/README.md](https://github.com/$GH_REPO/blob/$TAG/packaging/README.md#installing-a-release) shows. \`SHA256SUMS\` lists each file's checksum."
+          fi

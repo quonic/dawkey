@@ -1,0 +1,19 @@
+[package]
+name = "dk-engine"
+description = "Dawkey's real-time audio engine: mix graph, transport and metering"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dk-core.workspace = true
+dk-dsp.workspace = true
+dk-media.workspace = true
+assert_no_alloc.workspace = true
+rtrb.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

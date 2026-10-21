@@ -1,0 +1,138 @@
+name: Packages
+
+# Builds Dawkey's packages with packaging/build-*.sh, each in a container of
+# the distribution it's for, and uploads them to this Forgejo's package
+# registry with packaging/publish.sh. Pushing a tag v<version> (Cargo.toml's
+# version) publishes that version; a manual run publishes only when asked to,
+# and either way the packages are kept as the run's artifacts.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Upload the packages to the package registry
+        type: boolean
+        default: false
+
+jobs:
+  deb:
+    name: deb (${{ matrix.name }})
+    runs-on: docker
+    container:
+      image: ${{ matrix.image }}
+      # The runner keeps job containers up with `tail -f /dev/null`, which
+      # Ubuntu 26.04's tail (uutils) refuses, so the container stops at once.
+      entrypoint: ['sleep', 'infinity']
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Debian 13 also builds the generic tarball: its glibc is older than
+          # most distributions', so the binary runs on more of them.
+          - name: trixie
+            image: debian:trixie
+            tarball: true
+          - name: ubuntu-26.04
+            image: ubuntu:26.04
+            tarball: false
+
+    steps:
+      # Before checkout: the checkout action needs node and git.
+      - name: Install checkout dependencies
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends ca-certificates git nodejs
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build .deb
+        run: packaging/build-deb.sh
+
+      - name: Build tarball
+        if: matrix.tarball
+        run: packaging/build-tarball.sh
+
+      - name: Keep packages
+        uses: actions/upload-artifact@v3
+        with:
+          name: deb-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+
+  rpm:
+    name: rpm (fedora-44)
+    runs-on: docker
+    container:
+      image: registry.fedoraproject.org/fedora:44
+
+    steps:
+      - name: Install checkout dependencies
+        run: dnf install -y -q --setopt=install_weak_deps=False git-core nodejs
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build .rpm
+        run: packaging/build-rpm.sh
+
+      - name: Keep packages
+        uses: actions/upload-artifact@v3
+        with:
+          name: rpm-fedora-44
+          path: dist/
+          if-no-files-found: error
+
+  arch:
+    name: arch
+    runs-on: docker
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Install checkout dependencies
+        run: pacman -Syu --noconfirm --needed git nodejs
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build .pkg.tar.zst
+        run: packaging/build-arch.sh
+
+      - name: Keep packages
+        uses: actions/upload-artifact@v3
+        with:
+          name: arch
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: [deb, rpm, arch]
+    if: github.event_name == 'push' || github.event.inputs.publish == 'true'
+    runs-on: docker
+    container:
+      image: registry.fedoraproject.org/fedora:44
+
+    steps:
+      - name: Install checkout dependencies
+        run: dnf install -y -q --setopt=install_weak_deps=False git-core nodejs
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      # Without a name, v3 fetches every artifact, each into dist/<artifact>/.
+      - name: Fetch packages
+        uses: actions/download-artifact@v3
+        with:
+          path: dist/
+
+      - name: Upload to the package registry
+        run: packaging/publish.sh dist/*/*
+        env:
+          FORGEJO_SERVER: ${{ github.server_url }}
+          FORGEJO_OWNER: ${{ github.repository_owner }}
+          FORGEJO_REPO: ${{ github.event.repository.name }}
+          PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN }}

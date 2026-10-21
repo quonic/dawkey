@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[Desktop Entry]
+Type=Application
+Name=Dawkey
+GenericName=Digital Audio Workstation
+Comment=Record, arrange and mix audio and MIDI
+Exec=dawkey %f
+Icon=dawkey
+Terminal=false
+Categories=AudioVideo;Audio;Music;Sequencer;Midi;Mixer;
+Keywords=DAW;audio;MIDI;recording;mixing;plugin;LV2;CLAP;
+StartupWMClass=dawkey

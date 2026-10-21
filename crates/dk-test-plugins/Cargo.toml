@@ -1,0 +1,21 @@
+[package]
+name = "dk-test-plugins"
+description = "Tiny CLAP, LV2 and VST3 plugins that Dawkey's tests host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# The cdylib is the plugin binary; the rlib gives tests its install helper.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+clack-plugin.workspace = true
+clack-extensions = { workspace = true, features = ["clack-plugin"] }
+vst3.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in Dawkey doesn't work as it should
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Add a MIDI track
+        2. ...
+  - type: input
+    id: version
+    attributes:
+      label: Dawkey version
+      description: The output of `dawkey --version`, or the commit you built.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Distribution, desktop (compositor), PipeWire version and graphics driver.
+      placeholder: Fedora 44, KDE Plasma 6.6, PipeWire 1.6.9, Mesa (AMD)
+    validations:
+      required: true
+  - type: textarea
+    id: plugins
+    attributes:
+      label: Plugins involved
+      description: For plugin problems, the plugin's name, format (CLAP, LV2 or VST3) and version, and whether it still happens with "Sandbox" or "Own processes" turned off in the preferences.
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: What Dawkey printed in a terminal, ideally run with `DAWKEY_LOG=debug`.
+      render: text

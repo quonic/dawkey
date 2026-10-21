@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest something Dawkey should do
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you're trying to do
+      description: The task or workflow, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you'd like
+      description: How you picture it working, in the window or over MCP.
+  - type: textarea
+    id: elsewhere
+    attributes:
+      label: In other DAWs
+      description: If another DAW does this well, how it does it.

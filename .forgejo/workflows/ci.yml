@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Format, lint and test
+    runs-on: docker
+    # Same base as the dev machine, so the Rust toolchain and system libraries match.
+    container:
+      image: registry.fedoraproject.org/fedora:44
+
+    steps:
+      # Before checkout: the checkout action needs node and git, which the image lacks.
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          dnf install -y -q --setopt=install_weak_deps=False \
+            cargo \
+            clang-devel \
+            clippy \
+            gcc \
+            gcc-c++ \
+            git-core \
+            libxkbcommon-devel \
+            lilv-devel \
+            mesa-vulkan-drivers \
+            nodejs \
+            pipewire-devel \
+            pkgconf-pkg-config \
+            qt5-qtbase-devel \
+            qt6-qtbase-devel \
+            rust \
+            rustfmt \
+            vulkan-loader \
+            wayland-devel
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Tests that need a PipeWire daemon are #[ignore]d and don't run here.
+      # Screenshot tests render on lavapipe (mesa-vulkan-drivers).
+      - name: Test
+        run: cargo test --workspace --locked

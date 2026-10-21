@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "dawkey": {
+      "command": "cargo",
+      "args": [
+        "run",
+        "--quiet",
+        "--",
+        "mcp",
+        "--headless"
+      ]
+    },
+    "dawkey-live": {
+      "command": "cargo",
+      "args": [
+        "run",
+        "--quiet",
+        "--",
+        "mcp",
+        "--attach"
+      ]
+    }
+  }
+}

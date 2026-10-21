@@ -1,0 +1,29 @@
+[package]
+name = "dk-wayland"
+description = "Dawkey's Wayland window: client-side decorations, input, fractional scaling, wgpu surface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dk-app.workspace = true
+dk-core.workspace = true
+dk-media.workspace = true
+dk-studio.workspace = true
+dk-render.workspace = true
+dk-ui.workspace = true
+ashpd.workspace = true
+raw-window-handle.workspace = true
+smithay-client-toolkit.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+futures-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+
+[lints]
+workspace = true

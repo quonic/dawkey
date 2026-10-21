@@ -1,0 +1,176 @@
+[package]
+name = "dawkey"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A digital audio workstation for the Linux (Wayland + PipeWire) desktop"
+repository.workspace = true
+license.workspace = true
+
+# Packages: `cargo deb` and `cargo generate-rpm` (packaging/build-*.sh,
+# .github/workflows/release.yml). Wayland and Vulkan are loaded at run time,
+# so they're listed by hand; the rest comes from the binary's links.
+[package.metadata.deb]
+maintainer = "quonic <1550602+quonic@users.noreply.github.com>"
+section = "sound"
+priority = "optional"
+extended-description = """\
+Dawkey records, arranges and mixes audio and MIDI, hosts CLAP, LV2, and VST3 \
+plugins, and can be driven by AI assistants over its built-in MCP server. \
+It runs on Wayland and plays through PipeWire."""
+depends = "$auto, libwayland-client0, libvulkan1"
+recommends = "pipewire, wireplumber, mesa-vulkan-drivers, xdg-desktop-portal"
+suggests = "xwayland, libgtk-3-0, libqt5widgets5, libqt6widgets6"
+assets = [
+  ["target/release/dawkey", "usr/bin/", "755"],
+  ["packaging/dawkey.desktop", "usr/share/applications/", "644"],
+  ["packaging/dawkey.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+  ["README.md", "usr/share/doc/dawkey/", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Digital audio workstation for Wayland and PipeWire"
+auto-req = "auto"
+assets = [
+  { source = "target/release/dawkey", dest = "/usr/bin/dawkey", mode = "755" },
+  { source = "packaging/dawkey.desktop", dest = "/usr/share/applications/dawkey.desktop", mode = "644" },
+  { source = "packaging/dawkey.svg", dest = "/usr/share/icons/hicolor/scalable/apps/dawkey.svg", mode = "644" },
+  { source = "README.md", dest = "/usr/share/doc/dawkey/README.md", mode = "644", doc = true },
+  { source = "LICENSE", dest = "/usr/share/licenses/dawkey/LICENSE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+libwayland-client = "*"
+vulkan-loader = "*"
+
+[package.metadata.generate-rpm.recommends]
+pipewire = "*"
+wireplumber = "*"
+mesa-vulkan-drivers = "*"
+xdg-desktop-portal = "*"
+
+[package.metadata.generate-rpm.suggests]
+xorg-x11-server-Xwayland = "*"
+gtk3 = "*"
+qt5-qtbase-gui = "*"
+qt6-qtbase-gui = "*"
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+repository = "https://github.com/quonic/dawkey.git"
+license = "AGPL-3.0-or-later"
+
+[workspace.dependencies]
+dk-app = { path = "crates/dk-app" }
+dk-backend-pipewire = { path = "crates/dk-backend-pipewire" }
+dk-core = { path = "crates/dk-core" }
+dk-dsp = { path = "crates/dk-dsp" }
+dk-engine = { path = "crates/dk-engine" }
+dk-mcp = { path = "crates/dk-mcp" }
+dk-media = { path = "crates/dk-media" }
+dk-plugins = { path = "crates/dk-plugins" }
+dk-render = { path = "crates/dk-render" }
+dk-studio = { path = "crates/dk-studio" }
+dk-test-plugins = { path = "crates/dk-test-plugins" }
+dk-testkit = { path = "crates/dk-testkit" }
+dk-text = { path = "crates/dk-text" }
+dk-ui = { path = "crates/dk-ui" }
+dk-wayland = { path = "crates/dk-wayland" }
+
+anyhow = "1"
+ashpd = { version = "0.13.13", features = ["file_chooser", "settings"] }
+assert_no_alloc = "1.1"
+base64 = "0.23"
+bytemuck = { version = "1", features = ["derive"] }
+bytes = "1"
+clack-extensions = { version = "0.2", features = ["audio-ports", "gui", "latency", "log", "note-ports", "params", "posix-fd", "state", "timer"] }
+clack-host = "0.2"
+clack-plugin = "0.2"
+clap = { version = "4", features = ["derive"] }
+cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
+ebur128 = "0.1.10"
+etagere = "0.3"
+flacenc = "0.5"
+fontdb = { version = "0.23", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false }
+hound = "3.5"
+http-body-util = "0.1"
+hyper = "1"
+hyper-util = "0.1"
+landlock = "0.4"
+libc = "0.2"
+libspa-sys = "0.10"
+lilv = "0.2"
+lv2_raw = "0.2"
+midly = { version = "0.5", default-features = false, features = ["std"] }
+pipewire = "0.10"
+pipewire-sys = "0.10"
+png = "0.18"
+pollster = "1"
+raw-window-handle = "0.6"
+reqwest = { version = "0.13", default-features = false }
+rmcp = { version = "3.5", default-features = false }
+rtrb = "0.4"
+rubato = "5"
+schemars = "1"
+seccompiler = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop", "system", "xkbcommon"] }
+symphonia = { version = "0.6", features = ["all"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", default-features = false }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+vst3 = "0.3"
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wgpu = "30"
+x11rb = "0.14"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[dependencies]
+anyhow.workspace = true
+assert_no_alloc.workspace = true
+clap.workspace = true
+dk-app.workspace = true
+dk-core.workspace = true
+dk-mcp.workspace = true
+dk-plugins.workspace = true
+dk-studio.workspace = true
+dk-wayland.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+dk-media.workspace = true
+dk-test-plugins.workspace = true
+dk-testkit.workspace = true
+midly.workspace = true
+png.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

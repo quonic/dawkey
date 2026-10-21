@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Builds Dawkey from the checkout in $DAWKEY_SOURCE rather than a download:
+# run packaging/build-arch.sh, which sets it and $DAWKEY_VERSION.
+
+pkgname=dawkey
+pkgver=${DAWKEY_VERSION:?set by packaging/build-arch.sh}
+pkgrel=1
+pkgdesc='A digital audio workstation for the Linux (Wayland + PipeWire) desktop'
+arch=('x86_64' 'aarch64')
+url='https://github.com/quonic/dawkey'
+license=('AGPL-3.0-or-later')
+depends=('gcc-libs' 'glibc' 'lilv' 'libxkbcommon' 'pipewire' 'vulkan-icd-loader' 'wayland')
+makedepends=('cargo' 'clang' 'qt5-base' 'qt6-base')
+optdepends=(
+    'wireplumber: links Dawkey to the default audio devices'
+    'vulkan-driver: rendering the window'
+    'xdg-desktop-portal: open and save dialogs, following the light or dark setting'
+    'xorg-xwayland: plugins'"'"' own GUIs'
+    'gtk3: LV2 plugin UIs written with Gtk 3'
+    'gtk2: LV2 plugin UIs written with Gtk 2'
+    'qt5-base: LV2 plugin UIs written with Qt 5'
+    'qt6-base: LV2 plugin UIs written with Qt 6'
+)
+# makepkg's LTO flags turn libspa's C helpers into objects Rust's linker
+# can't read.
+options=('!debug' '!lto')
+
+build() {
+    cd "$DAWKEY_SOURCE"
+    cargo build --release --locked
+}
+
+package() {
+    cd "$DAWKEY_SOURCE"
+    install -Dm755 target/release/dawkey "$pkgdir/usr/bin/dawkey"
+    install -Dm644 packaging/dawkey.desktop "$pkgdir/usr/share/applications/dawkey.desktop"
+    install -Dm644 packaging/dawkey.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/dawkey.svg"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/dawkey/README.md"
+}
