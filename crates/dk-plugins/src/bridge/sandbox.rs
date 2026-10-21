@@ -403,8 +403,11 @@ mod tests {
             )?;
             Ok(())
         });
-        assert!(!elsewhere.path().join("file").exists());
-        assert_eq!(std::fs::read(allowed.path().join("preset")).unwrap(), b"1");
+        // The child checked writing only where Landlock was fully enforced.
+        if kernel_abi >= 9 {
+            assert!(!elsewhere.path().join("file").exists());
+            assert_eq!(std::fs::read(allowed.path().join("preset")).unwrap(), b"1");
+        }
     }
 
     #[test]
