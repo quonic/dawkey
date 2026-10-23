@@ -687,15 +687,15 @@ dependencies = [
  "assert_no_alloc",
  "base64",
  "clap",
- "dk-app",
- "dk-core",
- "dk-mcp",
- "dk-media",
- "dk-plugins",
- "dk-studio",
- "dk-test-plugins",
- "dk-testkit",
- "dk-wayland",
+ "dawkey-app",
+ "dawkey-core",
+ "dawkey-mcp",
+ "dawkey-media",
+ "dawkey-plugins",
+ "dawkey-studio",
+ "dawkey-test-plugins",
+ "dawkey-testkit",
+ "dawkey-wayland",
  "midly",
  "png",
  "reqwest",
@@ -704,6 +704,229 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "dawkey-app"
+version = "0.1.0"
+dependencies = [
+ "dawkey-core",
+ "dawkey-media",
+ "dawkey-plugins",
+ "dawkey-render",
+ "dawkey-studio",
+ "dawkey-test-plugins",
+ "dawkey-text",
+ "dawkey-ui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "dawkey-backend-pipewire"
+version = "0.1.0"
+dependencies = [
+ "dawkey-engine",
+ "libspa-sys",
+ "pipewire",
+ "pipewire-sys",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "dawkey-core"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "dawkey-dsp"
+version = "0.1.0"
+dependencies = [
+ "assert_no_alloc",
+ "dawkey-core",
+]
+
+[[package]]
+name = "dawkey-engine"
+version = "0.1.0"
+dependencies = [
+ "assert_no_alloc",
+ "dawkey-core",
+ "dawkey-dsp",
+ "dawkey-media",
+ "rtrb",
+ "serde",
+]
+
+[[package]]
+name = "dawkey-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "dawkey-app",
+ "dawkey-core",
+ "dawkey-media",
+ "dawkey-studio",
+ "dawkey-ui",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "dawkey-media"
+version = "0.1.0"
+dependencies = [
+ "ebur128",
+ "flacenc",
+ "hound",
+ "midly",
+ "rubato",
+ "serde",
+ "symphonia",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "dawkey-plugins"
+version = "0.1.0"
+dependencies = [
+ "assert_no_alloc",
+ "clack-extensions",
+ "clack-host",
+ "dawkey-engine",
+ "dawkey-test-plugins",
+ "landlock",
+ "libc",
+ "lilv",
+ "lv2_raw",
+ "rtrb",
+ "seccompiler",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "vst3",
+ "x11rb",
+ "zbus",
+]
+
+[[package]]
+name = "dawkey-render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "dawkey-text",
+ "dawkey-ui",
+ "etagere",
+ "png",
+ "pollster",
+ "thiserror",
+ "tracing",
+ "wgpu",
+]
+
+[[package]]
+name = "dawkey-studio"
+version = "0.1.0"
+dependencies = [
+ "dawkey-backend-pipewire",
+ "dawkey-core",
+ "dawkey-engine",
+ "dawkey-media",
+ "dawkey-plugins",
+ "dawkey-test-plugins",
+ "hound",
+ "rtrb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "dawkey-test-plugins"
+version = "0.1.0"
+dependencies = [
+ "clack-extensions",
+ "clack-plugin",
+ "vst3",
+]
+
+[[package]]
+name = "dawkey-testkit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rmcp",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dawkey-text"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "dawkey-ui",
+ "fontdb",
+]
+
+[[package]]
+name = "dawkey-ui"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dawkey-wayland"
+version = "0.1.0"
+dependencies = [
+ "ashpd",
+ "dawkey-app",
+ "dawkey-core",
+ "dawkey-media",
+ "dawkey-render",
+ "dawkey-studio",
+ "dawkey-ui",
+ "futures-util",
+ "raw-window-handle",
+ "smithay-client-toolkit",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]
@@ -735,229 +958,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "dk-app"
-version = "0.1.0"
-dependencies = [
- "dk-core",
- "dk-media",
- "dk-plugins",
- "dk-render",
- "dk-studio",
- "dk-test-plugins",
- "dk-text",
- "dk-ui",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "dk-backend-pipewire"
-version = "0.1.0"
-dependencies = [
- "dk-engine",
- "libspa-sys",
- "pipewire",
- "pipewire-sys",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "dk-core"
-version = "0.1.0"
-dependencies = [
- "base64",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "dk-dsp"
-version = "0.1.0"
-dependencies = [
- "assert_no_alloc",
- "dk-core",
-]
-
-[[package]]
-name = "dk-engine"
-version = "0.1.0"
-dependencies = [
- "assert_no_alloc",
- "dk-core",
- "dk-dsp",
- "dk-media",
- "rtrb",
- "serde",
-]
-
-[[package]]
-name = "dk-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "bytes",
- "dk-app",
- "dk-core",
- "dk-media",
- "dk-studio",
- "dk-ui",
- "http-body-util",
- "hyper",
- "hyper-util",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "dk-media"
-version = "0.1.0"
-dependencies = [
- "ebur128",
- "flacenc",
- "hound",
- "midly",
- "rubato",
- "serde",
- "symphonia",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "dk-plugins"
-version = "0.1.0"
-dependencies = [
- "assert_no_alloc",
- "clack-extensions",
- "clack-host",
- "dk-engine",
- "dk-test-plugins",
- "landlock",
- "libc",
- "lilv",
- "lv2_raw",
- "rtrb",
- "seccompiler",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "vst3",
- "x11rb",
- "zbus",
-]
-
-[[package]]
-name = "dk-render"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "dk-text",
- "dk-ui",
- "etagere",
- "png",
- "pollster",
- "thiserror",
- "tracing",
- "wgpu",
-]
-
-[[package]]
-name = "dk-studio"
-version = "0.1.0"
-dependencies = [
- "dk-backend-pipewire",
- "dk-core",
- "dk-engine",
- "dk-media",
- "dk-plugins",
- "dk-test-plugins",
- "hound",
- "rtrb",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "dk-test-plugins"
-version = "0.1.0"
-dependencies = [
- "clack-extensions",
- "clack-plugin",
- "vst3",
-]
-
-[[package]]
-name = "dk-testkit"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rmcp",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "dk-text"
-version = "0.1.0"
-dependencies = [
- "cosmic-text",
- "dk-ui",
- "fontdb",
-]
-
-[[package]]
-name = "dk-ui"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dk-wayland"
-version = "0.1.0"
-dependencies = [
- "ashpd",
- "dk-app",
- "dk-core",
- "dk-media",
- "dk-render",
- "dk-studio",
- "dk-ui",
- "futures-util",
- "raw-window-handle",
- "smithay-client-toolkit",
- "thiserror",
- "tokio",
- "tracing",
- "url",
- "wayland-client",
- "wayland-protocols",
 ]
 
 [[package]]

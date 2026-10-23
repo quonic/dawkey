@@ -3,7 +3,7 @@
 //! built-in synth, live input on armed tracks, and MIDI recording (fed
 //! through advance_clock's midi_input, so no device is involved).
 
-use dk_testkit::Harness;
+use dawkey_testkit::Harness;
 use serde_json::{Value, json};
 
 const DAWKEY: &str = env!("CARGO_BIN_EXE_dawkey");
@@ -128,7 +128,7 @@ async fn midi_clips_play_through_the_synth() {
         )
         .await
         .unwrap();
-    let left = dk_media::decode_file(&out, 48_000)
+    let left = dawkey_media::decode_file(&out, 48_000)
         .unwrap()
         .audio
         .channel(0)

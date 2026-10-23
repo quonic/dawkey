@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use base64::Engine as _;
-use dk_testkit::Harness;
+use dawkey_testkit::Harness;
 use serde_json::{Value, json};
 
 const DAWKEY: &str = env!("CARGO_BIN_EXE_dawkey");
@@ -43,7 +43,7 @@ async fn bounds(dawkey: &Harness, id: &str) -> (f64, f64, f64, f64) {
 
 fn write_wav(dir: &Path, name: &str, samples: Vec<f32>) -> std::path::PathBuf {
     let path = dir.join(name);
-    dk_media::write_wav(&path, &[samples], 48_000).unwrap();
+    dawkey_media::write_wav(&path, &[samples], 48_000).unwrap();
     path
 }
 
@@ -541,7 +541,7 @@ async fn editing_with_drags_keys_and_scroll() {
 #[tokio::test]
 async fn automation_lanes_screenshot() {
     let dir = tempfile::tempdir().unwrap();
-    let installed = dk_test_plugins::install(&dir.path().join("plugins")).unwrap();
+    let installed = dawkey_test_plugins::install(&dir.path().join("plugins")).unwrap();
     let dawkey = Harness::headless_with_env(
         DAWKEY,
         std::iter::empty::<&str>(),

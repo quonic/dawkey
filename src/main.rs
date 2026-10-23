@@ -21,9 +21,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use dk_app::{App, AudioChoice, Platform, Preferences};
-use dk_core::{Handle, Project};
-use dk_studio::{AudioBackend, LoadedProject, PipeWireOptions, Studio, StudioOptions, cache};
+use dawkey_app::{App, AudioChoice, Platform, Preferences};
+use dawkey_core::{Handle, Project};
+use dawkey_studio::{AudioBackend, LoadedProject, PipeWireOptions, Studio, StudioOptions, cache};
 use tracing_subscriber::EnvFilter;
 
 // Debug builds abort if the real-time audio path allocates.
@@ -137,7 +137,7 @@ enum Command {
 #[derive(Debug, Clone, Copy)]
 struct Bridge {
     processes: Processes,
-    /// In a sandbox (see `dk_plugins::Sandbox`).
+    /// In a sandbox (see `dawkey_plugins::Sandbox`).
     sandbox: bool,
 }
 
@@ -171,7 +171,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         None => run_gui(cli.gui),
         Some(Command::ScanPlugin { file }) => scan_plugin(&file),
-        Some(Command::PluginHost) => dk_studio::run_plugin_host().map_err(Into::into),
+        Some(Command::PluginHost) => dawkey_studio::run_plugin_host().map_err(Into::into),
         Some(Command::Mcp {
             attach: true, pid, ..
         }) => run_attach(pid),
@@ -204,7 +204,7 @@ fn main() -> ExitCode {
 }
 
 fn scan_plugin(file: &Path) -> anyhow::Result<()> {
-    let plugins = dk_plugins::scan_plugin_file(file)?;
+    let plugins = dawkey_plugins::scan_plugin_file(file)?;
     // The only thing on stdout: the scanning process reads it.
     serde_json::to_writer(std::io::stdout().lock(), &plugins)?;
     Ok(())
@@ -217,7 +217,7 @@ fn studio(
     no_autoconnect: bool,
     project: Option<PathBuf>,
     background: bool,
-    plugin_search: Option<dk_studio::SearchPath>,
+    plugin_search: Option<dawkey_studio::SearchPath>,
     bridge: Option<Bridge>,
 ) -> anyhow::Result<Studio> {
     // Takes left behind by a Dawkey that didn't exit cleanly.
@@ -240,14 +240,14 @@ fn studio(
         // Run plugins in processes of their own (see `plugin-host`).
         plugin_bridge: exe
             .zip(bridge)
-            .map(|(program, bridge)| dk_studio::BridgeProgram {
+            .map(|(program, bridge)| dawkey_studio::BridgeProgram {
                 program,
                 args: vec!["plugin-host".into()],
                 share: bridge.processes == Processes::Shared,
-                sandbox: bridge.sandbox.then(dk_studio::Sandbox::default),
+                sandbox: bridge.sandbox.then(dawkey_studio::Sandbox::default),
             }),
         background_scan: background,
-        plugin_search: plugin_search.map(|search| (search, dk_studio::default_plugin_cache())),
+        plugin_search: plugin_search.map(|search| (search, dawkey_studio::default_plugin_cache())),
     };
     Ok(Studio::with_options(loaded, backend, options)?)
 }
@@ -272,13 +272,13 @@ fn run_headless(
             let token = match std::env::var("DAWKEY_MCP_TOKEN") {
                 Ok(token) if !token.trim().is_empty() => token.trim().to_owned(),
                 _ => {
-                    let path = dk_app::default_token_path()
+                    let path = dawkey_app::default_token_path()
                         .context("set $DAWKEY_MCP_TOKEN or $HOME for the MCP token")?;
-                    dk_app::load_or_create_token(&path)
+                    dawkey_app::load_or_create_token(&path)
                         .with_context(|| format!("reading {}", path.display()))?
                 }
             };
-            let listener = dk_mcp::http::bind_http(addr).map_err(anyhow::Error::msg)?;
+            let listener = dawkey_mcp::http::bind_http(addr).map_err(anyhow::Error::msg)?;
             Ok((listener, token))
         })
         .transpose()?;
@@ -296,16 +296,16 @@ fn run_headless(
         App::tick,
     )?;
     match http {
-        None => runtime()?.block_on(dk_mcp::serve_stdio(handle))?,
+        None => runtime()?.block_on(dawkey_mcp::serve_stdio(handle))?,
         Some((listener, token)) => {
             use std::io::Write;
             // Stdout doesn't carry MCP here: it says where to connect.
-            let url = dk_app::mcp_url(listener.local_addr()?);
+            let url = dawkey_app::mcp_url(listener.local_addr()?);
             let mut stdout = std::io::stdout().lock();
             writeln!(stdout, "{url}")?;
             stdout.flush()?;
             drop(stdout);
-            runtime()?.block_on(dk_mcp::http::serve_http_until_signal(
+            runtime()?.block_on(dawkey_mcp::http::serve_http_until_signal(
                 handle, listener, token,
             ))?;
         }
@@ -357,21 +357,21 @@ fn run_gui(args: GuiArgs) -> anyhow::Result<()> {
     let socket = (!args.no_mcp)
         .then(|| socket_dir().map(|dir| dir.join(format!("{}.sock", std::process::id()))))
         .transpose()?;
-    let token_path = (!args.no_mcp).then(dk_app::default_token_path).flatten();
+    let token_path = (!args.no_mcp).then(dawkey_app::default_token_path).flatten();
     // MCP's clients are served on this runtime's threads.
     let mcp = runtime()?;
-    let result = dk_wayland::run(app, |handle| {
+    let result = dawkey_wayland::run(app, |handle| {
         if let Some(path) = socket.clone() {
             let handle = handle.clone();
             mcp.spawn(async move {
-                if let Err(e) = dk_mcp::serve_unix(handle, &path).await {
+                if let Err(e) = dawkey_mcp::serve_unix(handle, &path).await {
                     tracing::warn!("MCP socket stopped: {e:#}");
                 }
             });
         }
         // The preferences start and stop it.
         if let Some(token_path) = token_path {
-            let server = dk_mcp::http::HttpServer::new(mcp.handle().clone(), handle.clone());
+            let server = dawkey_mcp::http::HttpServer::new(mcp.handle().clone(), handle.clone());
             let _ = handle.send(move |app| app.set_mcp_http_server(Box::new(server), token_path));
         }
     });
@@ -389,7 +389,7 @@ fn run_attach(pid: Option<u32>) -> anyhow::Result<()> {
         Some(pid) => socket_dir()?.join(format!("{pid}.sock")),
         None => newest_live_socket(&socket_dir()?)?,
     };
-    runtime()?.block_on(dk_mcp::attach(&path))
+    runtime()?.block_on(dawkey_mcp::attach(&path))
 }
 
 /// `$XDG_RUNTIME_DIR/dawkey`, created owner-only.

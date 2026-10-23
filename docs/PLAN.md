@@ -35,7 +35,7 @@ Development machine at the start: Fedora 44, KDE Plasma Wayland, PipeWire 1.6.9,
 
 ### Core principle: one command bus
 
-Every mutation of the project is a serializable `Command` (serde plus `schemars` JSON Schema) applied by `dk-core`. The GUI, MCP, keyboard shortcuts and tests all go through the same path. This has three effects:
+Every mutation of the project is a serializable `Command` (serde plus `schemars` JSON Schema) applied by `dawkey-core`. The GUI, MCP, keyboard shortcuts and tests all go through the same path. This has three effects:
 
 - MCP tool schemas are **generated from the command types**, so they can't drift from the app.
 - Undo/redo is uniform. Each MCP tool call is wrapped in one undo group, so the user can undo an AI edit in a single step.
@@ -71,7 +71,7 @@ Every mutation of the project is a serializable `Command` (serde plus `schemars`
 - **Virtual clock.** The engine advances only when told (`advance(frames)`). This makes MCP-driven tests deterministic without PipeWire.
 - **Media (M1):** imported audio is decoded and resampled to the project rate once, and held in memory. Streaming from disk comes with recording in M4. Sources live in a pool outside undo: undoing an import removes the clip, not the source.
 
-### Wayland shell (`dk-wayland`, no libdecor)
+### Wayland shell (`dawkey-wayland`, no libdecor)
 
 - Uses `wayland-client` + `wayland-protocols` + `smithay-client-toolkit` for the registry, seat and xdg-shell helpers only. Never `sctk-adwaita` or any decoration crate.
 - **Client-side decorations:**
@@ -96,14 +96,14 @@ Every mutation of the project is a serializable `Command` (serde plus `schemars`
 
 ### Rendering and UI
 
-- **`dk-render`:** a `wgpu` (Vulkan) 2D batch renderer. It draws instanced SDF rects, rounded rects and lines, waveform and meter primitives, and a glyph atlas.
+- **`dawkey-render`:** a `wgpu` (Vulkan) 2D batch renderer. It draws instanced SDF rects, rounded rects and lines, waveform and meter primitives, and a glyph atlas.
   - Text uses `cosmic-text` (shaping and fallback) + `swash` (rasterization).
   - It can render to a swapchain surface **or an offscreen texture** (headless).
-- **`dk-ui`:** our own retained widget tree with flex/grid layout, theming, damage tracking, and a **stable widget ID for every widget**.
+- **`dawkey-ui`:** our own retained widget tree with flex/grid layout, theming, damage tracking, and a **stable widget ID for every widget**.
   - The tree exports an accessibility-style snapshot (role, label, bounds, value, enabled). MCP exposes it so tests and Claude can target widgets by ID instead of pixels.
   - The UI never touches Wayland directly. A `Platform` trait supplies input events and presents frames, implemented by `WaylandPlatform` and `HeadlessPlatform`.
 
-### MCP (`dk-mcp`, `rmcp`)
+### MCP (`dawkey-mcp`, `rmcp`)
 
 **Transports:**
 
@@ -141,26 +141,26 @@ Every mutation of the project is a serializable `Command` (serde plus `schemars`
 
 ## Workspace layout (Cargo workspace)
 
-As planned. Some crates were added or split since (`dk-media`, `dk-studio`, `dk-text`, `dk-test-plugins`); [ARCHITECTURE.md](ARCHITECTURE.md) lists them as they are.
+As planned. Some crates were added or split since (`dawkey-media`, `dawkey-studio`, `dawkey-text`, `dawkey-test-plugins`); [ARCHITECTURE.md](ARCHITECTURE.md) lists them as they are.
 
 ```text
 dawkey/
-  Cargo.toml                 # workspace, AGPL-3.0-or-later, lints
+  Cargo.toml                     # workspace, AGPL-3.0-or-later, lints
   crates/
-    dk-core/                 # model, Command, undo, serialization, graph compiler
-    dk-engine/               # RT graph, DSP nodes, transport, metering (no_alloc)
-    dk-backend-pipewire/     # pw_filter node, ports, metadata, links
-    dk-dsp/                  # built-ins: gain/pan, EQ, comp, polysynth
-    dk-plugins/              # CLAP + LV2 hosting, scanner
-    dk-render/               # wgpu 2D renderer, text
-    dk-ui/                   # retained widgets, layout, theme, a11y tree
-    dk-wayland/              # Wayland platform + CSD
-    dk-app/                  # views: arrange, mixer, piano roll, browser, titlebar
-    dk-mcp/                  # rmcp server, tools/resources, transports
-    dk-testkit/              # MCP test client, golden audio/image helpers
-  src/main.rs                # `dawkey` binary: gui | mcp --headless | mcp --attach
-  tests/                     # end-to-end scenarios driven over MCP
-  .mcp.json                  # lets Claude Code drive a dev build
+    dawkey-core/                 # model, Command, undo, serialization, graph compiler
+    dawkey-engine/               # RT graph, DSP nodes, transport, metering (no_alloc)
+    dawkey-backend-pipewire/     # pw_filter node, ports, metadata, links
+    dawkey-dsp/                  # built-ins: gain/pan, EQ, comp, polysynth
+    dawkey-plugins/              # CLAP + LV2 hosting, scanner
+    dawkey-render/               # wgpu 2D renderer, text
+    dawkey-ui/                   # retained widgets, layout, theme, a11y tree
+    dawkey-wayland/              # Wayland platform + CSD
+    dawkey-app/                  # views: arrange, mixer, piano roll, browser, titlebar
+    dawkey-mcp/                  # rmcp server, tools/resources, transports
+    dawkey-testkit/              # MCP test client, golden audio/image helpers
+  src/main.rs                    # `dawkey` binary: gui | mcp --headless | mcp --attach
+  tests/                         # end-to-end scenarios driven over MCP
+  .mcp.json                      # lets Claude Code drive a dev build
   CLAUDE.md
 ```
 
@@ -168,9 +168,9 @@ dawkey/
 
 1. **M0 Skeleton.** ✅ Done.
    - Workspace, CI (fmt, clippy, test) and license headers.
-   - `dk-core` Command bus + undo, project save/load.
+   - `dawkey-core` Command bus + undo, project save/load.
    - `dawkey mcp --headless` with `get_state`, `add_track` and `undo`.
-   - First `dk-testkit` end-to-end test over stdio.
+   - First `dawkey-testkit` end-to-end test over stdio.
 2. **M1 Engine.** ✅ Done.
    - Offline and virtual-clock backends, then the PipeWire `pw_filter` backend.
    - Transport, file playback, metering, `render_range`.
@@ -196,7 +196,7 @@ dawkey/
 6. **M5 MIDI.** ✅ Done. PipeWire MIDI ports, MIDI clips, piano roll, built-in polysynth, MIDI recording.
    - One `midi_in` port (`8 bit raw midi`; MIDI 1.0 and UMP control events are both parsed). There's no default MIDI device in WirePlumber, so while a MIDI track is armed the router links every MIDI bridge output except ALSA's "Midi Through". Armed MIDI tracks play live input through their synth, even when stopped.
    - Note times are frames in the model and beats (quarter notes) in the commands. Like audio clips, MIDI clips and notes stay at their frame positions when the tempo changes.
-   - The synth (`dk-dsp`) is 16-voice subtractive: polyBLEP saw/square, triangle, sine, ADSR, a resonant low-pass opened by the envelope, and sustain pedal. Its voices carry over graph swaps, so edits during playback don't cut notes off.
+   - The synth (`dawkey-dsp`) is 16-voice subtractive: polyBLEP saw/square, triangle, sine, ADSR, a resonant low-pass opened by the envelope, and sustain pedal. Its voices carry over graph swaps, so edits during playback don't cut notes off.
    - MIDI recording shifts takes by the same latency estimate as audio; each loop pass with notes is a take, earlier ones muted.
    - Follow-ups (done after M6):
      - Tempo map: a start tempo plus changes at beats (`set_tempo` with `at_beats`, `remove_tempo_change`, `set_tempo_map`). Notes stay stored in frames; a tempo edit re-times every MIDI clip and note so they keep their beat positions. Audio clips, automation, loop and punch keep their times. The ruler, grids and snapping follow the map.
@@ -271,7 +271,7 @@ dawkey/
   - Debug builds run the engine under `assert_no_alloc`.
   - A stress test drives randomized command streams while rendering and asserts no allocation and no panics on the RT thread.
 - **End-to-end over MCP:**
-  - `dk-testkit` spawns `dawkey mcp --headless` (on the virtual clock) and runs scenarios such as "import file → add track → render 2 s → assert peak/RMS/hash".
+  - `dawkey-testkit` spawns `dawkey mcp --headless` (on the virtual clock) and runs scenarios such as "import file → add track → render 2 s → assert peak/RMS/hash".
   - The same scenarios can run from any MCP client, including Claude Code through `.mcp.json`.
 - **UI goldens:** `ui_screenshot` renders headless on lavapipe (deterministic software Vulkan) and is compared to golden PNGs within a tolerance. `ui_tree` assertions check widget state after injected input.
 - **Live checks** (manual or Claude-driven via `--attach`) on KDE Plasma:

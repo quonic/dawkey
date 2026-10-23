@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Plugins over MCP, with the tiny plugins from `dk-test-plugins` (CLAP and
+//! Plugins over MCP, with the tiny plugins from `dawkey-test-plugins` (CLAP and
 //! LV2), scanned by `dawkey scan-plugin` subprocesses. Nothing on the
 //! system's plugin paths is used.
 
 use std::path::{Path, PathBuf};
 
-use dk_testkit::Harness;
+use dawkey_testkit::Harness;
 use serde_json::{Value, json};
 
 const DAWKEY: &str = env!("CARGO_BIN_EXE_dawkey");
@@ -24,9 +24,9 @@ struct Setup {
 /// Installs the test plugins, and writes a second of constant 0.5 (mono).
 fn setup() -> Setup {
     let dir = tempfile::tempdir().unwrap();
-    let installed = dk_test_plugins::install(&dir.path().join("plugins")).unwrap();
+    let installed = dawkey_test_plugins::install(&dir.path().join("plugins")).unwrap();
     let wav = dir.path().join("half.wav");
-    dk_media::write_wav(&wav, &[vec![0.5; 48_000]], 48_000).unwrap();
+    dawkey_media::write_wav(&wav, &[vec![0.5; 48_000]], 48_000).unwrap();
     Setup {
         clap: installed.clap_path,
         lv2: installed.lv2_path,
@@ -63,7 +63,7 @@ async fn peak(dawkey: &Harness, start_s: f64, end_s: f64) -> Option<f64> {
 
 /// The ID of the VST3 test plugin called `name`.
 fn vst3(name: &str) -> String {
-    dk_test_plugins::vst3_id(name).unwrap()
+    dawkey_test_plugins::vst3_id(name).unwrap()
 }
 
 fn approx(actual: Option<f64>, expected: f64) -> bool {
@@ -181,7 +181,7 @@ async fn a_crashing_plugin_only_fails_its_own_scan() {
             ("CLAP_PATH", setup.clap.as_os_str()),
             ("LV2_PATH", setup.lv2.as_os_str()),
             ("VST3_PATH", setup.vst3.as_os_str()),
-            ("DK_TEST_PLUGIN_CRASH", "1".as_ref()),
+            ("dawkey_TEST_PLUGIN_CRASH", "1".as_ref()),
         ],
     )
     .await

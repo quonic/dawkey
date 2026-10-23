@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use dk_testkit::Harness;
+use dawkey_testkit::Harness;
 use serde_json::{Value, json};
 
 const DAWKEY: &str = env!("CARGO_BIN_EXE_dawkey");
@@ -28,7 +28,7 @@ fn saw(frames: usize) -> Vec<f32> {
 
 fn write_wav(dir: &Path, name: &str, channels: &[Vec<f32>], rate: u32) -> PathBuf {
     let path = dir.join(name);
-    dk_media::write_wav(&path, channels, rate).unwrap();
+    dawkey_media::write_wav(&path, channels, rate).unwrap();
     path
 }
 
@@ -128,7 +128,7 @@ async fn render_to_wav_file() {
         .unwrap();
     assert_eq!(render["output_path"], json!(out));
 
-    let decoded = dk_media::decode_file(&out, 48_000).unwrap();
+    let decoded = dawkey_media::decode_file(&out, 48_000).unwrap();
     assert_eq!(decoded.audio.channel_count(), 2);
     assert_eq!(decoded.audio.frames(), 24_000);
     // Silence until the clip starts at 0.25 s.
@@ -446,10 +446,10 @@ async fn exports_the_song_to_wav_and_flac() {
             "{key}"
         );
     }
-    let decoded = dk_media::decode_file(&out, 48_000).unwrap().audio;
+    let decoded = dawkey_media::decode_file(&out, 48_000).unwrap().audio;
     assert_eq!(decoded.frames(), 72_000);
     assert_eq!(
-        dk_media::analyze(decoded.channels(), 48_000).hash,
+        dawkey_media::analyze(decoded.channels(), 48_000).hash,
         rendered["analysis"]["hash"]
     );
 
@@ -472,7 +472,7 @@ async fn exports_the_song_to_wav_and_flac() {
     let rms = |a: &Value| a["rms_dbfs"][0].as_f64().unwrap();
     let (got, want) = (rms(&exported["analysis"]), rms(&rendered["analysis"]));
     assert!((got - want).abs() < 0.1, "{got} vs {want}");
-    let decoded = dk_media::decode_file(&out, 44_100).unwrap();
+    let decoded = dawkey_media::decode_file(&out, 44_100).unwrap();
     assert_eq!(
         (decoded.source_rate, decoded.audio.frames()),
         (44_100, 88_200)

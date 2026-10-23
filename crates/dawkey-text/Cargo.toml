@@ -1,0 +1,19 @@
+[package]
+name = "dawkey-text"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Dawkey text shaping, measuring and glyph rasterization with embedded fonts"
+repository.workspace = true
+license.workspace = true
+
+[lib]
+name = "dawkey_text"
+
+[dependencies]
+cosmic-text.workspace = true
+dawkey-ui.workspace = true
+fontdb.workspace = true
+
+[lints]
+workspace = true

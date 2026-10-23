@@ -1,0 +1,30 @@
+[package]
+name = "dawkey-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Dawkey's application: views, UI actions, and the App state shared by the GUI and MCP"
+repository.workspace = true
+license.workspace = true
+
+[lib]
+name = "dawkey_app"
+
+[dependencies]
+dawkey-core.workspace = true
+dawkey-media.workspace = true
+dawkey-render.workspace = true
+dawkey-studio.workspace = true
+dawkey-text.workspace = true
+dawkey-ui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+dawkey-plugins.workspace = true
+dawkey-test-plugins.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

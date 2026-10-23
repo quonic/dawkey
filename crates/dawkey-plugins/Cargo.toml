@@ -1,0 +1,38 @@
+[package]
+name = "dawkey-plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Dawkey's plugin hosting: CLAP, LV2 and VST3 discovery, scanning and processing"
+repository.workspace = true
+license.workspace = true
+
+[lib]
+name = "dawkey_plugins"
+
+[dependencies]
+assert_no_alloc.workspace = true
+clack-extensions = { workspace = true, features = ["clack-host"] }
+clack-host.workspace = true
+dawkey-engine.workspace = true
+landlock.workspace = true
+libc.workspace = true
+lilv.workspace = true
+lv2_raw.workspace = true
+rtrb.workspace = true
+seccompiler.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
+tracing.workspace = true
+vst3.workspace = true
+x11rb.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+dawkey-test-plugins.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

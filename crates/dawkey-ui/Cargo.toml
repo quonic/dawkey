@@ -1,0 +1,20 @@
+[package]
+name = "dawkey-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Dawkey's UI toolkit: widget tree with stable IDs, layout, input, scene, accessibility tree"
+repository.workspace = true
+license.workspace = true
+
+[lib]
+name = "dawkey_ui"
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

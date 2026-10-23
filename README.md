@@ -181,4 +181,4 @@ Bug reports, ideas and pull requests are welcome. Start with [CONTRIBUTING.md](C
 
 Dawkey is free software under the GNU Affero General Public License, version 3 or (at your option) any later version. See [LICENSE](LICENSE).
 
-The embedded fonts, Noto Sans and Noto Sans Mono, are under the SIL Open Font License 1.1 ([crates/dk-text/assets/fonts](crates/dk-text/assets/fonts)).
+The embedded fonts, Noto Sans and Noto Sans Mono, are under the SIL Open Font License 1.1 ([crates/dawkey-text/assets/fonts](crates/dawkey-text/assets/fonts)).

@@ -1,0 +1,22 @@
+[package]
+name = "dawkey-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Dawkey's real-time audio engine: mix graph, transport and metering"
+repository.workspace = true
+license.workspace = true
+
+[lib]
+name = "dawkey_engine"
+
+[dependencies]
+assert_no_alloc.workspace = true
+dawkey-core.workspace = true
+dawkey-dsp.workspace = true
+dawkey-media.workspace = true
+rtrb.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,31 @@
+[package]
+name = "dawkey-studio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A running Dawkey instance: session, decoded media, engine and audio backend"
+repository.workspace = true
+license.workspace = true
+
+[lib]
+name = "dawkey_studio"
+
+[dependencies]
+dawkey-backend-pipewire.workspace = true
+dawkey-core.workspace = true
+dawkey-engine.workspace = true
+dawkey-media.workspace = true
+dawkey-plugins.workspace = true
+hound.workspace = true
+rtrb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+dawkey-test-plugins.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

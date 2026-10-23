@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! End-to-end: drive `dawkey mcp --headless` over stdio like an MCP client.
 
-use dk_testkit::Harness;
+use dawkey_testkit::Harness;
 use serde_json::{Value, json};
 
 const DAWKEY: &str = env!("CARGO_BIN_EXE_dawkey");

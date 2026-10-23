@@ -9,7 +9,7 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use dk_testkit::Harness;
+use dawkey_testkit::Harness;
 use serde_json::{Value, json};
 
 const DAWKEY: &str = env!("CARGO_BIN_EXE_dawkey");

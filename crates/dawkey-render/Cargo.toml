@@ -1,0 +1,25 @@
+[package]
+name = "dawkey-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Dawkey's GPU renderer (wgpu/Vulkan): draws dawkey-ui scenes to a window or an image"
+repository.workspace = true
+license.workspace = true
+
+[lib]
+name = "dawkey_render"
+
+[dependencies]
+bytemuck.workspace = true
+dawkey-text.workspace = true
+dawkey-ui.workspace = true
+etagere.workspace = true
+png.workspace = true
+pollster.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true

@@ -2,7 +2,7 @@
 //! End-to-end: drive `dawkey mcp --headless --http` over MCP's streamable
 //! HTTP transport, and check that it refuses what it should.
 
-use dk_testkit::Harness;
+use dawkey_testkit::Harness;
 use serde_json::json;
 
 const DAWKEY: &str = env!("CARGO_BIN_EXE_dawkey");

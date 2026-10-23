@@ -16,13 +16,13 @@ dawkey mcp --headless [Song.dawkey]
 
 This starts Dawkey with no window and speaks MCP on stdin and stdout. It uses the virtual audio backend by default: nothing plays, and time moves only when a client calls `advance_clock`. That makes it the right choice for tests, scripts and batch work.
 
-| Option | What it does |
-| --- | --- |
-| `--audio pipewire` | Play through PipeWire instead of the virtual clock. |
-| `--no-autoconnect` | With `--audio pipewire`: don't link Dawkey's outputs to the default sink. |
+| Option                                | What it does                                                                                                                                                                                  |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--audio pipewire`                    | Play through PipeWire instead of the virtual clock.                                                                                                                                           |
+| `--no-autoconnect`                    | With `--audio pipewire`: don't link Dawkey's outputs to the default sink.                                                                                                                     |
 | `--bridge-plugins[=shared\|separate]` | Run plugins in processes of their own, as the window does: one per plugin file (`shared`, the default) or one per instance (`separate`). Without it, plugins run inside Dawkey's own process. |
-| `--no-sandbox` | With `--bridge-plugins`: don't sandbox the plugin processes. |
-| `--http ADDR` | Serve MCP over HTTP at `http://ADDR/mcp` instead of stdio (see below). |
+| `--no-sandbox`                        | With `--bridge-plugins`: don't sandbox the plugin processes.                                                                                                                                  |
+| `--http ADDR`                         | Serve MCP over HTTP at `http://ADDR/mcp` instead of stdio (see below).                                                                                                                        |
 
 Headless instances ignore the preferences file.
 
@@ -89,20 +89,20 @@ The server's instructions give clients these rules too. In short:
 
 There are 84 tools. Each one's description says exactly what it takes and returns.
 
-| Area | Tools |
-| --- | --- |
-| Project | `get_state`, `new_project`, `open_project`, `save_project`, `rename_project`, `undo`, `redo` |
-| Importing | `import_audio`, `import_midi` |
-| Transport | `play`, `stop`, `locate`, `set_loop`, `set_punch` |
-| Tempo and meter | `set_tempo`, `remove_tempo_change`, `set_tempo_map`, `set_time_signature`, `remove_time_signature_change`, `set_time_signature_map` |
-| Tracks | `add_track` (audio, MIDI or bus), `remove_track`, `rename_track`, `set_track_gain`, `set_track_pan`, `set_track_mute`, `set_track_solo`, `set_track_output` |
-| Clips | `add_clip`, `move_clip`, `remove_clip`, `set_clip_gain`, `set_clip_mute`, `set_clip_length`, `trim_clip`, `split_clip`, `duplicate_clip`, `repeat_clip`, `comp_take` |
-| Recording | `record`, `set_track_arm`, `set_track_input`, `set_track_monitor`, `set_record_offset` |
-| MIDI | `add_midi_clip`, `add_midi_notes`, `edit_midi_notes`, `remove_midi_notes`, `quantize_midi_notes`, `set_midi_controls`, `set_synth`, `set_track_midi_input`, `set_track_midi_output` |
-| Plugins | `list_plugins`, `rescan_plugins`, `add_plugin`, `remove_plugin`, `move_plugin`, `get_plugin`, `set_plugin_param`, `set_plugin_bypass`, `set_plugin_sidechain`, `set_plugin_output`, `reload_plugin`, `show_plugin_gui` |
-| Automation | `set_automation`, `add_automation_point`, `remove_automation_points`, `write_automation` |
-| Engine and output | `get_engine_status`, `get_meters`, `advance_clock`, `render_range`, `export_audio` |
-| User interface | `ui_tree`, `ui_screenshot`, `ui_click`, `ui_drag`, `ui_scroll`, `ui_hover`, `ui_key`, `ui_type`, `ui_drop_files`, `ui_resize` |
+| Area              | Tools                                                                                                                                                                                                                  |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Project           | `get_state`, `new_project`, `open_project`, `save_project`, `rename_project`, `undo`, `redo`                                                                                                                           |
+| Importing         | `import_audio`, `import_midi`                                                                                                                                                                                          |
+| Transport         | `play`, `stop`, `locate`, `set_loop`, `set_punch`                                                                                                                                                                      |
+| Tempo and meter   | `set_tempo`, `remove_tempo_change`, `set_tempo_map`, `set_time_signature`, `remove_time_signature_change`, `set_time_signature_map`                                                                                    |
+| Tracks            | `add_track` (audio, MIDI or bus), `remove_track`, `rename_track`, `set_track_gain`, `set_track_pan`, `set_track_mute`, `set_track_solo`, `set_track_output`                                                            |
+| Clips             | `add_clip`, `move_clip`, `remove_clip`, `set_clip_gain`, `set_clip_mute`, `set_clip_length`, `trim_clip`, `split_clip`, `duplicate_clip`, `repeat_clip`, `comp_take`                                                   |
+| Recording         | `record`, `set_track_arm`, `set_track_input`, `set_track_monitor`, `set_record_offset`                                                                                                                                 |
+| MIDI              | `add_midi_clip`, `add_midi_notes`, `edit_midi_notes`, `remove_midi_notes`, `quantize_midi_notes`, `set_midi_controls`, `set_synth`, `set_track_midi_input`, `set_track_midi_output`                                    |
+| Plugins           | `list_plugins`, `rescan_plugins`, `add_plugin`, `remove_plugin`, `move_plugin`, `get_plugin`, `set_plugin_param`, `set_plugin_bypass`, `set_plugin_sidechain`, `set_plugin_output`, `reload_plugin`, `show_plugin_gui` |
+| Automation        | `set_automation`, `add_automation_point`, `remove_automation_points`, `write_automation`                                                                                                                               |
+| Engine and output | `get_engine_status`, `get_meters`, `advance_clock`, `render_range`, `export_audio`                                                                                                                                     |
+| User interface    | `ui_tree`, `ui_screenshot`, `ui_click`, `ui_drag`, `ui_scroll`, `ui_hover`, `ui_key`, `ui_type`, `ui_drop_files`, `ui_resize`                                                                                          |
 
 ### Listening without speakers
 
@@ -119,10 +119,10 @@ The widget IDs are a public interface: tests and clients rely on them, and they 
 
 ## Testing over MCP
 
-Most of Dawkey's features are tested end to end. The tests in [tests/](../tests) start the real `dawkey` binary headless and drive it through `dk_testkit::Harness`, an MCP client:
+Most of Dawkey's features are tested end to end. The tests in [tests/](../tests) start the real `dawkey` binary headless and drive it through `dawkey_testkit::Harness`, an MCP client:
 
 ```rust
-use dk_testkit::Harness;
+use dawkey_testkit::Harness;
 use serde_json::json;
 
 const DAWKEY: &str = env!("CARGO_BIN_EXE_dawkey");
@@ -154,7 +154,7 @@ async fn renders_an_imported_file() {
 ```
 
 - `call` returns a tool's result as JSON, and `call_err` expects a tool error and returns its message.
-- `Harness::headless_with_env` sets environment variables, such as `CLAP_PATH` for the test plugins in `crates/dk-test-plugins`. `Harness::headless_http` starts an instance served over HTTP.
+- `Harness::headless_with_env` sets environment variables, such as `CLAP_PATH` for the test plugins in `crates/dawkey-test-plugins`. `Harness::headless_http` starts an instance served over HTTP.
 - Each test process gets its own `XDG_CACHE_HOME`, so tests never touch your real cache.
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md#tests) for the rules tests follow.

@@ -6,7 +6,7 @@
 use std::f32::consts::FRAC_1_SQRT_2;
 use std::path::{Path, PathBuf};
 
-use dk_testkit::Harness;
+use dawkey_testkit::Harness;
 use serde_json::{Value, json};
 
 const DAWKEY: &str = env!("CARGO_BIN_EXE_dawkey");
@@ -28,7 +28,7 @@ fn signal(frames: usize) -> Vec<f32> {
 
 fn write_input(dir: &Path, frames: usize) -> PathBuf {
     let path = dir.join("input.wav");
-    dk_media::write_wav(&path, &[signal(frames)], RATE as u32).unwrap();
+    dawkey_media::write_wav(&path, &[signal(frames)], RATE as u32).unwrap();
     path
 }
 
@@ -88,7 +88,7 @@ fn source_path(state: &Value, source: &Value) -> PathBuf {
 
 /// The left channel of a recorded file.
 fn recorded(path: &Path) -> Vec<f32> {
-    let decoded = dk_media::decode_file(path, RATE as u32).unwrap();
+    let decoded = dawkey_media::decode_file(path, RATE as u32).unwrap();
     decoded.audio.channel(0).to_vec()
 }
 
@@ -150,7 +150,7 @@ async fn punch_records_only_inside_the_range() {
     assert_eq!(clips[0]["start"], 12_000);
     assert_eq!(clips[0]["length"], 12_000);
     let path = source_path(&state, &clips[0]["source"]);
-    let decoded = dk_media::decode_file(&path, RATE as u32).unwrap();
+    let decoded = dawkey_media::decode_file(&path, RATE as u32).unwrap();
     assert_eq!(decoded.audio.channel_count(), 2);
     assert_eq!(decoded.audio.channel(0), &signal(RATE)[12_000..24_000]);
     dawkey.shutdown().await.unwrap();

@@ -45,25 +45,25 @@ cargo test --test pipewire -- --ignored --test-threads 1
 
 The rules that matter most:
 
-- **Every change to a project is a `dk_core::Command`.** The window, MCP and tests all go through `Session::execute`; nothing changes `Project` directly. A new command is an argument struct in `crates/dk-core/src/command.rs` (deriving `Serialize, Deserialize, JsonSchema`, with `#[serde(deny_unknown_fields)]`), a `lower` method that validates it and returns `Edit`s, and an entry in the `commands!` list. It then becomes an MCP tool automatically, and its doc comment becomes the tool's description, so write it for a model reading the tool list.
+- **Every change to a project is a `dawkey_core::Command`.** The window, MCP and tests all go through `Session::execute`; nothing changes `Project` directly. A new command is an argument struct in `crates/dawkey-core/src/command.rs` (deriving `Serialize, Deserialize, JsonSchema`, with `#[serde(deny_unknown_fields)]`), a `lower` method that validates it and returns `Edit`s, and an entry in the `commands!` list. It then becomes an MCP tool automatically, and its doc comment becomes the tool's description, so write it for a model reading the tool list.
 - **Bad tool input is a tool error** with a readable message, not a protocol error, so the client can see what was wrong and try again.
 - **One tool call is one undo step.**
 - **Real-time code never allocates, frees, locks or blocks.** That's `EngineProcessor::process`, everything it calls, and the PipeWire process callback. Debug builds abort on an allocation there (`assert_no_alloc`).
-- **Unsafe code stays in the crates that need it**: `dk-backend-pipewire`, `dk-wayland`, `dk-plugins` and `dk-test-plugins`. Every other crate is `#![forbid(unsafe_code)]`.
+- **Unsafe code stays in the crates that need it**: `dawkey-backend-pipewire`, `dawkey-wayland`, `dawkey-plugins` and `dawkey-test-plugins`. Every other crate is `#![forbid(unsafe_code)]`.
 - **Every source file starts with** `// SPDX-License-Identifier: AGPL-3.0-or-later`.
 - **In `mcp` mode, stdout carries the protocol.** Log through `tracing` (to stderr, filtered by `DAWKEY_LOG`), never `println!`.
 - **Widget IDs are a public interface.** MCP's `ui_*` tools and the tests find widgets by ID. Don't rename them casually, and give new interactive widgets IDs.
-- **Colors come from the palette** (`crates/dk-app/src/theme.rs`). Add a `Palette` field with a dark and a light value instead of a color constant in a view.
+- **Colors come from the palette** (`crates/dawkey-app/src/theme.rs`). Add a `Palette` field with a dark and a light value instead of a color constant in a view.
 
 ## Tests
 
-Most features are tested end to end: `tests/` starts the real `dawkey` binary headless and drives it over MCP with `dk-testkit`'s `Harness`, using the virtual audio clock so the results are the same on every run. New features should come with a test like that. See [docs/MCP.md](docs/MCP.md#testing-over-mcp).
+Most features are tested end to end: `tests/` starts the real `dawkey` binary headless and drives it over MCP with `dawkey-testkit`'s `Harness`, using the virtual audio clock so the results are the same on every run. New features should come with a test like that. See [docs/MCP.md](docs/MCP.md#testing-over-mcp).
 
 Tests never touch the machine they run on:
 
 - no real audio or MIDI devices: feed audio with `advance_clock`'s `input_path` and MIDI with its `midi_input`, and fake devices with `Studio::set_virtual_midi_devices`;
-- no installed plugins: use the tiny plugins in `crates/dk-test-plugins`;
-- no real cache or config folders: `dk-testkit` gives each test process its own.
+- no installed plugins: use the tiny plugins in `crates/dawkey-test-plugins`;
+- no real cache or config folders: `dawkey-testkit` gives each test process its own.
 
 Some tests pin exact output:
 

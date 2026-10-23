@@ -1,0 +1,22 @@
+[package]
+name = "dawkey-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Test harness that drives Dawkey over MCP"
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "dawkey_testkit"
+
+[dependencies]
+anyhow.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "process"] }
+
+[lints]
+workspace = true
