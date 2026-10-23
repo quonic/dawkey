@@ -750,7 +750,9 @@ impl Studio {
     pub fn autosave_file(&self) -> PathBuf {
         let name = dawkey_core::project_file::AUTOSAVE_NAME;
         match self.session.path() {
-            Some(bundle) => bundle.join(dawkey_core::project_file::BACKUP_DIR).join(name),
+            Some(bundle) => bundle
+                .join(dawkey_core::project_file::BACKUP_DIR)
+                .join(name),
             None => self.recording_dir().join(name),
         }
     }

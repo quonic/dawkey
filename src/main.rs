@@ -357,7 +357,9 @@ fn run_gui(args: GuiArgs) -> anyhow::Result<()> {
     let socket = (!args.no_mcp)
         .then(|| socket_dir().map(|dir| dir.join(format!("{}.sock", std::process::id()))))
         .transpose()?;
-    let token_path = (!args.no_mcp).then(dawkey_app::default_token_path).flatten();
+    let token_path = (!args.no_mcp)
+        .then(dawkey_app::default_token_path)
+        .flatten();
     // MCP's clients are served on this runtime's threads.
     let mcp = runtime()?;
     let result = dawkey_wayland::run(app, |handle| {

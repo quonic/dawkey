@@ -413,7 +413,12 @@ fn routing(model: &ViewModel, ui: &UiState, d: &dawkey_studio::PluginDetails) ->
     Some(row)
 }
 
-fn editor(model: &ViewModel, view: &ViewState, ui: &UiState, d: &dawkey_studio::PluginDetails) -> Node {
+fn editor(
+    model: &ViewModel,
+    view: &ViewState,
+    ui: &UiState,
+    d: &dawkey_studio::PluginDetails,
+) -> Node {
     let id = d.plugin;
     let subtitle = match (&d.error, d.vendor.is_empty()) {
         (Some(e), _) => format!("Not running: {e}"),

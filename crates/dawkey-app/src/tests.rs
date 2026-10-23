@@ -229,7 +229,10 @@ fn dragging_a_clip_moves_it_in_one_undo_step() {
     .unwrap();
     assert_eq!(clip_start_s(&app, clip), 3.0);
     assert_eq!(app.studio.session().undo_label(), Some("move_clip"));
-    assert_eq!(app.view_state().selected_clip, Some(dawkey_core::ClipId(clip)));
+    assert_eq!(
+        app.view_state().selected_clip,
+        Some(dawkey_core::ClipId(clip))
+    );
 
     // Shift disables snapping.
     let shift = Modifiers {
@@ -259,7 +262,10 @@ fn dragging_a_clip_to_another_lane_changes_track() {
     )
     .unwrap();
     let project = app.studio.session().project();
-    assert_eq!(project.clip(dawkey_core::ClipId(clip)).unwrap().0.id.0, track_b);
+    assert_eq!(
+        project.clip(dawkey_core::ClipId(clip)).unwrap().0.id.0,
+        track_b
+    );
 }
 
 #[test]
@@ -1500,7 +1506,10 @@ fn plugins_from_the_mixer() {
     // Automate: a lane at the playhead, shown in the arrange view.
     click(&mut app, &format!("plugin/{slot}/param/1/automate")).unwrap();
     assert_eq!(app.studio.session().project().tracks[0].automation.len(), 1);
-    assert_eq!(app.view_state().automation_shown, [dawkey_core::TrackId(track)]);
+    assert_eq!(
+        app.view_state().automation_shown,
+        [dawkey_core::TrackId(track)]
+    );
 
     click(&mut app, &format!("plugin/{slot}/remove")).unwrap();
     assert!(app.studio.session().project().tracks[0].plugins.is_empty());

@@ -427,7 +427,10 @@ fn a_busy_plugin_is_waited_for_not_killed() {
     let text = loaded
         .instance
         .param_text(info, 0, dawkey_test_plugins::STALL_DB);
-    assert_eq!(text, Some(info.params[0].text(dawkey_test_plugins::STALL_DB)));
+    assert_eq!(
+        text,
+        Some(info.params[0].text(dawkey_test_plugins::STALL_DB))
+    );
     let waited = started.elapsed();
     assert!(waited < Duration::from_secs(3), "{waited:?}");
     assert_eq!(loaded.instance.crashed(), None);

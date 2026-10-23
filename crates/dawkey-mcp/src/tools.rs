@@ -726,7 +726,12 @@ fn tool<T: JsonSchema>(
     description: &str,
     annotations: ToolAnnotations,
 ) -> Tool {
-    make_tool(name, description, dawkey_core::args_schema::<T>(), annotations)
+    make_tool(
+        name,
+        description,
+        dawkey_core::args_schema::<T>(),
+        annotations,
+    )
 }
 
 /// Builds a tool from its argument schema. An empty `description` means "use

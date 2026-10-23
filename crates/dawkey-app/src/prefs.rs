@@ -160,7 +160,11 @@ impl Preferences {
 
     /// Where to look for plugins: the standard folders and the user's.
     pub fn plugin_search(&self) -> dawkey_studio::SearchPath {
-        dawkey_studio::SearchPath::with_extra(&self.clap_folders, &self.lv2_folders, &self.vst3_folders)
+        dawkey_studio::SearchPath::with_extra(
+            &self.clap_folders,
+            &self.lv2_folders,
+            &self.vst3_folders,
+        )
     }
 
     pub(crate) fn folders_mut(&mut self, kind: PluginKind) -> &mut Vec<PathBuf> {

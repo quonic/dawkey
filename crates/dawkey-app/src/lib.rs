@@ -730,11 +730,12 @@ impl App {
         let tempo = project.tempo_map();
         // Faders and pan show what their automation has at the playhead.
         let now = project.seconds_to_frames(status.transport.position_s);
-        let automated = |t: &dawkey_core::Track, target: dawkey_core::AutomationTarget, fixed: f32| {
-            t.lane(&target)
-                .and_then(|l| l.value_at(now))
-                .map_or(fixed, |v| v as f32)
-        };
+        let automated =
+            |t: &dawkey_core::Track, target: dawkey_core::AutomationTarget, fixed: f32| {
+                t.lane(&target)
+                    .and_then(|l| l.value_at(now))
+                    .map_or(fixed, |v| v as f32)
+            };
         let track_view = |t: &dawkey_core::Track| TrackView {
             id: t.id,
             name: t.name.clone(),

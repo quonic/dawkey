@@ -286,7 +286,10 @@ pub(crate) fn format_param(value: f64) -> String {
 }
 
 /// A MIDI clip's notes for the view.
-pub(crate) fn note_views(project: &dawkey_core::Project, clip: &dawkey_core::Clip) -> Vec<NoteView> {
+pub(crate) fn note_views(
+    project: &dawkey_core::Project,
+    clip: &dawkey_core::Clip,
+) -> Vec<NoteView> {
     let tempo = project.tempo_map();
     clip.notes()
         .iter()

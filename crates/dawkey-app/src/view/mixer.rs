@@ -3,7 +3,9 @@
 //! fader, meter, mute/solo), and the master's (plugins, fader, meter).
 
 use dawkey_core::{GAIN_DB_MAX, GAIN_DB_MIN};
-use dawkey_ui::{Align, FontFamily, FontWeight, Insets, Node, Rect, Role, Sizing, TextAlign, UiState};
+use dawkey_ui::{
+    Align, FontFamily, FontWeight, Insets, Node, Rect, Role, Sizing, TextAlign, UiState,
+};
 
 use super::{TrackView, ViewModel, button, meter, track_buttons};
 use crate::state::{FADER_H, PAN_W};
