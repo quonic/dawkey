@@ -21,9 +21,9 @@ const SANS: &str = "Noto Sans";
 const MONO: &str = "Noto Sans Mono";
 
 static FONTS: &[&[u8]] = &[
-    include_bytes!("../../../assets/fonts/NotoSans-Regular.ttf"),
-    include_bytes!("../../../assets/fonts/NotoSans-SemiBold.ttf"),
-    include_bytes!("../../../assets/fonts/NotoSansMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/NotoSans-Regular.ttf"),
+    include_bytes!("../assets/fonts/NotoSans-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/NotoSansMono-Regular.ttf"),
 ];
 
 /// Line height as a multiple of the font size.

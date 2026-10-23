@@ -25,7 +25,7 @@ A DAW for the Linux desktop, written in Rust. Wayland only, PipeWire/WirePlumber
 - `crates/dk-backend-pipewire`: `pw_filter` node (raw FFI: audio ports, `midi_in`, and a pool of MIDI device ports, `midi_in_N`/`midi_out_N`, made before connecting and assigned to devices by `MidiPorts`; `pw_filter` can't add ports safely while running) plus a router that links it to WirePlumber's default sink and source, and to MIDI devices
 - `crates/dk-studio`: `Studio`, a running instance (session + decoded media + plugins + engine + backend)
 - `crates/dk-ui`: widget tree with stable IDs, flex layout, input routing, `Scene` display list, accessibility tree
-- `crates/dk-text`: cosmic-text with the embedded Noto fonts (`assets/fonts`, OFL); never system fonts
+- `crates/dk-text`: cosmic-text with the embedded Noto fonts (`crates/dk-text/assets/fonts`, OFL); never system fonts
 - `crates/dk-render`: wgpu (Vulkan) renderer for scenes: window surface or offscreen image
 - `crates/dk-app`: `App` (studio + UI + renderer) shared by GUI and MCP; the main window's views (arrange, mixer, piano roll), dialogs (export, preferences, recovery) and click actions; `Preferences` (`prefs.rs`), the MCP token and the `McpHttpServer` the preferences drive (`mcp_http.rs`), and the dark and light palettes (`theme.rs`)
 - `crates/dk-wayland`: the Wayland window (SCTK plumbing, our own decorations, fractional scale, cursor shapes)
