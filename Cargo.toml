@@ -67,21 +67,21 @@ repository = "https://github.com/quonic/dawkey.git"
 license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
-dk-app = { path = "crates/dk-app" }
-dk-backend-pipewire = { path = "crates/dk-backend-pipewire" }
-dk-core = { path = "crates/dk-core" }
-dk-dsp = { path = "crates/dk-dsp" }
-dk-engine = { path = "crates/dk-engine" }
-dk-mcp = { path = "crates/dk-mcp" }
-dk-media = { path = "crates/dk-media" }
-dk-plugins = { path = "crates/dk-plugins" }
-dk-render = { path = "crates/dk-render" }
-dk-studio = { path = "crates/dk-studio" }
+dk-app = { version = "0.1.0", path = "crates/dk-app" }
+dk-backend-pipewire = { version = "0.1.0", path = "crates/dk-backend-pipewire" }
+dk-core = { version = "0.1.0", path = "crates/dk-core" }
+dk-dsp = { version = "0.1.0", path = "crates/dk-dsp" }
+dk-engine = { version = "0.1.0", path = "crates/dk-engine" }
+dk-mcp = { version = "0.1.0", path = "crates/dk-mcp" }
+dk-media = { version = "0.1.0", path = "crates/dk-media" }
+dk-plugins = { version = "0.1.0", path = "crates/dk-plugins" }
+dk-render = { version = "0.1.0", path = "crates/dk-render" }
+dk-studio = { version = "0.1.0", path = "crates/dk-studio" }
 dk-test-plugins = { path = "crates/dk-test-plugins" }
 dk-testkit = { path = "crates/dk-testkit" }
-dk-text = { path = "crates/dk-text" }
-dk-ui = { path = "crates/dk-ui" }
-dk-wayland = { path = "crates/dk-wayland" }
+dk-text = { version = "0.1.0", path = "crates/dk-text" }
+dk-ui = { version = "0.1.0", path = "crates/dk-ui" }
+dk-wayland = { version = "0.1.0", path = "crates/dk-wayland" }
 
 anyhow = "1"
 ashpd = { version = "0.13.13", features = ["file_chooser", "settings"] }
