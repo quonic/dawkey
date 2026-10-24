@@ -1369,6 +1369,12 @@ impl Studio {
         Ok(())
     }
 
+    /// How many audio cycles the engine has run. A transport command has
+    /// been applied once this has grown by two.
+    pub fn engine_cycles(&self) -> u64 {
+        self.engine.transport().cycles
+    }
+
     pub fn transport(&self) -> TransportState {
         let t = self.engine.transport();
         TransportState {

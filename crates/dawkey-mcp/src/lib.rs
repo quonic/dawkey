@@ -246,24 +246,41 @@ impl DawkeyMcp {
             }
             PLAY => {
                 let NoArgs {} = try_args!(parse(args));
-                run(studio, |s| s.play().map(|()| to_json(&s.transport()))).await
+                let cycles = tool_try!(run(studio, |s| s.play().map(|()| s.engine_cycles())).await);
+                self.transport_after(cycles, |t| t.playing)
+                    .await
+                    .map(|t| to_json(&t))
             }
             STOP => {
                 let NoArgs {} = try_args!(parse(args));
-                run(studio, |s| {
-                    let was_recording = s.transport().recording;
-                    s.stop()?;
-                    let mut result = to_json(&s.transport());
-                    if was_recording {
-                        result["recorded"] = to_json(&s.engine_status().last_recording);
-                    }
-                    Ok::<_, dawkey_studio::StudioError>(result)
-                })
-                .await
+                let (was_recording, cycles) = tool_try!(
+                    run(studio, |s| {
+                        let was_recording = s.transport().recording;
+                        s.stop()?;
+                        Ok::<_, dawkey_studio::StudioError>((was_recording, s.engine_cycles()))
+                    })
+                    .await
+                );
+                let transport = tool_try!(self.transport_after(cycles, |t| !t.playing).await);
+                let mut result = to_json(&transport);
+                if was_recording {
+                    let recorded = tool_try!(
+                        run(studio, |s| Ok::<_, String>(
+                            s.engine_status().last_recording
+                        ))
+                        .await
+                    );
+                    result["recorded"] = to_json(&recorded);
+                }
+                Ok(result)
             }
             RECORD => {
                 let NoArgs {} = try_args!(parse(args));
-                run(studio, |s| s.record().map(|()| to_json(&s.transport()))).await
+                let cycles =
+                    tool_try!(run(studio, |s| s.record().map(|()| s.engine_cycles())).await);
+                self.transport_after(cycles, |t| t.recording)
+                    .await
+                    .map(|t| to_json(&t))
             }
             SET_RECORD_OFFSET => {
                 let SetRecordOffset { ms } = try_args!(parse(args));
@@ -278,10 +295,18 @@ impl DawkeyMcp {
             }
             LOCATE => {
                 let Locate { position_s } = try_args!(parse(args));
-                run(studio, move |s| {
-                    s.locate(position_s).map(|()| to_json(&s.transport()))
-                })
-                .await
+                let (cycles, frame) = tool_try!(
+                    run(studio, move |s| {
+                        s.locate(position_s)?;
+                        let frame = s.session().project().seconds_to_frames(position_s);
+                        Ok::<_, dawkey_studio::StudioError>((s.engine_cycles(), frame))
+                    })
+                    .await
+                );
+                // While playing the playhead moves on from there.
+                self.transport_after(cycles, move |t| t.position_frames >= frame)
+                    .await
+                    .map(|t| to_json(&t))
             }
             GET_ENGINE_STATUS => {
                 let NoArgs {} = try_args!(parse(args));
@@ -579,6 +604,33 @@ impl DawkeyMcp {
             }
         };
         Ok(result)
+    }
+
+    /// The transport state once the audio thread has applied a command sent
+    /// when the engine had run `cycles` cycles: when `done` says so, or the
+    /// engine has run two more cycles since (so the command was consumed),
+    /// or after a short wait (a stopped audio device). The virtual backend
+    /// applies commands at once, so this returns right away there.
+    async fn transport_after(
+        &self,
+        cycles: u64,
+        done: impl Fn(&dawkey_studio::TransportState) -> bool + Send + Sync + 'static,
+    ) -> Result<dawkey_studio::TransportState, String> {
+        let done = Arc::new(done);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            let done = done.clone();
+            let (transport, settled) = run(&self.app, move |s| {
+                let transport = s.transport();
+                let settled = done(&transport) || s.engine_cycles() >= cycles + 2;
+                Ok::<_, String>((transport, settled))
+            })
+            .await?;
+            if settled || tokio::time::Instant::now() >= deadline {
+                return Ok(transport);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 
     async fn import_audio(&self, args: ImportAudio) -> Result<Value, String> {
