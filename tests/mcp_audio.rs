@@ -478,6 +478,44 @@ async fn exports_the_song_to_wav_and_flac() {
         (44_100, 88_200)
     );
 
+    // Ogg Vorbis and Opus, from the extension, with tags.
+    let ogg = dir.path().join("song.ogg");
+    let exported = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": ogg, "quality": 7, "tags": { "artist": "Me" } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exported["format"], "ogg");
+    assert_eq!(exported["analysis"]["frames"], 72_000);
+    let decoded = dawkey_media::decode_file(&ogg, 48_000).unwrap().audio;
+    assert_eq!(decoded.frames(), 72_000);
+    let opus = dir.path().join("song.opus");
+    let exported = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": opus, "bitrate_kbps": 96, "sample_rate": 44_100 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exported["format"], "opus");
+    assert_eq!(
+        exported["sample_rate"], 44_100,
+        "what the header says the source was"
+    );
+    assert!(std::fs::read(&opus).unwrap().starts_with(b"OggS"));
+    for (args, expected) in [
+        (json!({ "path": ogg, "quality": 12 }), "quality is 0 to 10"),
+        (
+            json!({ "path": opus, "bitrate_kbps": 1000 }),
+            "bitrate_kbps",
+        ),
+    ] {
+        let err = dawkey.call_err("export_audio", args).await.unwrap();
+        assert!(err.contains(expected), "{err}");
+    }
+
     // Bad requests are tool errors.
     for (args, expected) in [
         (json!({ "path": dir.path().join("x.mp3") }), "give a format"),

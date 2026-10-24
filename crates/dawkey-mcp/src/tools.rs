@@ -524,10 +524,12 @@ pub(crate) struct SegmentRange {
 }
 
 /// Export the mix, or part of it, to an audio file, rendered offline: WAV
-/// (16 or 24-bit, or 32-bit float) or FLAC (16 or 24-bit). By default the
-/// whole song, from the start to where the last clip ends, in 24-bit at the
-/// project's sample rate. Reports the levels and loudness of what was
-/// written. Whole-number samples are dithered. `tracks` exports only those
+/// (16 or 24-bit, or 32-bit float), FLAC (16 or 24-bit), Ogg Vorbis
+/// (`quality`, 0 to 10) or Opus (`bitrate_kbps`; always 48 kHz; games loop
+/// both without a gap). By default the whole song, from the start to where
+/// the last clip ends, in 24-bit at the project's sample rate. Reports the
+/// levels and loudness of what was written (before encoding). Whole-number
+/// samples are dithered. `tracks` exports only those
 /// tracks (as soloing them would); `stems: true` writes a file per track
 /// beside `path` (`<name>-<track id>-<track name>.<ext>`), listed under
 /// `stems`. `segment_length_s` (or `_beats`), `segment_bars` or `segments`
@@ -537,14 +539,27 @@ pub(crate) struct SegmentRange {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExportAudio {
-    /// Where to write it. Its extension (.wav or .flac) picks the format
-    /// unless `format` does.
+    /// Where to write it. Its extension (.wav, .flac, .ogg or .opus) picks
+    /// the format unless `format` does.
     pub(crate) path: PathBuf,
     #[serde(default)]
     pub(crate) format: Option<ExportFormat>,
-    /// 16, 24 or 32 (32-bit float, WAV only). Default 24.
+    /// 16, 24 or 32 (32-bit float, WAV only). Default 24. Ignored by the
+    /// lossy formats.
     #[serde(default)]
     pub(crate) bit_depth: Option<u32>,
+    /// Ogg Vorbis quality, 0 to 10 (oggenc's scale; 5 is about 160 kbit/s
+    /// for stereo). Default 5.
+    #[serde(default)]
+    pub(crate) quality: Option<f32>,
+    /// Opus bitrate in kbit/s, 6 to 510. Default 128.
+    #[serde(default)]
+    pub(crate) bitrate_kbps: Option<u32>,
+    /// Tags for Ogg Vorbis and Opus files (Vorbis comments): e.g. `title`,
+    /// `artist`, `album`, `date`, `comment`. Default: the project's name as
+    /// the title.
+    #[serde(default)]
+    pub(crate) tags: Option<std::collections::BTreeMap<String, String>>,
     /// The file's sample rate in Hz; the mix is converted to it. Default:
     /// the project's.
     #[serde(default)]
@@ -592,6 +607,10 @@ pub(crate) struct ExportAudio {
 pub(crate) enum ExportFormat {
     Wav,
     Flac,
+    /// Ogg Vorbis (lossy; `quality`).
+    Ogg,
+    /// Ogg Opus (lossy; `bitrate_kbps`; always 48 kHz).
+    Opus,
 }
 
 /// Mouse button for synthetic clicks.

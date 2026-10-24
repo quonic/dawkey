@@ -2540,6 +2540,31 @@ fn exporting_the_mix() {
     click(&mut app, "export/bits").unwrap();
     // FLAC has no float samples: 24 goes round to 16.
     assert_eq!(app.view_state().export.sample, SampleFormat::Int16);
+    // The lossy formats: the samples row is their quality.
+    click(&mut app, "export/format").unwrap();
+    assert_eq!(
+        value(&mut app, "export/format").as_deref(),
+        Some("Ogg Vorbis")
+    );
+    assert_eq!(value(&mut app, "export/bits").as_deref(), Some("q 5"));
+    click(&mut app, "export/bits").unwrap();
+    assert_eq!(app.view_state().export.quality, 6.0);
+    click(&mut app, "export/format").unwrap();
+    assert_eq!(value(&mut app, "export/format").as_deref(), Some("Opus"));
+    assert_eq!(
+        value(&mut app, "export/bits").as_deref(),
+        Some("128 kbit/s")
+    );
+    click(&mut app, "export/bits").unwrap();
+    assert_eq!(app.view_state().export.bitrate_kbps, 160);
+    assert_eq!(
+        value(&mut app, "export/rate").as_deref(),
+        Some("48 kHz (Opus)")
+    );
+    // Back round to WAV, then FLAC as before.
+    click(&mut app, "export/format").unwrap();
+    click(&mut app, "export/format").unwrap();
+    assert_eq!(value(&mut app, "export/format").as_deref(), Some("FLAC"));
     click(&mut app, "export/rate").unwrap();
     assert_eq!(app.view_state().export.sample_rate, Some(44_100));
     // No loop range: the range stays the song.

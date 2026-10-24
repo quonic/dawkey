@@ -15,10 +15,12 @@ ebur128.workspace = true
 flacenc.workspace = true
 hound.workspace = true
 midly.workspace = true
+opus-pure.workspace = true
 rubato.workspace = true
 serde.workspace = true
 symphonia.workspace = true
 thiserror.workspace = true
+vorbis_rs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

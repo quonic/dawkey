@@ -102,9 +102,10 @@ of the project offline and reports levels, loudness and band levels, so you
 can check a mix without listening: `tracks` hears only some tracks (as
 soloing would), `stems: true` renders each track on its own, and
 segment_length_s / segment_bars / segments analyze it over time.
-export_audio writes the mix (the whole song by default) to a WAV or FLAC
-file, or stems with `stems: true`, or a seamless loop with `loop: true`
-(the tail folded onto the start). get_engine_status says whether this instance plays
+export_audio writes the mix (the whole song by default) to a WAV, FLAC,
+Ogg Vorbis (`quality`) or Opus (`bitrate_kbps`) file (with `tags`), or
+stems with `stems: true`, or a seamless loop with `loop: true` (the tail
+folded onto the start). get_engine_status says whether this instance plays
 through PipeWire or runs a virtual clock (advanced with advance_clock).
 
 MIDI: MIDI tracks (add_track with kind `midi`) play their clips through a
@@ -1104,6 +1105,9 @@ impl DawkeyMcp {
             path,
             format,
             bit_depth,
+            quality,
+            bitrate_kbps,
+            tags,
             sample_rate,
             start_s,
             end_s,
@@ -1119,9 +1123,11 @@ impl DawkeyMcp {
         let file = match format {
             Some(ExportFormat::Wav) => dawkey_media::FileFormat::Wav,
             Some(ExportFormat::Flac) => dawkey_media::FileFormat::Flac,
+            Some(ExportFormat::Ogg) => dawkey_media::FileFormat::Ogg,
+            Some(ExportFormat::Opus) => dawkey_media::FileFormat::Opus,
             None => dawkey_media::FileFormat::from_path(&path).ok_or_else(|| {
                 format!(
-                    "{} doesn't end in .wav or .flac; give a format",
+                    "{} doesn't end in .wav, .flac, .ogg or .opus; give a format",
                     path.display()
                 )
             })?,
@@ -1155,10 +1161,19 @@ impl DawkeyMcp {
                 }
                 None => project.frames_to_seconds(project.end()),
             };
+            let tags = match tags {
+                Some(tags) => tags.into_iter().collect(),
+                None => vec![("TITLE".to_owned(), project.name.clone())],
+            };
             let spec = dawkey_media::ExportSpec {
-                file,
-                sample,
-                sample_rate: sample_rate.unwrap_or(project.sample_rate),
+                quality: quality.unwrap_or(dawkey_media::DEFAULT_VORBIS_QUALITY),
+                bitrate_kbps: bitrate_kbps.unwrap_or(dawkey_media::DEFAULT_OPUS_KBPS),
+                tags,
+                ..dawkey_media::ExportSpec::new(
+                    file,
+                    sample,
+                    sample_rate.unwrap_or(project.sample_rate),
+                )
             };
             spec.check()?;
             Ok::<_, String>((spec, end_s))
@@ -1191,6 +1206,7 @@ impl DawkeyMcp {
                 .collect();
             let absolute = plan.segments.clone();
             let solo = solo.clone();
+            let spec = spec.clone();
             let (result, leftovers) = if wrap {
                 // The range and its tail in memory, the tail folded onto
                 // the start.

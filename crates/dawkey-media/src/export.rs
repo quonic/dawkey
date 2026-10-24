@@ -28,6 +28,10 @@ const RESAMPLE_CHUNK: usize = 1024;
 pub enum FileFormat {
     Wav,
     Flac,
+    /// Ogg Vorbis (lossy, `quality`).
+    Ogg,
+    /// Ogg Opus (lossy, `bitrate_kbps`; always 48 kHz).
+    Opus,
 }
 
 impl FileFormat {
@@ -37,6 +41,8 @@ impl FileFormat {
         match ext.as_str() {
             "wav" | "wave" => Some(Self::Wav),
             "flac" => Some(Self::Flac),
+            "ogg" | "oga" => Some(Self::Ogg),
+            "opus" => Some(Self::Opus),
             _ => None,
         }
     }
@@ -45,7 +51,15 @@ impl FileFormat {
         match self {
             Self::Wav => "wav",
             Self::Flac => "flac",
+            Self::Ogg => "ogg",
+            Self::Opus => "opus",
         }
+    }
+
+    /// Whether the format stores the samples as given (no, for Vorbis and
+    /// Opus, which have a quality setting instead of a sample format).
+    pub fn lossless(self) -> bool {
+        matches!(self, Self::Wav | Self::Flac)
     }
 }
 
@@ -72,16 +86,45 @@ impl SampleFormat {
     }
 }
 
+/// Ogg Vorbis quality by default, on oggenc's 0 to 10 scale.
+pub const DEFAULT_VORBIS_QUALITY: f32 = 5.0;
+/// Opus bitrate by default, in kbit/s.
+pub const DEFAULT_OPUS_KBPS: u32 = 128;
+/// Opus files are always at this rate.
+pub const OPUS_RATE: u32 = 48_000;
+
 /// What an export writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExportSpec {
     pub file: FileFormat,
+    /// For WAV and FLAC; lossy formats take floats and ignore it.
     pub sample: SampleFormat,
-    /// The file's sample rate; the audio is converted to it.
+    /// The file's sample rate; the audio is converted to it. Opus files are
+    /// always 48 kHz (see [`file_rate`](Self::file_rate)).
     pub sample_rate: u32,
+    /// Ogg Vorbis: the quality, 0 to 10 (oggenc's scale; about 64 to 500
+    /// kbit/s for stereo).
+    pub quality: f32,
+    /// Opus: the bitrate in kbit/s, 6 to 510.
+    pub bitrate_kbps: u32,
+    /// Tags for formats that carry them (Vorbis comments): `TITLE`, `ARTIST`,
+    /// `ALBUM`, ...; names are stored upper case.
+    pub tags: Vec<(String, String)>,
 }
 
 impl ExportSpec {
+    /// A spec with the default quality, bitrate and no tags.
+    pub fn new(file: FileFormat, sample: SampleFormat, sample_rate: u32) -> Self {
+        Self {
+            file,
+            sample,
+            sample_rate,
+            quality: DEFAULT_VORBIS_QUALITY,
+            bitrate_kbps: DEFAULT_OPUS_KBPS,
+            tags: Vec::new(),
+        }
+    }
+
     /// An error if the file format can't store these samples.
     pub fn check(&self) -> Result<(), String> {
         if self.file == FileFormat::Flac && self.sample == SampleFormat::Float32 {
@@ -93,7 +136,32 @@ impl ExportSpec {
                 self.sample_rate
             ));
         }
+        if self.file == FileFormat::Ogg && self.sample_rate > 192_000 {
+            return Err("Ogg Vorbis stores up to 192000 Hz".into());
+        }
+        if !(0.0..=10.0).contains(&self.quality) {
+            return Err(format!("quality is 0 to 10, not {}", self.quality));
+        }
+        if !(6..=510).contains(&self.bitrate_kbps) {
+            return Err(format!(
+                "bitrate_kbps is 6 to 510, not {}",
+                self.bitrate_kbps
+            ));
+        }
+        for (name, _) in &self.tags {
+            if name.is_empty() || name.chars().any(|c| c == '=' || !(' '..='}').contains(&c)) {
+                return Err(format!("{name:?} isn't a tag name (letters, no '=')"));
+            }
+        }
         Ok(())
+    }
+
+    /// The rate the file is at: `sample_rate`, except Opus is always 48 kHz.
+    pub fn file_rate(&self) -> u32 {
+        match self.file {
+            FileFormat::Opus => OPUS_RATE,
+            _ => self.sample_rate,
+        }
     }
 }
 
@@ -183,14 +251,16 @@ pub fn export_segmented(
     let frames_at_file_rate: Vec<(usize, usize)> = segments
         .iter()
         .map(|&(start, end)| {
-            let frame = |s: f64| (s.max(0.0) * f64::from(spec.sample_rate)).round() as usize;
+            let frame = |s: f64| (s.max(0.0) * f64::from(spec.file_rate())).round() as usize;
             (frame(start), frame(end))
         })
         .collect();
-    pipeline.segments = SegmentAnalyzers::new(2, spec.sample_rate, &frames_at_file_rate);
+    pipeline.segments = SegmentAnalyzers::new(2, spec.file_rate(), &frames_at_file_rate);
     let result = match spec.file {
         FileFormat::Wav => write_wav(pipeline, spec, &partial),
         FileFormat::Flac => write_flac(pipeline, spec, &partial),
+        FileFormat::Ogg => write_vorbis(pipeline, spec, &partial),
+        FileFormat::Opus => write_opus(pipeline, spec, &partial),
     };
     let result = result.and_then(|analysis| {
         std::fs::rename(&partial, path).map_err(|source| MediaError::Io {
@@ -247,8 +317,8 @@ impl<'a> Pipeline<'a> {
         path: &Path,
         progress: &'a ExportProgress,
     ) -> Result<Self, MediaError> {
-        let resampler = (source_rate != spec.sample_rate)
-            .then(|| StreamResampler::new(source_rate, spec.sample_rate))
+        let resampler = (source_rate != spec.file_rate())
+            .then(|| StreamResampler::new(source_rate, spec.file_rate()))
             .transpose()
             .map_err(|reason| MediaError::Unsupported {
                 path: path.to_owned(),
@@ -262,8 +332,8 @@ impl<'a> Pipeline<'a> {
             queue: [VecDeque::new(), VecDeque::new()],
             scratch: [vec![0.0; BLOCK], vec![0.0; BLOCK]],
             ended: false,
-            analyzer: Analyzer::new(2, spec.sample_rate),
-            segments: SegmentAnalyzers::new(2, spec.sample_rate, &[]),
+            analyzer: Analyzer::new(2, spec.file_rate()),
+            segments: SegmentAnalyzers::new(2, spec.file_rate(), &[]),
         })
     }
 
@@ -605,6 +675,155 @@ fn fix_min_block_size(bytes: &mut [u8]) {
     }
 }
 
+/// Ogg Vorbis, at `spec.quality` on the 0 to 10 scale, with the tags as
+/// Vorbis comments.
+fn write_vorbis(
+    mut pipeline: Pipeline,
+    spec: &ExportSpec,
+    path: &Path,
+) -> Result<ExportAnalysis, MediaError> {
+    use std::num::{NonZeroU8, NonZeroU32};
+
+    use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
+
+    let encode_err = |e: vorbis_rs::VorbisError| MediaError::Encode {
+        path: path.to_owned(),
+        reason: e.to_string(),
+    };
+    let file = std::fs::File::create(path).map_err(|source| MediaError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    let rate = NonZeroU32::new(spec.sample_rate).expect("checked");
+    let channels = NonZeroU8::new(2).expect("two");
+    let mut builder = VorbisEncoderBuilder::new(rate, channels, std::io::BufWriter::new(file))
+        .map_err(encode_err)?;
+    // oggenc's -q 0..10 is libvorbis's 0..1 (its -0.2 to 0 is below q 0).
+    builder.bitrate_management_strategy(VorbisBitrateManagementStrategy::QualityVbr {
+        target_quality: (spec.quality / 10.0).clamp(0.0, 1.0),
+    });
+    for (name, value) in &spec.tags {
+        builder
+            .comment_tag(name.to_ascii_uppercase(), value.clone())
+            .map_err(encode_err)?;
+    }
+    let mut encoder = builder.build().map_err(encode_err)?;
+    let (mut left, mut right) = (Vec::new(), Vec::new());
+    loop {
+        pipeline.pull(BLOCK, &mut left, &mut right)?;
+        if left.is_empty() {
+            break;
+        }
+        encoder
+            .encode_audio_block([&left, &right])
+            .map_err(encode_err)?;
+    }
+    let mut out = encoder.finish().map_err(encode_err)?;
+    std::io::Write::flush(&mut out).map_err(|source| MediaError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    Ok(pipeline.finish())
+}
+
+/// Ogg Opus at `spec.bitrate_kbps`, 48 kHz, 20 ms packets, with the tags.
+/// The file plays back exactly as many frames as went in: the encoder's
+/// delay is skipped (pre-skip) and the last packet is trimmed.
+fn write_opus(
+    mut pipeline: Pipeline,
+    spec: &ExportSpec,
+    path: &Path,
+) -> Result<ExportAnalysis, MediaError> {
+    use opus_pure::{
+        Application, MAX_PACKET_BYTES, OggOpusWriter, OpusEncoder, OpusHead, OpusTags,
+    };
+
+    /// Frames per packet: 20 ms at 48 kHz.
+    const FRAME: usize = 960;
+
+    let encode_err = |e: opus_pure::Error| MediaError::Encode {
+        path: path.to_owned(),
+        reason: e.to_string(),
+    };
+    let io_err = |source| MediaError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    let mut encoder =
+        OpusEncoder::new(OPUS_RATE as i32, 2, Application::Audio).map_err(encode_err)?;
+    encoder.bitrate_bps = (spec.bitrate_kbps * 1000) as i32;
+    let head = OpusHead::for_encoder(&encoder, spec.sample_rate);
+    let pre_skip = usize::from(head.pre_skip);
+    let mut tags = OpusTags::new();
+    for (name, value) in &spec.tags {
+        tags.push(&name.to_ascii_uppercase(), value)
+            .map_err(encode_err)?;
+    }
+    let file = std::fs::File::create(path).map_err(io_err)?;
+    let mut writer =
+        OggOpusWriter::with_tags(std::io::BufWriter::new(file), head, tags).map_err(encode_err)?;
+
+    // Frames go in 960 at a time; the encoder's delay comes out as pre-skip
+    // at the start, so that much silence goes in at the end to push the
+    // last of the audio out, and the final packet's granule is cut to what
+    // was really there.
+    let (mut left, mut right) = (Vec::new(), Vec::new());
+    let mut interleaved = vec![0.0f32; FRAME * 2];
+    let mut packet = vec![0u8; MAX_PACKET_BYTES];
+    let mut pending: (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
+    let mut frames_in = 0usize;
+    let mut ended = false;
+    let mut encode = |l: &[f32], r: &[f32], real: usize, writer: &mut OggOpusWriter<_>| {
+        for (i, (&a, &b)) in l.iter().zip(r).enumerate() {
+            interleaved[2 * i] = a;
+            interleaved[2 * i + 1] = b;
+        }
+        let n = encoder
+            .encode(&interleaved, FRAME, &mut packet)
+            .map_err(encode_err)?;
+        if real < FRAME {
+            writer
+                .write_packet_with_duration(&packet[..n], real as u32)
+                .map_err(encode_err)
+        } else {
+            writer.write_packet(&packet[..n]).map_err(encode_err)
+        }
+    };
+    loop {
+        if !ended {
+            pipeline.pull(BLOCK, &mut left, &mut right)?;
+            if left.is_empty() {
+                ended = true;
+                // The delay's worth of silence flushes the audio.
+                left.resize(pre_skip, 0.0);
+                right.resize(pre_skip, 0.0);
+            } else {
+                frames_in += left.len();
+            }
+            pending.0.extend_from_slice(&left);
+            pending.1.extend_from_slice(&right);
+        }
+        while pending.0.len() >= FRAME {
+            let l: Vec<f32> = pending.0.drain(..FRAME).collect();
+            let r: Vec<f32> = pending.1.drain(..FRAME).collect();
+            encode(&l, &r, FRAME, &mut writer)?;
+        }
+        if ended {
+            break;
+        }
+    }
+    if !pending.0.is_empty() || frames_in == 0 {
+        // The rest, padded to a packet; its granule says how much was real.
+        let real = pending.0.len();
+        pending.0.resize(FRAME, 0.0);
+        pending.1.resize(FRAME, 0.0);
+        encode(&pending.0, &pending.1, real, &mut writer)?;
+    }
+    let mut out = writer.finish().map_err(encode_err)?;
+    std::io::Write::flush(&mut out).map_err(io_err)?;
+    Ok(pipeline.finish())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,11 +849,78 @@ mod tests {
     }
 
     fn spec(file: FileFormat, sample: SampleFormat, sample_rate: u32) -> ExportSpec {
-        ExportSpec {
-            file,
-            sample,
-            sample_rate,
+        ExportSpec::new(file, sample, sample_rate)
+    }
+
+    #[test]
+    fn writes_ogg_vorbis_and_opus() {
+        let dir = tempfile::tempdir().unwrap();
+        let progress = ExportProgress::default();
+        let tags = vec![
+            ("title".to_owned(), "Loop".to_owned()),
+            ("ARTIST".to_owned(), "Dawkey".to_owned()),
+        ];
+
+        // Vorbis: the right length and level, with the tags.
+        let path = dir.path().join("a.ogg");
+        let mut vorbis = spec(FileFormat::Ogg, SampleFormat::Int24, 48_000);
+        vorbis.tags = tags.clone();
+        vorbis.quality = 6.0;
+        let mut sine = Sine {
+            at: 0,
+            frames: 48_000,
+        };
+        let analysis = export(&mut sine, 48_000, &vorbis, &path, &progress).unwrap();
+        assert_eq!(analysis.frames, 48_000);
+        let decoded = decode_file(&path, 48_000).unwrap();
+        assert_eq!(decoded.source_rate, 48_000);
+        assert_eq!(decoded.audio.frames(), 48_000);
+        let peak = crate::analyze(decoded.audio.channels(), 48_000).peak_dbfs[0].unwrap();
+        assert!((peak + 6.02).abs() < 0.5, "{peak}");
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"OggS"));
+        assert!(bytes.windows(5).any(|w| w == b"TITLE"));
+
+        // Opus: always 48 kHz, exactly as many frames as went in (the
+        // encoder's delay skipped, the end trimmed), with the tags.
+        let path = dir.path().join("b.opus");
+        let mut opus = spec(FileFormat::Opus, SampleFormat::Int24, 44_100);
+        opus.tags = tags;
+        opus.bitrate_kbps = 96;
+        let mut sine = Sine {
+            at: 0,
+            frames: 48_000,
+        };
+        let analysis = export(&mut sine, 48_000, &opus, &path, &progress).unwrap();
+        assert_eq!(analysis.frames, 48_000, "the analysis is at 48 kHz");
+        let file = std::fs::File::open(&path).unwrap();
+        let mut reader = opus_pure::OggOpusReader::new(std::io::BufReader::new(file)).unwrap();
+        assert_eq!(reader.head().input_sample_rate, 44_100);
+        assert_eq!(reader.tags().get("TITLE"), Some("Loop"));
+        assert_eq!(reader.tags().get("ARTIST"), Some("Dawkey"));
+        let mut decoder = reader.head().decoder(48_000).unwrap();
+        let mut trim = opus_pure::Trim::new(reader.head(), 48_000, 2).unwrap();
+        let mut out = vec![0.0f32; 5760 * 2];
+        let mut samples = Vec::new();
+        while let Some(packet) = reader.read_packet().unwrap() {
+            let n = decoder.decode(&packet.data, 5760, &mut out).unwrap();
+            samples.extend_from_slice(trim.keep(&packet, &out[..n * 2]));
         }
+        assert_eq!(samples.len(), 48_000 * 2);
+        let left: Vec<f32> = samples.iter().step_by(2).copied().collect();
+        let peak = crate::analyze(&[left], 48_000).peak_dbfs[0].unwrap();
+        assert!((peak + 6.02).abs() < 0.5, "{peak}");
+
+        // Bad settings are caught first.
+        let mut bad = opus.clone();
+        bad.bitrate_kbps = 1;
+        assert!(bad.check().unwrap_err().contains("bitrate_kbps"));
+        let mut bad = opus.clone();
+        bad.quality = 11.0;
+        assert!(bad.check().unwrap_err().contains("quality"));
+        let mut bad = opus;
+        bad.tags = vec![("a=b".to_owned(), "x".to_owned())];
+        assert!(bad.check().unwrap_err().contains("tag name"));
     }
 
     #[test]

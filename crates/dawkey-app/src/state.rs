@@ -619,6 +619,10 @@ pub struct ExportSettings {
     pub range: ExportRange,
     /// Seconds after the range to include, for tails to ring out.
     pub tail_s: f64,
+    /// Ogg Vorbis quality, 0 to 10.
+    pub quality: f32,
+    /// Opus bitrate in kbit/s.
+    pub bitrate_kbps: u32,
 }
 
 impl Default for ExportSettings {
@@ -629,6 +633,8 @@ impl Default for ExportSettings {
             sample_rate: None,
             range: ExportRange::Song,
             tail_s: 0.0,
+            quality: dawkey_media::DEFAULT_VORBIS_QUALITY,
+            bitrate_kbps: dawkey_media::DEFAULT_OPUS_KBPS,
         }
     }
 }
