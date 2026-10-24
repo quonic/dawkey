@@ -12,7 +12,7 @@ use dawkey_ui::{ChromeAction, DragPhase, Modifiers, MouseButton, Point, Rect, Ui
 use crate::App;
 use crate::state::{
     ClipEdge, FADER_H, Gesture, ImportRequest, MAX_ZOOM, MIN_ZOOM, PAN_W, Page, PendingAction,
-    PlatformRequest, RangeKind, takes_shown, track_tops,
+    PlatformRequest, RangeKind, TextField, takes_shown, track_tops,
 };
 use crate::view::{db_from_position, position_from_db};
 
@@ -206,11 +206,27 @@ impl App {
                 };
                 self.execute(command)
             }
-            // An edge handle clicked without dragging is the clip.
-            ["clip", clip] | ["clip", clip, "start" | "end"] => {
+            // Double-clicking a track's name types a new one.
+            ["track", track, "name"] if count == 2 => {
+                let field = TextField::TrackName(parse_track(track)?);
+                match self.editing(&field) {
+                    true => Ok(()),
+                    false => self.start_text_edit(field),
+                }
+            }
+            // An edge handle (or the name) clicked without dragging is the
+            // clip. Double-clicking the name types a new one.
+            ["clip", clip] | ["clip", clip, "start" | "end" | "name"] => {
                 let clip = ClipId(parse_id(clip)?);
+                let name = parts.get(2) == Some(&"name");
+                if name && self.editing(&TextField::ClipName(clip)) {
+                    return Ok(());
+                }
                 self.view.selected_clip = Some(clip);
                 self.view.selected_marker = None;
+                if count == 2 && name {
+                    return self.start_text_edit(TextField::ClipName(clip));
+                }
                 let midi = self.clip_kind(clip) == Some(TrackKind::Midi);
                 if count == 2 && midi {
                     self.open_piano_roll(clip)?;
@@ -523,8 +539,13 @@ impl App {
                 };
                 Some(self.start_trim(clip, edge, origin)?)
             }
-            ["clip", clip] => {
+            // Dragging a clip by its name moves it, unless the name is
+            // being typed.
+            ["clip", clip] | ["clip", clip, "name"] => {
                 let clip = ClipId(parse_id(clip)?);
+                if self.editing(&TextField::ClipName(clip)) {
+                    return Ok(None);
+                }
                 let (track, c) = project
                     .clip(clip)
                     .ok_or_else(|| format!("clip {clip} does not exist"))?;
@@ -665,6 +686,10 @@ impl App {
         match (key, m.ctrl, m.shift) {
             ("return", false, _) if self.view.page == Page::Arrange => match self.editable_clip() {
                 Some(clip) => self.open_piano_roll(clip),
+                None => Ok(()),
+            },
+            ("f2", false, _) if self.view.page == Page::Arrange => match self.view.selected_clip {
+                Some(clip) => self.start_text_edit(TextField::ClipName(clip)),
                 None => Ok(()),
             },
             ("space", false, _) => if self.studio.transport().playing {

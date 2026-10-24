@@ -184,7 +184,7 @@ async fn loop_recording_makes_takes() {
             )
         })
         .collect();
-    // Three passes over 0–0.5 s; the earlier two are muted.
+    // Three passes over 0-0.5 s; the earlier two are muted.
     assert_eq!(
         summary,
         [(0, 24_000, true), (0, 24_000, true), (0, 12_000, false)]
@@ -337,7 +337,7 @@ async fn recording_over_a_take_stacks_and_comps() {
     let dawkey = start().await;
     let track = armed_track(&dawkey, "left").await;
     record(&dawkey, &input, 1.0).await;
-    // A second take over 0.25–0.5 s, punched in.
+    // A second take over 0.25-0.5 s, punched in.
     dawkey
         .call(
             "set_punch",

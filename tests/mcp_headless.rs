@@ -99,6 +99,51 @@ async fn edit_undo_redo() {
 }
 
 #[tokio::test]
+async fn rename_clips() {
+    let dawkey = start().await;
+    let added = dawkey
+        .call(
+            "add_midi_clip",
+            json!({ "notes": [{ "pitch": 60, "start_beats": 0, "length_beats": 1 }] }),
+        )
+        .await
+        .unwrap();
+    let clip = added["clip"].as_u64().unwrap();
+    let name = |state: &Value| state["project"]["tracks"][0]["clips"][0]["name"].clone();
+
+    // Unnamed clips leave `name` out.
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(name(&state), Value::Null);
+    dawkey
+        .call("rename_clip", json!({ "clip": clip, "name": "Hook" }))
+        .await
+        .unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(name(&state), "Hook");
+    assert_eq!(state["undo"], "rename_clip");
+
+    let err = dawkey
+        .call_err("rename_clip", json!({ "clip": 999, "name": "x" }))
+        .await
+        .unwrap();
+    assert!(err.contains("999"), "{err}");
+    let err = dawkey
+        .call_err("rename_clip", json!({ "clip": clip, "name": "a\u{7}b" }))
+        .await
+        .unwrap();
+    assert!(err.contains("control characters"), "{err}");
+
+    // An empty name goes back to the default.
+    dawkey
+        .call("rename_clip", json!({ "clip": clip, "name": "" }))
+        .await
+        .unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(name(&state), Value::Null);
+    dawkey.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn bad_input_is_a_readable_tool_error() {
     let dawkey = start().await;
     let drums = dawkey.call("add_track", json!({})).await.unwrap()["track"].clone();

@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use dawkey_core::{AddClip, AddMidiClip, AddTrack, ClipId, NoteSpec, Project, TrackKind, Waveform};
+use dawkey_core::{
+    AddClip, AddMidiClip, AddTrack, ClipId, NoteSpec, Project, TrackId, TrackKind, Waveform,
+};
 use dawkey_media::{AudioData, DecodedFile};
 use dawkey_studio::{AudioBackend, LoadedProject, Studio};
 use dawkey_ui::{ChromeAction, Modifiers, MouseButton, Point, Role};
@@ -199,7 +201,7 @@ fn arrange_shows_clips_with_waveforms() {
     let node = tree.find(&format!("clip/{clip}")).unwrap();
     assert_eq!(node.role, Role::Clip);
     assert_eq!(node.name.as_deref(), Some("ramp"));
-    assert_eq!(node.value.as_deref(), Some("1.000 s – 3.000 s"));
+    assert_eq!(node.value.as_deref(), Some("1.000 s - 3.000 s"));
     // 80 px per second: 2 s is 160 px wide.
     assert_eq!(node.bounds.w, 160.0);
     let lane = tree.find(&format!("track/{track}/lane")).unwrap();
@@ -247,6 +249,118 @@ fn dragging_a_clip_moves_it_in_one_undo_step() {
     assert_eq!(clip_start_s(&app, clip), 3.0);
     app.studio.undo().unwrap();
     assert_eq!(clip_start_s(&app, clip), 1.0);
+}
+
+#[test]
+fn renaming_tracks_and_clips() {
+    let mut app = app();
+    let (track, clip) = add_clip(&mut app, 1.0);
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    let track_name = |app: &App| {
+        let project = app.studio.session().project();
+        project.track(TrackId(track)).unwrap().name.clone()
+    };
+    let shown = |app: &mut App, id: &str| app.access_tree().find(id).unwrap().name.clone();
+    let message = |app: &mut App| shown(app, "status/message").unwrap_or_default();
+
+    // Double-clicking a track's name types a new one, in one undo step.
+    let name = format!("track/{track}/name");
+    app.double_click(&name, Modifiers::default()).unwrap();
+    let field = app.access_tree().find(&name).unwrap().clone();
+    assert_eq!(
+        (field.role, field.value.as_deref()),
+        (Role::TextField, Some("ramp"))
+    );
+    app.key("d", shift).unwrap();
+    type_keys(&mut app, &["r", "u", "m", "s", "space", "2", "return"]);
+    assert_eq!(track_name(&app), "Drums 2");
+    assert_eq!(app.studio.session().undo_label(), Some("rename_track"));
+    assert_eq!(shown(&mut app, &name).as_deref(), Some("Drums 2"));
+
+    // The mixer's strip renames it the same way. Escape leaves it as it
+    // was, and an empty name is refused.
+    click(&mut app, "view/mixer").unwrap();
+    assert_eq!(shown(&mut app, &name).as_deref(), Some("Drums 2"));
+    app.double_click(&name, Modifiers::default()).unwrap();
+    type_keys(&mut app, &["x", "escape"]);
+    assert_eq!(track_name(&app), "Drums 2");
+    app.double_click(&name, Modifiers::default()).unwrap();
+    type_keys(&mut app, &["backspace", "return"]);
+    assert_eq!(track_name(&app), "Drums 2");
+    let msg = message(&mut app);
+    assert!(msg.contains("empty"), "{msg}");
+    click(&mut app, "view/arrange").unwrap();
+
+    // A clip's name is a handle of its own: double-click it to type one.
+    let clip_name = format!("clip/{clip}/name");
+    let named = |app: &App| {
+        let project = app.studio.session().project();
+        project.clip(ClipId(clip)).unwrap().1.name.clone()
+    };
+    app.double_click(&clip_name, Modifiers::default()).unwrap();
+    assert_eq!(app.view_state().selected_clip, Some(ClipId(clip)));
+    let field = app.access_tree().find(&clip_name).unwrap().clone();
+    assert_eq!(
+        (field.role, field.value.as_deref()),
+        (Role::TextField, Some("ramp"))
+    );
+    type_keys(&mut app, &["k", "i", "c", "k", "return"]);
+    assert_eq!(named(&app).as_deref(), Some("kick"));
+    assert_eq!(app.studio.session().undo_label(), Some("rename_clip"));
+    assert_eq!(
+        shown(&mut app, &format!("clip/{clip}")).as_deref(),
+        Some("kick")
+    );
+
+    // F2 renames the selected clip; an empty name goes back to the file's.
+    app.key("f2", Modifiers::default()).unwrap();
+    assert_eq!(
+        app.access_tree().find(&clip_name).unwrap().value.as_deref(),
+        Some("kick")
+    );
+    type_keys(&mut app, &["backspace", "return"]);
+    assert_eq!(named(&app), None);
+    assert_eq!(
+        shown(&mut app, &format!("clip/{clip}")).as_deref(),
+        Some("ramp")
+    );
+
+    // Clicking elsewhere sets what was typed.
+    app.double_click(&clip_name, Modifiers::default()).unwrap();
+    type_keys(&mut app, &["a"]);
+    click(&mut app, "view/arrange").unwrap();
+    assert_eq!(named(&app).as_deref(), Some("a"));
+
+    // Dragging the name moves the clip.
+    app.drag(
+        DragFrom::Widget(clip_name),
+        Point::new(80.0, 0.0),
+        4,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert_eq!(clip_start_s(&app, clip), 2.0);
+
+    // On a MIDI clip, double-clicking the name renames it and doesn't open
+    // the piano roll; double-clicking the rest of it still does.
+    let (_, midi) = add_midi(&mut app, 0.0, &[(60, 0.0, 1.0)]);
+    app.double_click(&format!("clip/{midi}/name"), Modifiers::default())
+        .unwrap();
+    assert_eq!(app.view_state().page, Page::Arrange);
+    assert!(
+        app.access_tree()
+            .find(&format!("clip/{midi}/name"))
+            .unwrap()
+            .role
+            == Role::TextField
+    );
+    app.key("escape", Modifiers::default()).unwrap();
+    app.double_click(&format!("clip/{midi}"), Modifiers::default())
+        .unwrap();
+    assert_eq!(app.view_state().page, Page::PianoRoll);
 }
 
 #[test]
@@ -909,7 +1023,7 @@ fn ranges_from_ruler_drags() {
     let tree = app.access_tree();
     assert_eq!(
         tree.find("timeline/loop").unwrap().value.as_deref(),
-        Some("1.000 s – 3.000 s")
+        Some("1.000 s - 3.000 s")
     );
     assert_eq!(tree.find("transport/loop").unwrap().checked, Some(true));
     app.key("l", Modifiers::default()).unwrap();
@@ -1026,7 +1140,7 @@ fn midi_tracks_and_clips_in_the_arrange_view() {
         .find(&format!("clip/{clip}"))
         .unwrap()
         .clone();
-    assert_eq!(node.value.as_deref(), Some("1.000 s – 3.000 s"));
+    assert_eq!(node.value.as_deref(), Some("1.000 s - 3.000 s"));
     let bar = app.scene().primitives.into_iter().any(|p| {
         matches!(p, dawkey_ui::Primitive::Rect { rect, .. }
             if rect.x == node.bounds.x && (rect.w - 80.0).abs() < 0.01)
@@ -1043,7 +1157,7 @@ fn midi_tracks_and_clips_in_the_arrange_view() {
     assert_eq!(note.name.as_deref(), Some("C4"));
     assert_eq!(
         note.value.as_deref(),
-        Some("0.000–2.000 beats · velocity 100")
+        Some("0.000-2.000 beats · velocity 100")
     );
 
     // Audio clips can't be dragged onto MIDI tracks.

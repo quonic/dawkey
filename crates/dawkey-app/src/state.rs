@@ -311,6 +311,10 @@ pub enum TextField {
     RecordOffset,
     /// The port the HTTP MCP server listens on.
     McpPort,
+    /// A track's name.
+    TrackName(TrackId),
+    /// A clip's name (empty: back to the default).
+    ClipName(ClipId),
 }
 
 /// Slider position (0 to 1, cubic) of a MIDI device latency in ms.

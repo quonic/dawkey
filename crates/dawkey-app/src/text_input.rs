@@ -1,23 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Typing values: clicking a field (the tempo lane's BPM, the time
 //! signature's numerator or denominator; double-clicking a MIDI output's
-//! latency slider or a plugin parameter's slider) starts editing it with its
-//! value selected. Digits (and a point, where values have fractions) type;
-//! a plugin parameter takes any text, which the plugin reads the way it
-//! shows its values ("-6 dB", a choice's name). Backspace deletes, Return or
+//! latency slider, a plugin parameter's slider, or a track's or clip's name)
+//! starts editing it with its value selected. Digits (and a point, where
+//! values have fractions) type; names take any text, and so does a plugin
+//! parameter, which the plugin reads the way it shows its values ("-6 dB", a
+//! choice's name). Backspace deletes, Return or
 //! Tab (or clicking elsewhere) sets it with one command, and Escape leaves
 //! it as it was. Tab from a numerator goes on to the denominator. While a
 //! field is being typed in, it gets every key.
 
 use dawkey_core::{
-    DEVICE_LATENCY_MS_MAX, SetPluginParam, SetTempo, SetTimeSignature, SetTrackMidiOutput,
-    TEMPO_BPM_MAX, TEMPO_BPM_MIN,
+    DEVICE_LATENCY_MS_MAX, RenameClip, RenameTrack, SetPluginParam, SetTempo, SetTimeSignature,
+    SetTrackMidiOutput, TEMPO_BPM_MAX, TEMPO_BPM_MIN,
 };
 use dawkey_ui::Modifiers;
 
 use crate::App;
 use crate::state::{TextEdit, TextField};
-use crate::view::format_bpm;
+use crate::view::{clip_label, format_bpm};
 
 /// The widget ID of a field.
 pub(crate) fn field_id(field: &TextField) -> String {
@@ -29,6 +30,8 @@ pub(crate) fn field_id(field: &TextField) -> String {
         TextField::PluginParam { plugin, param } => format!("plugin/{plugin}/param/{param}"),
         TextField::RecordOffset => "prefs/record_offset".into(),
         TextField::McpPort => "prefs/mcp_port".into(),
+        TextField::TrackName(track) => format!("track/{track}/name"),
+        TextField::ClipName(clip) => format!("clip/{clip}/name"),
     }
 }
 
@@ -39,7 +42,16 @@ fn max_len(field: &TextField) -> usize {
         TextField::McpPort => 5,
         TextField::Tempo(_) | TextField::DeviceLatency(_) | TextField::RecordOffset => 10,
         TextField::PluginParam { .. } => 40,
+        TextField::TrackName(_) | TextField::ClipName(_) => 256,
     }
+}
+
+/// Whether the field takes any text, not just a number.
+fn free_text(field: &TextField) -> bool {
+    matches!(
+        field,
+        TextField::PluginParam { .. } | TextField::TrackName(_) | TextField::ClipName(_)
+    )
 }
 
 /// Whether the field's values have fractions.
@@ -102,6 +114,21 @@ impl App {
                     .ok_or_else(|| format!("plugin {plugin} has no parameter {param:?}"))?
                     .text
             }
+            &TextField::TrackName(track) => self
+                .studio
+                .session()
+                .project()
+                .track(track)
+                .ok_or_else(|| format!("track {track} does not exist"))?
+                .name
+                .clone(),
+            &TextField::ClipName(clip) => {
+                let project = self.studio.session().project();
+                let (track, c) = project
+                    .clip(clip)
+                    .ok_or_else(|| format!("clip {clip} does not exist"))?;
+                clip_label(project, track, c)
+            }
         };
         self.view.text_edit = Some(TextEdit {
             field,
@@ -109,6 +136,14 @@ impl App {
             selected: true,
         });
         Ok(())
+    }
+
+    /// Whether `field` is being typed in.
+    pub(crate) fn editing(&self, field: &TextField) -> bool {
+        self.view
+            .text_edit
+            .as_ref()
+            .is_some_and(|e| e.field == *field)
     }
 
     /// A key for the field being typed in; `None` if no field is.
@@ -133,8 +168,8 @@ impl App {
                     edit.text.pop();
                 }
             }
-            _ if matches!(edit.field, TextField::PluginParam { .. }) => {
-                // Any text: the plugin reads it.
+            _ if free_text(&edit.field) => {
+                // Any text (a plugin reads its parameters' text).
                 let c = match key {
                     "space" => ' ',
                     _ => match key.chars().collect::<Vec<_>>()[..] {
@@ -142,12 +177,14 @@ impl App {
                         _ => return Some(Ok(())),
                     },
                 };
-                let c = if m.shift { c.to_ascii_uppercase() } else { c };
                 if std::mem::take(&mut edit.selected) {
                     edit.text.clear();
                 }
                 if edit.text.chars().count() < max_len(&edit.field) {
-                    edit.text.push(c);
+                    match m.shift {
+                        true => edit.text.extend(c.to_uppercase()),
+                        false => edit.text.push(c),
+                    }
                 }
             }
             _ => {
@@ -229,6 +266,37 @@ impl App {
                         param,
                         value: None,
                         text: Some(text),
+                    }
+                    .into(),
+                )
+            }
+            TextField::TrackName(track) => {
+                let current = self
+                    .studio
+                    .session()
+                    .project()
+                    .track(track)
+                    .map(|t| &t.name);
+                if selected || current.is_none_or(|name| *name == text.trim()) {
+                    return Ok(());
+                }
+                self.execute(RenameTrack { track, name: text }.into())
+            }
+            TextField::ClipName(clip) => {
+                let project = self.studio.session().project();
+                let Some((t, c)) = project.clip(clip) else {
+                    return Ok(());
+                };
+                // Untouched, or the same text: nothing changes. Empty text
+                // goes back to the default label.
+                let text = text.trim();
+                if selected || text == clip_label(project, t, c) {
+                    return Ok(());
+                }
+                self.execute(
+                    RenameClip {
+                        clip,
+                        name: text.to_owned(),
                     }
                     .into(),
                 )

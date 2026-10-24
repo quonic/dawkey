@@ -805,12 +805,7 @@ impl App {
                 .iter()
                 .map(|c| ClipView {
                     id: c.id,
-                    name: match c.content {
-                        ClipContent::Audio { source, .. } => project
-                            .source(source)
-                            .map_or_else(|| "Missing".to_owned(), |s| s.name.clone()),
-                        ClipContent::Midi { .. } => t.name.clone(),
-                    },
+                    name: view::clip_label(project, t, c),
                     start_s: project.frames_to_seconds(c.start),
                     length_s: project.frames_to_seconds(c.length),
                     muted: c.muted,

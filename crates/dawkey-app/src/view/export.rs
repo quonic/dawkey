@@ -42,7 +42,7 @@ pub(super) fn dialog(
     };
     let range = match (settings.range, model.loop_range) {
         (ExportRange::Loop, Some((start, end))) => {
-            format!("Loop ({} – {})", format_time(start), format_time(end))
+            format!("Loop ({} - {})", format_time(start), format_time(end))
         }
         _ => format!("Song (to {})", format_time(model.song_end_s)),
     };

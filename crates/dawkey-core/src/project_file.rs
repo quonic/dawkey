@@ -225,6 +225,7 @@ mod tests {
                 gain_db: 0.0,
                 muted: false,
                 lane: 2,
+                name: Some("Hook".into()),
                 content: ClipContent::Midi {
                     notes: vec![Note {
                         id: note,

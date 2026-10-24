@@ -13,11 +13,11 @@ use dawkey_ui::{
 use super::piano_roll::preview_rects;
 use super::{
     ClipView, ClipViewContent, LaneView, NoteView, TrackView, ViewModel, button, format_bpm, meter,
-    tempo, toggle, track_buttons,
+    name_editor, tempo, toggle, track_buttons,
 };
 use crate::state::{
-    AUTO_H, Gesture, HEADER_W, LANE_H, RULER_H, RangeKind, TAKE_H, ViewState, takes_shown,
-    track_tops,
+    AUTO_H, Gesture, HEADER_W, LANE_H, RULER_H, RangeKind, TAKE_H, TextField, ViewState,
+    takes_shown, track_tops,
 };
 use crate::theme::*;
 
@@ -268,14 +268,20 @@ fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> No
             Node::row()
                 .width(Sizing::Fill(1.0))
                 .gap(8.0)
+                // Double-click the name to type a new one.
                 .child(
-                    Node::label(track.name.clone())
-                        .id(format!("track/{id}/name"))
-                        .width(Sizing::Fill(1.0))
-                        .clip()
-                        .style(|s| {
-                            s.text_align = TextAlign::Start;
-                            s.color = pal().text;
+                    name_editor(&TextField::TrackName(id), "Track name", view, ui)
+                        .map(|field| field.width(Sizing::Fill(1.0)))
+                        .unwrap_or_else(|| {
+                            Node::label(track.name.clone())
+                                .id(format!("track/{id}/name"))
+                                .clickable()
+                                .width(Sizing::Fill(1.0))
+                                .clip()
+                                .style(|s| {
+                                    s.text_align = TextAlign::Start;
+                                    s.color = pal().text;
+                                })
                         }),
                 )
                 .children((track.take_lanes > 1).then(|| {
@@ -817,7 +823,7 @@ fn clip_node(
             .role(Role::Clip)
             .accessible_label(clip.name.clone())
             .value(format!(
-                "{start_s:.3} s – {end_s:.3} s{}",
+                "{start_s:.3} s - {end_s:.3} s{}",
                 if clip.muted { " (muted)" } else { "" }
             ))
             .clickable()
@@ -837,17 +843,33 @@ fn clip_node(
             });
         });
     // Keep the name visible when the clip starts left of the view.
-    let label_x = (x_of(view, visible_from) - x).max(0.0) + 7.0;
-    node = node.child(
-        Node::label(clip.name.clone())
-            .absolute(Rect::new(label_x, 2.0, (w - label_x).max(0.0), 16.0))
-            .style(|s| {
-                s.font_size = 11.0;
-                s.weight = FontWeight::SemiBold;
-                s.color = pal().text;
-                s.text_align = TextAlign::Start;
-            }),
-    );
+    let label_boarder = 7.0;
+    let label_x = (x_of(view, visible_from) - x).max(0.0) + label_boarder;
+    let label_rect = Rect::new(label_x, 2.0, (w - label_x - label_boarder).max(0.0), 16.0);
+    // Clips (not takes) have their name as a handle of its own:
+    // double-click it to type a new one.
+    let renamable = !ghost && look != Look::Take;
+    let editor = name_editor(&TextField::ClipName(clip.id), "Clip name", view, ui);
+    node = node.child(match editor.filter(|_| renamable) {
+        Some(editor) => editor.height(Sizing::Fixed(16.0)).absolute(label_rect),
+        None => {
+            let label = Node::label(clip.name.clone())
+                .absolute(label_rect)
+                .style(|s| {
+                    s.font_size = 11.0;
+                    s.weight = FontWeight::SemiBold;
+                    s.color = pal().text;
+                    s.text_align = TextAlign::Start;
+                });
+            match renamable {
+                true => label
+                    .id(format!("clip/{}/name", clip.id))
+                    .clickable()
+                    .draggable(),
+                false => label,
+            }
+        }
+    });
     if let ClipViewContent::Audio {
         offset,
         peaks: Some(peaks),
@@ -1119,7 +1141,7 @@ fn ruler(model: &ViewModel, view: &ViewState) -> Node {
                     "Punch range"
                 })
                 .value(format!(
-                    "{start:.3} s – {end:.3} s{}",
+                    "{start:.3} s - {end:.3} s{}",
                     if enabled { "" } else { " (off)" }
                 ))
                 .style(|s| {
