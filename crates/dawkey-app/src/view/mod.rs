@@ -40,7 +40,7 @@ pub(crate) use piano_roll::{edited, lane_value, marquee_notes};
 pub(crate) use piano_roll::{x_of as roll_x, y_of as roll_y};
 
 use crate::WindowInfo;
-use crate::state::{Page, ViewState};
+use crate::state::{Page, TextField, ViewState};
 use crate::theme::*;
 
 /// Everything the view shows, gathered from the studio.
@@ -238,6 +238,24 @@ impl LaneKind {
     }
 }
 
+/// What a clip is called: its own name, else its audio file's name (or,
+/// for MIDI clips, its track's).
+pub(crate) fn clip_label(
+    project: &dawkey_core::Project,
+    track: &dawkey_core::Track,
+    clip: &dawkey_core::Clip,
+) -> String {
+    if let Some(name) = &clip.name {
+        return name.clone();
+    }
+    match clip.content {
+        dawkey_core::ClipContent::Audio { source, .. } => project
+            .source(source)
+            .map_or_else(|| "Missing".to_owned(), |s| s.name.clone()),
+        dawkey_core::ClipContent::Midi { .. } => track.name.clone(),
+    }
+}
+
 /// What an automation lane on `track` is called and how its values scale.
 pub(crate) fn lane_label_kind(
     track: &dawkey_core::Track,
@@ -348,7 +366,7 @@ pub(crate) fn build(
     }
     let page = match view.page {
         Page::Arrange => arrange::build(model, view, ui),
-        Page::Mixer => mixer::build(model, ui),
+        Page::Mixer => mixer::build(model, view, ui),
         Page::PianoRoll => piano_roll::build(model, view, ui),
     };
     // The plugin picker and editor float over the page.
@@ -570,6 +588,24 @@ pub(crate) fn text_field(
         .children(
             (editing == Some(false)).then(|| Node::row().size(1.0, 12.0).background(pal().text)),
         )
+}
+
+/// The field `field` (a track's or clip's name) is typed in, while it is.
+pub(crate) fn name_editor(
+    field: &TextField,
+    label: &str,
+    view: &ViewState,
+    ui: &UiState,
+) -> Option<Node> {
+    let edit = view.text_edit.as_ref().filter(|e| e.field == *field)?;
+    let id = crate::text_input::field_id(field);
+    Some(text_field(
+        &id,
+        label,
+        edit.text.clone(),
+        Some(edit.selected),
+        ui,
+    ))
 }
 
 /// A labelled toggle button.

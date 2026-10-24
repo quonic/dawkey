@@ -485,6 +485,10 @@ pub struct Clip {
     /// the same passage stack up. Only the view uses it.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub lane: u32,
+    /// What the clip is called; `None` shows its audio file's name (or, for
+    /// MIDI clips, its track's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(flatten)]
     pub content: ClipContent,
 }
@@ -1271,6 +1275,7 @@ mod tests {
             gain_db: 0.0,
             muted: false,
             lane: 0,
+            name: None,
             content: ClipContent::Audio {
                 source: SourceId(1),
                 offset: 0,

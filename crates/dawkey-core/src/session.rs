@@ -413,8 +413,8 @@ fn resolve_source_path(bundle: Option<&Path>, path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::command::{
-        AddClip, AddTrack, MoveClip, RemoveClip, RemoveTrack, RenameTrack, SetClipGain, SetTempo,
-        SetTrackGain,
+        AddClip, AddTrack, MoveClip, RemoveClip, RemoveTrack, RenameClip, RenameTrack, SetClipGain,
+        SetTempo, SetTrackGain,
     };
     use crate::model::TrackKind;
 
@@ -643,6 +643,51 @@ mod tests {
         assert!(s.project().clip(clip).is_none());
         s.undo().unwrap();
         assert_eq!(s.project().clip(clip).unwrap().1.gain_db, -3.0);
+    }
+
+    #[test]
+    fn rename_clips() {
+        let mut s = Session::default();
+        let src = s.add_source("Loop", "/tmp/loop.wav", 2, 1000);
+        let clip = place(&mut s, src, None, 0.0).clip.unwrap();
+        let name = |s: &Session| s.project().clip(clip).unwrap().1.name.clone();
+        let rename = |s: &mut Session, name: &str| {
+            s.execute(
+                RenameClip {
+                    clip,
+                    name: name.into(),
+                }
+                .into(),
+            )
+        };
+        assert_eq!(name(&s), None);
+        rename(&mut s, "  Verse 1 ").unwrap();
+        assert_eq!(name(&s).as_deref(), Some("Verse 1"));
+        // An empty name goes back to the default.
+        rename(&mut s, " ").unwrap();
+        assert_eq!(name(&s), None);
+        s.undo().unwrap();
+        assert_eq!(name(&s).as_deref(), Some("Verse 1"));
+        s.undo().unwrap();
+        assert_eq!(name(&s), None);
+        s.redo().unwrap();
+        assert_eq!(name(&s).as_deref(), Some("Verse 1"));
+
+        for bad in ["a\nb", &"x".repeat(257)] {
+            let err = rename(&mut s, bad).unwrap_err();
+            assert!(matches!(err, CoreError::InvalidArgument(_)), "{bad:?}");
+        }
+        let err = s
+            .execute(
+                RenameClip {
+                    clip: ClipId(999),
+                    name: "x".into(),
+                }
+                .into(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, CoreError::ClipNotFound(_)));
+        assert_eq!(name(&s).as_deref(), Some("Verse 1"));
     }
 
     #[test]

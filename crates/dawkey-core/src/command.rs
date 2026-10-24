@@ -141,6 +141,7 @@ commands! {
     RemoveClip => "remove_clip", Destructive;
     SetClipGain => "set_clip_gain", Setter;
     SetClipMute => "set_clip_mute", Setter;
+    RenameClip => "rename_clip", Setter;
     SetTrackArm => "set_track_arm", Setter;
     SetTrackInput => "set_track_input", Setter;
     SetTrackMonitor => "set_track_monitor", Setter;
@@ -831,6 +832,7 @@ impl AddClip {
             gain_db: 0.0,
             muted: self.muted,
             lane: 0,
+            name: None,
             content: ClipContent::Audio {
                 source: self.source,
                 offset,
@@ -949,6 +951,32 @@ impl SetClipMute {
         let edit = Edit::SetClip {
             id: self.clip,
             prop: ClipProp::Muted(self.muted),
+        };
+        Ok((vec![edit], Outcome::none()))
+    }
+}
+
+/// Name a clip. An empty name goes back to the default label (its audio
+/// file's name, or its track's name for MIDI clips).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RenameClip {
+    pub clip: ClipId,
+    pub name: String,
+}
+
+impl RenameClip {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        project
+            .clip(self.clip)
+            .ok_or(CoreError::ClipNotFound(self.clip))?;
+        let name = match self.name.trim() {
+            "" => None,
+            _ => Some(validate_name(&self.name)?),
+        };
+        let edit = Edit::SetClip {
+            id: self.clip,
+            prop: ClipProp::Name(name),
         };
         Ok((vec![edit], Outcome::none()))
     }
@@ -1686,6 +1714,9 @@ fn clip_edits(old: &Clip, new: Clip) -> Vec<Edit> {
     if new.muted != old.muted {
         props.push(ClipProp::Muted(new.muted));
     }
+    if new.name != old.name {
+        props.push(ClipProp::Name(new.name));
+    }
     match (&old.content, new.content) {
         (ClipContent::Audio { offset: a, .. }, ClipContent::Audio { offset: b, .. }) => {
             if *a != b {
@@ -1998,6 +2029,7 @@ impl AddMidiClip {
             gain_db: 0.0,
             muted: self.muted,
             lane: 0,
+            name: None,
             content: ClipContent::Midi {
                 notes: sorted(notes.clone()),
                 controls,

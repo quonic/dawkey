@@ -77,6 +77,8 @@ pub(crate) enum ClipProp {
     Offset(u64),
     GainDb(f32),
     Muted(bool),
+    /// `None` is the default label.
+    Name(Option<String>),
     /// A MIDI clip's notes, sorted by start.
     Notes(Vec<Note>),
     /// A MIDI clip's controller changes, sorted by frame.
@@ -182,6 +184,7 @@ impl Edit {
                         ClipProp::GainDb(std::mem::replace(&mut clip.gain_db, v))
                     }
                     ClipProp::Muted(v) => ClipProp::Muted(std::mem::replace(&mut clip.muted, v)),
+                    ClipProp::Name(v) => ClipProp::Name(std::mem::replace(&mut clip.name, v)),
                     ClipProp::Notes(v) => {
                         let ClipContent::Midi { notes, .. } = &mut clip.content else {
                             return Err(CoreError::invalid(format!(

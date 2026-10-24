@@ -917,6 +917,7 @@ fn key_name(event: &KeyEvent) -> Option<String> {
         Keysym::Right => "right",
         Keysym::Up => "up",
         Keysym::Down => "down",
+        Keysym::F2 => "f2",
         Keysym::KP_Add => "+",
         Keysym::KP_Subtract => "-",
         keysym => {

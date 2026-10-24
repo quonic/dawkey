@@ -7,8 +7,8 @@ use dawkey_ui::{
     Align, FontFamily, FontWeight, Insets, Node, Rect, Role, Sizing, TextAlign, UiState,
 };
 
-use super::{TrackView, ViewModel, button, meter, track_buttons};
-use crate::state::{FADER_H, PAN_W};
+use super::{TrackView, ViewModel, button, meter, name_editor, track_buttons};
+use crate::state::{FADER_H, PAN_W, TextField, ViewState};
 use crate::theme::*;
 
 const STRIP_W: f32 = 104.0;
@@ -41,8 +41,8 @@ pub(crate) fn db_from_position(p: f32) -> f32 {
     (db * 10.0).round() / 10.0
 }
 
-pub(super) fn build(model: &ViewModel, ui: &UiState) -> Node {
-    let strips = model.tracks.iter().map(|t| strip(t, ui));
+pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
+    let strips = model.tracks.iter().map(|t| strip(t, view, ui));
     let mut mixer = Node::row()
         .id("mixer")
         .fill()
@@ -63,7 +63,7 @@ pub(super) fn build(model: &ViewModel, ui: &UiState) -> Node {
     mixer.child(Node::spacer()).child(master(model, ui))
 }
 
-fn strip(track: &TrackView, ui: &UiState) -> Node {
+fn strip(track: &TrackView, view: &ViewState, ui: &UiState) -> Node {
     let id = track.id;
     Node::column()
         .id(format!("track/{id}/strip"))
@@ -76,14 +76,20 @@ fn strip(track: &TrackView, ui: &UiState) -> Node {
             s.background = Some(pal().track);
             s.radius = [6.0; 4];
         })
+        // Double-click the name to type a new one.
         .child(
-            Node::label(track.name.clone())
-                .id(format!("track/{id}/name"))
-                .width(Sizing::Fill(1.0))
-                .clip()
-                .style(|s| {
-                    s.weight = FontWeight::SemiBold;
-                    s.color = pal().text;
+            name_editor(&TextField::TrackName(id), "Track name", view, ui)
+                .map(|field| field.width(Sizing::Fill(1.0)))
+                .unwrap_or_else(|| {
+                    Node::label(track.name.clone())
+                        .id(format!("track/{id}/name"))
+                        .clickable()
+                        .width(Sizing::Fill(1.0))
+                        .clip()
+                        .style(|s| {
+                            s.weight = FontWeight::SemiBold;
+                            s.color = pal().text;
+                        })
                 }),
         )
         .child(slots(track, ui))

@@ -24,12 +24,12 @@ pub use command::{
     Command, CommandSpec, CompTake, ControlSpec, ControlValue, DuplicateClip, EditMidiNotes,
     Effect, MoveClip, MovePlugin, NoteChange, NoteSpec, PointSpec, QuantizeMidiNotes,
     RemoveAutomationPoints, RemoveClip, RemoveMidiNotes, RemovePlugin, RemoveTempoChange,
-    RemoveTimeSignatureChange, RemoveTrack, RenameProject, RenameTrack, RepeatClip, SetAutomation,
-    SetClipGain, SetClipLength, SetClipMute, SetLoop, SetMidiControls, SetPluginBypass,
-    SetPluginOutput, SetPluginParam, SetPluginSidechain, SetPunch, SetSynth, SetTempo, SetTempoMap,
-    SetTimeSignature, SetTimeSignatureMap, SetTrackArm, SetTrackGain, SetTrackInput,
-    SetTrackMidiInput, SetTrackMidiOutput, SetTrackMonitor, SetTrackMute, SetTrackOutput,
-    SetTrackPan, SetTrackSolo, SplitClip, TrimClip, WriteAutomation, args_schema,
+    RemoveTimeSignatureChange, RemoveTrack, RenameClip, RenameProject, RenameTrack, RepeatClip,
+    SetAutomation, SetClipGain, SetClipLength, SetClipMute, SetLoop, SetMidiControls,
+    SetPluginBypass, SetPluginOutput, SetPluginParam, SetPluginSidechain, SetPunch, SetSynth,
+    SetTempo, SetTempoMap, SetTimeSignature, SetTimeSignatureMap, SetTrackArm, SetTrackGain,
+    SetTrackInput, SetTrackMidiInput, SetTrackMidiOutput, SetTrackMonitor, SetTrackMute,
+    SetTrackOutput, SetTrackPan, SetTrackSolo, SplitClip, TrimClip, WriteAutomation, args_schema,
 };
 pub use error::CoreError;
 pub use host::Handle;
