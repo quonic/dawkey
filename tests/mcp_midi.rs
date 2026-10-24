@@ -475,7 +475,12 @@ async fn tempo_changes_move_midi_clips() {
     let controls = &find_track(&state, track)["clips"][0]["controls"];
     assert_eq!(
         controls,
-        &json!([{ "controller": { "kind": "pitch_bend" }, "frame": 12_000, "value": 16383 }])
+        &json!([{
+            "controller": { "kind": "pitch_bend" },
+            "frame": 12_000,
+            "at_beats": 0.5,
+            "value": 16383,
+        }])
     );
     let bent = render(&dawkey, 0.0, 2.0).await;
     assert_eq!(bent["silent"], false);
@@ -827,7 +832,7 @@ async fn per_note_controllers_over_mcp() {
     let take = &find_track(&state, keys)["clips"][0];
     assert_eq!(
         take["controls"],
-        json!([{ "controller": bend, "frame": 24_000, "value": 40_000 }]),
+        json!([{ "controller": bend, "frame": 24_000, "at_beats": 1.0, "value": 40_000 }]),
         "{take}"
     );
 
@@ -910,8 +915,8 @@ async fn per_note_management_over_mcp() {
     assert_eq!(
         take["controls"],
         json!([
-            { "controller": bend, "frame": 24_000, "value": 40_000 },
-            { "controller": bend, "frame": 30_000, "value": 0x8000 },
+            { "controller": bend, "frame": 24_000, "at_beats": 1.0, "value": 40_000 },
+            { "controller": bend, "frame": 30_000, "at_beats": 1.25, "value": 0x8000 },
         ]),
         "{take}"
     );

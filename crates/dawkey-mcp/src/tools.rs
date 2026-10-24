@@ -747,6 +747,7 @@ fn make_tool(
     };
     schema.remove("$schema");
     schema.remove("title");
+    crate::times::augment_schema(&mut schema);
     let doc = schema
         .remove("description")
         .and_then(|d| d.as_str().map(clean_doc));

@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod http;
+mod times;
 mod tools;
 
 use std::fmt::Display;
@@ -93,8 +94,13 @@ add_midi_notes, edit_midi_notes, remove_midi_notes and quantize_midi_notes
 edit them, and set_midi_controls sets pitch bend, CCs, pressure, program
 changes and MIDI 2.0 per-note controllers (per-note pitch bend, volume,
 brightness, ...). import_midi reads a .mid file. Note times are in beats (quarter
-notes) from the clip's start; clip positions are in seconds. get_state lists
-notes in frames. set_tempo (with at_beats, and ramp for a gradual change)
+notes) from the clip's start; clip positions and ranges are in seconds, or
+in beats from the project's start (`*_beats` instead of `*_s`, e.g.
+start_beats) or bars as the ruler numbers them (`*_bar`, from 1; end_bar 33
+is where 32 bars end; a clip length as length_beats). get_state lists
+notes in frames and in beats from their clip's start (start_beats,
+length_beats), and clips in frames and beats (start_beats, end_beats,
+start_bar). set_tempo (with at_beats, and ramp for a gradual change)
 and set_tempo_map change the tempo along the timeline; MIDI clips and notes
 keep their beat positions. set_time_signature (with at_bar) and
 set_time_signature_map change the meter from a bar on. set_track_midi_input
@@ -159,15 +165,33 @@ impl DawkeyMcp {
     /// Runs a tool. `Ok` holds the tool's JSON result; `Err` holds a message
     /// for the caller (bad arguments, failed command). Unknown tools are
     /// protocol errors.
-    async fn dispatch(&self, name: &str, args: Value) -> Result<Result<Value, String>, McpError> {
+    async fn dispatch(
+        &self,
+        name: &str,
+        mut args: Value,
+    ) -> Result<Result<Value, String>, McpError> {
         let studio = &self.app;
+        // Positions in beats or bars become seconds, through the tempo map
+        // as it is now.
+        let stems = self
+            .tools
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| times::position_stems(&Value::Object((*t.input_schema).clone())))
+            .unwrap_or_default();
+        if times::has_beats(&args, &stems) {
+            let maps = tool_try!(
+                run(studio, |s| Ok::<_, String>(times::Maps::of(
+                    s.session().project()
+                )))
+                .await
+            );
+            tool_try!(maps.resolve(&mut args, &stems));
+        }
         let result = match name {
             GET_STATE => {
                 let NoArgs {} = try_args!(parse(args));
-                run(studio, |s| {
-                    Ok::<_, CoreError>(to_json(&s.session().state()))
-                })
-                .await
+                run(studio, |s| Ok::<_, CoreError>(state_json(s))).await
             }
             UNDO => {
                 let NoArgs {} = try_args!(parse(args));
@@ -195,7 +219,7 @@ impl DawkeyMcp {
                     let project = Project::new(name.unwrap_or_else(|| "Untitled".into()));
                     s.replace(LoadedProject::new(project))
                         .map_err(|e| e.to_string())?;
-                    Ok::<_, String>(to_json(&s.session().state()))
+                    Ok::<_, String>(state_json(s))
                 })
                 .await
             }
@@ -216,7 +240,7 @@ impl DawkeyMcp {
                 run(studio, move |s| {
                     refuse_if_dirty(s.session(), discard_changes)?;
                     s.replace(loaded).map_err(|e| e.to_string())?;
-                    Ok::<_, String>(to_json(&s.session().state()))
+                    Ok::<_, String>(state_json(s))
                 })
                 .await
             }
@@ -1012,6 +1036,13 @@ fn parse_key_combo(combo: &str) -> Result<(String, Modifiers), String> {
         }
     }
     Ok((key, modifiers))
+}
+
+/// The session state as get_state returns it, with beats added.
+fn state_json(studio: &Studio) -> Value {
+    let mut state = to_json(&studio.session().state());
+    times::with_beats(studio.session().project(), &mut state);
+    state
 }
 
 fn revision(studio: &Studio) -> u64 {
