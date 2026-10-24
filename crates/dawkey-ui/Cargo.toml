@@ -1,6 +1,6 @@
 [package]
 name = "dawkey-ui"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "Dawkey's UI toolkit: widget tree with stable IDs, layout, input, scene, accessibility tree"
