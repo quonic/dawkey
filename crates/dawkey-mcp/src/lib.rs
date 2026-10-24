@@ -675,16 +675,19 @@ impl DawkeyMcp {
             end_s,
             output_path,
         } = args;
+        // Make the file's folder first, so a bad path fails before the
+        // render, not after it.
+        let output_path = output_path.map(|path| std::path::absolute(&path).unwrap_or(path));
+        if let Some(path) = &output_path {
+            dawkey_media::make_output_folder(path).map_err(|e| e.to_string())?;
+        }
         let job = run(&self.app, move |s| s.render_job(start_s, end_s)).await?;
         let (result, leftovers) = blocking(move || {
             let rate = job.sample_rate();
             let (audio, leftovers) = job.run();
             let analysis = dawkey_media::analyze(&audio, rate);
             let written = match output_path {
-                Some(path) => {
-                    let path = std::path::absolute(&path).unwrap_or(path);
-                    dawkey_media::write_wav(&path, &audio, rate).map(|()| Some(path))
-                }
+                Some(path) => dawkey_media::write_wav(&path, &audio, rate).map(|()| Some(path)),
                 None => Ok(None),
             };
             let result = written.map(|written| {
@@ -742,6 +745,9 @@ impl DawkeyMcp {
             return Err(format!("tail_s is from 0 to 60 seconds, not {tail_s}"));
         }
         let start_s = start_s.unwrap_or(0.0);
+        // Make the file's folder first, so a bad path fails before the
+        // render, not after it.
+        dawkey_media::make_output_folder(&path).map_err(|e| e.to_string())?;
         let (job, spec, end_s) = run(&self.app, move |s| {
             let project = s.session().project();
             let end_s = match end_s {

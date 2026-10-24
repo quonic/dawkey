@@ -83,12 +83,28 @@ impl AudioData {
     }
 }
 
-/// Writes planar audio as a 32-bit float WAV file.
+/// Makes the folder `path` goes in (and its parents), so a file can be
+/// written there.
+pub fn make_output_folder(path: &Path) -> Result<(), MediaError> {
+    match path.parent() {
+        Some(folder) if !folder.as_os_str().is_empty() => {
+            std::fs::create_dir_all(folder).map_err(|source| MediaError::Io {
+                path: folder.to_owned(),
+                source,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Writes planar audio as a 32-bit float WAV file, making its folder if
+/// needed.
 pub fn write_wav(path: &Path, channels: &[Vec<f32>], sample_rate: u32) -> Result<(), MediaError> {
     let wav_err = |source| MediaError::Wav {
         path: path.to_owned(),
         source,
     };
+    make_output_folder(path)?;
     let spec = hound::WavSpec {
         channels: channels.len() as u16,
         sample_rate,

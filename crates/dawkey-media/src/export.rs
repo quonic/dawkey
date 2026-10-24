@@ -127,6 +127,7 @@ pub fn export(
         path: path.to_owned(),
         reason,
     })?;
+    crate::make_output_folder(path)?;
     let partial = partial_path(path);
     let pipeline = Pipeline::new(source, source_rate, spec, path, progress)?;
     let result = match spec.file {

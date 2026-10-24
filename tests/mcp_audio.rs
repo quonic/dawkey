@@ -489,3 +489,52 @@ async fn exports_the_song_to_wav_and_flac() {
     }
     dawkey.shutdown().await.unwrap();
 }
+
+/// Output paths in folders that don't exist yet: the folders are made, and
+/// a path that can't be written fails before the render runs.
+#[tokio::test]
+async fn makes_output_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav = write_wav(dir.path(), "saw.wav", &[saw(48_000)], 48_000);
+    let dawkey = start().await;
+    dawkey
+        .call("import_audio", json!({ "path": wav }))
+        .await
+        .unwrap();
+
+    let rendered_to = dir.path().join("stems/new/1_saw.wav");
+    let rendered = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0.0, "end_s": 0.5, "output_path": rendered_to }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rendered["output_path"], json!(rendered_to));
+    assert!(rendered_to.is_file());
+
+    let exported_to = dir.path().join("exports/game/song.flac");
+    dawkey
+        .call("export_audio", json!({ "path": exported_to }))
+        .await
+        .unwrap();
+    assert!(exported_to.is_file());
+
+    // A folder that can't be made (a file is in the way) is an error that
+    // names it.
+    let blocked = wav.join("x/song.wav");
+    let err = dawkey
+        .call_err(
+            "render_range",
+            json!({ "start_s": 0.0, "end_s": 0.5, "output_path": blocked }),
+        )
+        .await
+        .unwrap();
+    assert!(err.contains("saw.wav"), "{err}");
+    let err = dawkey
+        .call_err("export_audio", json!({ "path": blocked }))
+        .await
+        .unwrap();
+    assert!(err.contains("saw.wav"), "{err}");
+    dawkey.shutdown().await.unwrap();
+}
