@@ -45,7 +45,7 @@ A DAW for the Linux desktop, written in Rust. Wayland only, PipeWire/WirePlumber
   It then becomes an MCP tool automatically. Its doc comment is the tool description, so write it for a model reading the tool list.
 
 - Bad tool input must return a tool error (`is_error: true`) with a readable message, not a protocol error, so a model can see the message and retry.
-- One tool call is one undo step. Track IDs are never reused, so they stay valid across undo and redo.
+- One tool call is one undo step. Track IDs are never reused, so they stay valid across undo and redo. `Session` logs every change (`changes.rs`: revision, kind, label, what it touched; the last thousand) for `get_changes`; every MCP result carries `revision` and `dawkey_mcp::INSTANCE_ID`, and a client subscribed to the `dawkey://project` resource gets `notifications/resources/updated` when the revision moves past the one it last saw (a poll per connection, `DawkeyMcp::on_initialized`).
 - In `mcp` mode stdout carries the protocol. Log through `tracing` (to stderr, filtered by `DAWKEY_LOG`) and never `println!`.
 - Every source file starts with `// SPDX-License-Identifier: AGPL-3.0-or-later`.
 - **Real-time code** (`EngineProcessor::process` and everything it calls, the PipeWire `on_process` callback) must never allocate, free, lock or block. Debug builds and dawkey-engine's tests install `assert_no_alloc::AllocDisabler`, which aborts on allocation inside `process`. Graphs reach the RT thread and leave it through `rtrb` queues; the controller frees them.

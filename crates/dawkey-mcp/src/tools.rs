@@ -44,6 +44,7 @@ pub(crate) const RESCAN_PLUGINS: &str = "rescan_plugins";
 pub(crate) const RELOAD_PLUGIN: &str = "reload_plugin";
 pub(crate) const SHOW_PLUGIN_GUI: &str = "show_plugin_gui";
 pub(crate) const GET_PLUGIN: &str = "get_plugin";
+pub(crate) const GET_CHANGES: &str = "get_changes";
 
 /// Takes no arguments.
 #[derive(Deserialize, JsonSchema)]
@@ -77,6 +78,21 @@ pub(crate) struct GetState {
     /// A compact state: like `notes`, `controls` and `automation` all false.
     #[serde(default)]
     pub(crate) summary: bool,
+}
+
+/// What changed the project since a revision you know (every result that
+/// changes the project carries `revision`): each undo step, undo, redo and
+/// source added since, oldest first, with its name and the tracks, clips,
+/// notes and plugin slots it touched, and `also` for the tempo, meter, loop,
+/// punch, name, plugin chains and automation. Use it to catch up with what
+/// the window or another client did. Every result also carries `instance`,
+/// which changes when Dawkey restarts; a new instance or another project
+/// starts the revisions over (`complete: false`; call get_state then).
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GetChanges {
+    /// The last revision you saw.
+    pub(crate) since_revision: u64,
 }
 
 /// Start a new, empty project, replacing the open one. Returns a summary of
@@ -746,7 +762,8 @@ pub(crate) fn build_tools() -> Vec<Tool> {
         ),
         tool::<ReloadPlugin>(RELOAD_PLUGIN, "", mutating.clone().idempotent(true)),
         tool::<ShowPluginGui>(SHOW_PLUGIN_GUI, "", mutating.idempotent(true)),
-        tool::<GetPlugin>(GET_PLUGIN, "", read_only),
+        tool::<GetPlugin>(GET_PLUGIN, "", read_only.clone()),
+        tool::<GetChanges>(GET_CHANGES, "", read_only),
     ];
     tools.extend(COMMAND_SPECS.iter().map(command_tool));
     tools

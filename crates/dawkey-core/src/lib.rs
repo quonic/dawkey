@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+mod changes;
 mod command;
 mod edit;
 mod error;
@@ -19,6 +20,7 @@ pub mod project_file;
 mod session;
 mod tempo;
 
+pub use changes::{Change, ChangeKind, ChangesSince};
 pub use command::{
     AddAutomationPoint, AddClip, AddMidiClip, AddMidiNotes, AddPlugin, AddTrack, COMMAND_SPECS,
     Command, CommandSpec, CompTake, ControlSpec, ControlValue, DuplicateClip, EditMidiNotes,

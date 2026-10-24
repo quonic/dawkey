@@ -18,7 +18,8 @@ mod times;
 mod tools;
 
 use std::fmt::Display;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use base64::Engine as _;
 use dawkey_app::{App, DragFrom, ImportRequest, Platform, WindowInfo};
@@ -27,9 +28,12 @@ use dawkey_studio::{LoadedProject, Studio};
 use dawkey_ui::{Modifiers, Point, Size};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+    ListResourcesResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams,
+    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents,
+    ResourceUpdatedNotificationParam, ServerCapabilities, ServerConfig, SubscribeRequestParams,
+    Tool, UnsubscribeRequestParams,
 };
-use rmcp::service::RequestContext;
+use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -41,7 +45,11 @@ Dawkey is a digital audio workstation. These tools edit and play the open
 project. Call get_state first: it returns the project, including the
 track, clip and source IDs that other tools take (`summary: true`, or
 `notes: false`, leaves the notes out of a big project, and `tracks` picks
-tracks; open_project and new_project return such a summary). Every tool call that changes
+tracks; open_project and new_project return such a summary). Every result
+carries `revision` and `instance` (which changes when Dawkey restarts);
+get_changes lists what changed since a revision (from the window or another
+client too), and a client that subscribes to the `dawkey://project`
+resource is told when the project changes past what it last saw. Every tool call that changes
 the project is one undo step, so `undo` reverts exactly one call. Changes are
 not written to disk until save_project is called.
 
@@ -125,11 +133,33 @@ arrange/tempo shows the tempo and time signature lanes (tempo/<n> and
 meter/<n> points); track/<id>/takes shows a track's take lanes (take/<clip
 id>).";
 
-/// The MCP server. Cheap to clone; all clones talk to the same studio.
+/// Identifies this Dawkey process to clients, so they can tell when it was
+/// restarted: every result carries it.
+pub static INSTANCE_ID: LazyLock<String> = LazyLock::new(|| {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{}-{:x}", std::process::id(), nanos)
+});
+
+/// How often a connection checks for changes its client hasn't seen.
+const CHANGE_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The resource that is the open project (a summary, as get_state with
+/// `summary: true`). A client that subscribes to it is told
+/// (`notifications/resources/updated`) when the project changes past the
+/// revision it last saw in a result of its own.
+pub const PROJECT_URI: &str = "dawkey://project";
+
+/// The MCP server. Cheap to clone; all clones talk to the same studio. One
+/// is made per connection: `seen` is the revision the client last saw in a
+/// result, and `subscribed` whether it asked to be told of changes.
 #[derive(Debug, Clone)]
 pub struct DawkeyMcp {
     app: Handle<App>,
     tools: Arc<[Tool]>,
+    seen: Arc<AtomicU64>,
+    subscribed: Arc<AtomicBool>,
 }
 
 /// Bad arguments are reported to the caller as a tool error, not a protocol
@@ -158,6 +188,8 @@ impl DawkeyMcp {
         Self {
             app,
             tools: build_tools().into(),
+            seen: Arc::new(AtomicU64::new(u64::MAX)),
+            subscribed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -208,11 +240,24 @@ impl DawkeyMcp {
                 };
                 run(studio, move |s| Ok::<_, CoreError>(state_json(s, trim))).await
             }
+            GET_CHANGES => {
+                let GetChanges { since_revision } = try_args!(parse(args));
+                run(studio, move |s| {
+                    let mut result = to_json(&s.session().changes_since(since_revision));
+                    result["instance"] = json!(*INSTANCE_ID);
+                    Ok::<_, CoreError>(result)
+                })
+                .await
+            }
             UNDO => {
                 let NoArgs {} = try_args!(parse(args));
                 run(studio, |s| {
                     let undone = s.undo()?;
-                    Ok::<_, CoreError>(json!({ "undone": undone, "revision": revision(s) }))
+                    Ok::<_, CoreError>(json!({
+                        "undone": undone,
+                        "revision": revision(s),
+                        "instance": *INSTANCE_ID,
+                    }))
                 })
                 .await
             }
@@ -220,7 +265,11 @@ impl DawkeyMcp {
                 let NoArgs {} = try_args!(parse(args));
                 run(studio, |s| {
                     let redone = s.redo()?;
-                    Ok::<_, CoreError>(json!({ "redone": redone, "revision": revision(s) }))
+                    Ok::<_, CoreError>(json!({
+                        "redone": redone,
+                        "revision": revision(s),
+                        "instance": *INSTANCE_ID,
+                    }))
                 })
                 .await
             }
@@ -263,7 +312,11 @@ impl DawkeyMcp {
                 let SaveProject { path } = try_args!(parse(args));
                 run(studio, move |s| {
                     let saved = s.save(path.as_deref())?;
-                    Ok::<_, CoreError>(json!({ "path": saved, "revision": revision(s) }))
+                    Ok::<_, CoreError>(json!({
+                        "path": saved,
+                        "revision": revision(s),
+                        "instance": *INSTANCE_ID,
+                    }))
                 })
                 .await
             }
@@ -349,7 +402,13 @@ impl DawkeyMcp {
             }
             GET_ENGINE_STATUS => {
                 let NoArgs {} = try_args!(parse(args));
-                run(studio, |s| Ok::<_, CoreError>(to_json(&s.engine_status()))).await
+                run(studio, |s| {
+                    let mut status = to_json(&s.engine_status());
+                    status["instance"] = json!(*INSTANCE_ID);
+                    status["revision"] = json!(revision(s));
+                    Ok::<_, CoreError>(status)
+                })
+                .await
             }
             GET_METERS => {
                 let NoArgs {} = try_args!(parse(args));
@@ -662,6 +721,7 @@ impl DawkeyMcp {
                     let outcome = s.execute(command)?;
                     let mut result = to_json(&outcome);
                     result["revision"] = revision(s).into();
+                    result["instance"] = json!(*INSTANCE_ID);
                     Ok::<_, CoreError>(result)
                 })
                 .await
@@ -916,9 +976,15 @@ impl DawkeyMcp {
 
 impl ServerHandler for DawkeyMcp {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("dawkey", env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_resources_subscribe()
+                .build(),
+        )
+        .with_server_info(Implementation::new("dawkey", env!("CARGO_PKG_VERSION")))
+        .with_instructions(INSTRUCTIONS)
     }
 
     async fn list_tools(
@@ -940,10 +1006,111 @@ impl ServerHandler for DawkeyMcp {
             return Ok(self.screenshot(args).await.into());
         }
         let result = match self.dispatch(&request.name, args).await? {
-            Ok(value) => CallToolResult::structured(value),
+            Ok(value) => {
+                if let Some(revision) = value["revision"].as_u64() {
+                    self.seen.store(revision, Ordering::Relaxed);
+                }
+                CallToolResult::structured(value)
+            }
             Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
         };
         Ok(result.into())
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let mut project = Resource::new(PROJECT_URI, "project")
+            .with_title("The open project")
+            .with_description(
+                "The open project as get_state reports it with `summary: true`. Subscribe to \
+                 it to be told when the project changes (from the window or another client): \
+                 then get_changes says what changed since the revision you last saw.",
+            );
+        project.mime_type = Some("application/json".to_owned());
+        Ok(ListResourcesResult::with_all_items(vec![project]))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
+        check_uri(&request.uri)?;
+        let state = run(&self.app, |s| {
+            Ok::<_, String>(state_json(s, state::Trim::summary()))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e, None))?;
+        let contents = ResourceContents::text(state.to_string(), PROJECT_URI);
+        Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+            vec![contents],
+        )))
+    }
+
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        check_uri(&request.uri)?;
+        self.subscribed.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        check_uri(&request.uri)?;
+        self.subscribed.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Once a client is connected, a task watches the project's revision
+    /// for it: when it moves past the one the client last saw in a result,
+    /// and the client subscribed to the project resource, it's told.
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        let app = self.app.clone();
+        let (seen, subscribed) = (self.seen.clone(), self.subscribed.clone());
+        let peer = context.peer;
+        tokio::spawn(async move {
+            while !peer.is_transport_closed() {
+                tokio::time::sleep(CHANGE_POLL).await;
+                if !subscribed.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let Ok(revision) = run(&app, |s| Ok::<_, String>(revision(s))).await else {
+                    return;
+                };
+                let last = seen.load(Ordering::Relaxed);
+                // Until the client has seen a revision, there's nothing to
+                // compare with.
+                if last == u64::MAX || revision == last {
+                    continue;
+                }
+                seen.store(revision, Ordering::Relaxed);
+                let notice = ResourceUpdatedNotificationParam::new(PROJECT_URI);
+                if peer.notify_resource_updated(notice).await.is_err() {
+                    return;
+                }
+            }
+        });
+    }
+}
+
+/// The only resource is the project.
+fn check_uri(uri: &str) -> Result<(), McpError> {
+    if uri == PROJECT_URI {
+        Ok(())
+    } else {
+        Err(McpError::resource_not_found(
+            format!("no resource {uri}; the project is {PROJECT_URI}"),
+            None,
+        ))
     }
 }
 
@@ -1084,6 +1251,7 @@ fn state_json(studio: &Studio, trim: state::Trim) -> Value {
     let mut state = to_json(&studio.session().state());
     times::with_beats(studio.session().project(), &mut state);
     trim.apply(&mut state);
+    state["instance"] = json!(*INSTANCE_ID);
     state
 }
 
