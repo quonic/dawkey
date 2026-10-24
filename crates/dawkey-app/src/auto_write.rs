@@ -183,6 +183,17 @@ impl App {
                 f64::from(*start_pan),
                 merge_key,
             ),
+            Gesture::Send {
+                track,
+                bus,
+                start_db,
+                merge_key,
+            } => (
+                *track,
+                AutomationTarget::Send { bus: *bus },
+                f64::from(*start_db),
+                merge_key,
+            ),
             Gesture::PluginParam {
                 plugin,
                 param,
@@ -241,6 +252,7 @@ impl App {
             Some(
                 Gesture::Fader { merge_key, .. }
                 | Gesture::Pan { merge_key, .. }
+                | Gesture::Send { merge_key, .. }
                 | Gesture::PluginParam { merge_key, .. },
             ) => merge_key.clone(),
             _ => String::new(),

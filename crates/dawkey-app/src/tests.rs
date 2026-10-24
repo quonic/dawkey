@@ -9,7 +9,7 @@ use dawkey_media::{AudioData, DecodedFile};
 use dawkey_studio::{AudioBackend, LoadedProject, Studio};
 use dawkey_ui::{ChromeAction, Modifiers, MouseButton, Point, Role};
 
-use crate::state::{FADER_H, ROW_H};
+use crate::state::{FADER_H, ROW_H, SEND_W};
 use crate::view::format_time;
 use crate::{App, DragFrom, Page, PendingAction, Platform, PlatformRequest, WindowInfo};
 
@@ -2943,4 +2943,63 @@ fn the_window_keeps_drawing_while_stopped_when_something_moves() {
     assert!(app.animating(), "the project changed");
     app.rebuild();
     assert!(!app.animating());
+}
+
+#[test]
+fn sends_in_the_mixer() {
+    let mut app = app();
+    let track = add_track(&mut app, "Keys");
+    // No bus: nothing to send to, so no button.
+    click(&mut app, "view/mixer").unwrap();
+    assert!(
+        app.access_tree()
+            .find(&format!("track/{track}/add_send"))
+            .is_none()
+    );
+    let bus = app
+        .studio
+        .execute(
+            AddTrack {
+                kind: TrackKind::Bus,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+    click(&mut app, &format!("track/{track}/add_send")).unwrap();
+    let sends = &app.studio.session().project().tracks[0].sends;
+    assert_eq!(sends.len(), 1);
+    assert_eq!((sends[0].bus.0, sends[0].gain_db), (bus, 0.0));
+    // One bus: nothing more to add; the bus can't send to itself.
+    let tree = app.access_tree();
+    assert!(tree.find(&format!("track/{track}/add_send")).is_none());
+    assert!(tree.find(&format!("track/{bus}/add_send")).is_none());
+    let row = format!("track/{track}/send/{bus}");
+    assert_eq!(tree.find(&row).unwrap().value.as_deref(), Some("+0.0 dB"));
+    // Dragging left turns it down, as one undo step.
+    app.drag(
+        DragFrom::Widget(row.clone()),
+        Point::new(-SEND_W * 0.25, 0.0),
+        8,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert!(app.studio.session().project().tracks[0].sends[0].gain_db < -10.0);
+    app.studio.undo().unwrap();
+    assert_eq!(
+        app.studio.session().project().tracks[0].sends[0].gain_db,
+        0.0
+    );
+    app.studio.redo().unwrap();
+    // Ctrl-click removes it, and the button is back.
+    app.click(&row, MouseButton::Left, CTRL).unwrap();
+    assert!(app.studio.session().project().tracks[0].sends.is_empty());
+    assert!(
+        app.access_tree()
+            .find(&format!("track/{track}/add_send"))
+            .is_some()
+    );
 }

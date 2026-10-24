@@ -17,6 +17,8 @@ pub(crate) const RULER_H: f32 = 28.0;
 pub(crate) const FADER_H: f32 = 220.0;
 /// Width of a mixer pan slider.
 pub(crate) const PAN_W: f32 = 76.0;
+/// Width of a send row in the mixer: dragging across it spans the fader's range.
+pub(crate) const SEND_W: f32 = 84.0;
 
 /// The top of each track's row in the arrange view (before scrolling),
 /// given how many take lanes and automation lanes each shows, and the
@@ -135,6 +137,13 @@ pub(crate) enum Gesture {
     Pan {
         track: TrackId,
         start_pan: f32,
+        merge_key: String,
+    },
+    /// A send's level in the mixer.
+    Send {
+        track: TrackId,
+        bus: TrackId,
+        start_db: f32,
         merge_key: String,
     },
     /// Dragging along the ruler moves the playhead.

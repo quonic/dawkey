@@ -3,16 +3,16 @@
 //! project goes through studio commands, so it's undoable like any MCP call.
 
 use dawkey_core::{
-    AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project, RemoveClip, SetLoop, SetPunch,
-    SetTrackArm, SetTrackGain, SetTrackMute, SetTrackOutput, SetTrackPan, SetTrackSolo, TrackId,
-    TrackKind,
+    AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project, RemoveClip, RemoveTrackSend,
+    SetLoop, SetPunch, SetTrackArm, SetTrackGain, SetTrackMute, SetTrackOutput, SetTrackPan,
+    SetTrackSend, SetTrackSolo, TrackId, TrackKind,
 };
 use dawkey_ui::{ChromeAction, DragPhase, Modifiers, MouseButton, Point, Rect, UiAction};
 
 use crate::App;
 use crate::state::{
     ClipEdge, FADER_H, Gesture, ImportRequest, MAX_ZOOM, MIN_ZOOM, PAN_W, Page, PendingAction,
-    PlatformRequest, RangeKind, TextField, takes_shown, track_tops,
+    PlatformRequest, RangeKind, SEND_W, TextField, takes_shown, track_tops,
 };
 use crate::view::{db_from_position, position_from_db};
 
@@ -168,6 +168,15 @@ impl App {
                 let track = parse_track(track)?;
                 self.cycle_output(track)
             }
+            ["track", track, "add_send"] => {
+                let track = parse_track(track)?;
+                self.add_send(track)
+            }
+            ["track", track, "send", bus] if modifiers.ctrl => {
+                let (track, bus) = (parse_track(track)?, parse_track(bus)?);
+                self.execute(RemoveTrackSend { track, bus }.into())
+            }
+            ["track", _, "send", _] => Ok(()),
             ["transport", "record"] => self.toggle_record(),
             ["transport", "loop"] => self.toggle_region(RangeKind::Loop),
             ["transport", "punch"] => self.toggle_region(RangeKind::Punch),
@@ -354,6 +363,33 @@ impl App {
                 }
                 result
             }
+            Gesture::Send {
+                track,
+                bus,
+                start_db,
+                merge_key,
+            } => {
+                // A strip's width is the fader's range, left to right.
+                let p = position_from_db(start_db) + (pos.x - origin.x) / SEND_W;
+                let gain_db = db_from_position(p);
+                let result = self.control_moved(
+                    track,
+                    AutomationTarget::Send { bus },
+                    f64::from(gain_db),
+                    &merge_key,
+                    SetTrackSend {
+                        track,
+                        bus,
+                        gain_db: Some(gain_db),
+                        pre_fader: None,
+                    }
+                    .into(),
+                );
+                if end {
+                    self.end_gesture();
+                }
+                result
+            }
             Gesture::Pan {
                 track,
                 start_pan,
@@ -453,6 +489,35 @@ impl App {
             return Err("there's no bus to send it to (+ Bus makes one)".into());
         }
         self.execute(SetTrackOutput { track, bus }.into())
+    }
+
+    /// Adds a send from `track` to the first bus it can send to (at 0 dB).
+    fn add_send(&mut self, track: TrackId) -> Result<(), String> {
+        let project = self.studio.session().project();
+        let sends = &project
+            .track(track)
+            .ok_or_else(|| format!("track {track} does not exist"))?
+            .sends;
+        let bus = project
+            .tracks
+            .iter()
+            .find(|b| {
+                b.kind == TrackKind::Bus
+                    && b.id != track
+                    && !sends.iter().any(|s| s.bus == b.id)
+                    && !project.depends_on(track, b.id)
+            })
+            .map(|b| b.id)
+            .ok_or_else(|| "there's no bus to send to (+ Bus makes one)".to_owned())?;
+        self.execute(
+            SetTrackSend {
+                track,
+                bus,
+                gain_db: None,
+                pre_fader: None,
+            }
+            .into(),
+        )
     }
 
     fn toggle_record(&mut self) -> Result<(), String> {
@@ -571,6 +636,22 @@ impl App {
                     self.value_now(track, &AutomationTarget::Gain, f64::from(fixed)) as f32;
                 Some(Gesture::Fader {
                     track,
+                    start_db,
+                    merge_key,
+                })
+            }
+            ["track", track, "send", bus] => {
+                let (track, bus) = (parse_track(track)?, parse_track(bus)?);
+                let fixed = project
+                    .track(track)
+                    .and_then(|t| t.sends.iter().find(|s| s.bus == bus))
+                    .ok_or_else(|| format!("track {track} has no send to {bus}"))?
+                    .gain_db;
+                let start_db =
+                    self.value_now(track, &AutomationTarget::Send { bus }, f64::from(fixed)) as f32;
+                Some(Gesture::Send {
+                    track,
+                    bus,
                     start_db,
                     merge_key,
                 })

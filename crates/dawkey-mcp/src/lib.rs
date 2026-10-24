@@ -78,7 +78,9 @@ set_plugin_output sends a multi-out instrument's other outputs (`outputs`) to
 buses.
 
 Mixing: add_track with kind `bus` makes a bus, and set_track_output sends a
-track (or bus) to it instead of the master. The master is track 0 (`master`
+track (or bus) to it instead of the master; set_track_send adds an aux send
+to a bus at its own level (pre or post fader; automation target `send`),
+e.g. one reverb bus with a different amount from each track. The master is track 0 (`master`
 in get_state): it takes plugins, set_track_gain and automation like any bus.
 
 Clips: move_clip moves one, trim_clip moves its start or end edge (what it

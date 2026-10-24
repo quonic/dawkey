@@ -5,7 +5,7 @@
 use crate::error::CoreError;
 use crate::model::{
     AutomationLane, Clip, ClipContent, ClipId, ControlPoint, InputChannels, MidiOutput, Note,
-    PluginSlot, Project, Region, SynthParams, TimeSignature, Track, TrackId,
+    PluginSlot, Project, Region, Send, SynthParams, TimeSignature, Track, TrackId,
 };
 use crate::tempo::{MeterChange, TempoChange};
 
@@ -67,6 +67,8 @@ pub(crate) enum TrackProp {
     Automation(Vec<AutomationLane>),
     /// The bus it goes to (`None`: the master).
     Output(Option<TrackId>),
+    /// Its aux sends.
+    Sends(Vec<Send>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,6 +136,7 @@ impl Edit {
                     TrackProp::Output(v) => {
                         TrackProp::Output(std::mem::replace(&mut track.output, v))
                     }
+                    TrackProp::Sends(v) => TrackProp::Sends(std::mem::replace(&mut track.sends, v)),
                     TrackProp::Synth(v) => {
                         let Some(synth) = &mut track.synth else {
                             return Err(CoreError::invalid(format!(

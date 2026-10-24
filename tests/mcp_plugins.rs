@@ -1479,3 +1479,162 @@ async fn batches_commands() {
     }
     dawkey.shutdown().await.unwrap();
 }
+
+/// Aux sends: a copy of a track's signal to a bus at its own level, post or
+/// pre fader, automatable, and never a loop.
+#[tokio::test]
+async fn aux_sends() {
+    let setup = setup();
+    let dawkey = start(&setup).await;
+    let track = signal_track(&dawkey, &setup.wav).await;
+    let verb = dawkey
+        .call("add_track", json!({ "name": "Verb", "kind": "bus" }))
+        .await
+        .unwrap()["track"]
+        .as_u64()
+        .unwrap();
+    // The bus halves what reaches it, so its share can be told apart.
+    let slot = add_plugin(&dawkey, &json!(verb), "clap:dawkey.test.gain").await;
+    dawkey
+        .call(
+            "set_plugin_param",
+            json!({ "plugin": slot, "param": "1", "value": HALF_DB }),
+        )
+        .await
+        .unwrap();
+    let direct = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    assert!(approx(Some(direct), HALF_CENTER_DB));
+
+    // A send at 0 dB adds a halved copy: 1.5 times the direct signal.
+    let set = dawkey
+        .call("set_track_send", json!({ "track": track, "bus": verb }))
+        .await
+        .unwrap();
+    assert!(set["revision"].is_u64());
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(
+        state["project"]["tracks"][0]["sends"],
+        json!([{ "bus": verb, "gain_db": 0.0 }])
+    );
+    let with_send = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    assert!(
+        approx(Some(with_send), direct + 20.0 * 1.5f64.log10()),
+        "{with_send}"
+    );
+
+    // At -6.02 dB the copy is a quarter: 1.25 times.
+    dawkey
+        .call(
+            "set_track_send",
+            json!({ "track": track, "bus": verb, "gain_db": HALF_DB }),
+        )
+        .await
+        .unwrap();
+    let quieter = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    assert!(
+        approx(Some(quieter), direct + 20.0 * 1.25f64.log10()),
+        "{quieter}"
+    );
+
+    // Post-fader: pulling the fader down takes the send with it. Pre-fader:
+    // the send stays.
+    dawkey
+        .call(
+            "set_track_gain",
+            json!({ "track": track, "gain_db": -144.0 }),
+        )
+        .await
+        .unwrap();
+    let faded = peak(&dawkey, 0.0, 0.5).await.unwrap_or(-200.0);
+    assert!(faded < -140.0, "faded out, send and all: {faded}");
+    dawkey
+        .call(
+            "set_track_send",
+            json!({ "track": track, "bus": verb, "pre_fader": true }),
+        )
+        .await
+        .unwrap();
+    let pre = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    // Before the fader and pan law: the half-scale clip, the send's -6 dB,
+    // and the bus's plugin halving it.
+    assert!(approx(Some(pre), 3.0 * HALF_DB), "{pre}");
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(state["project"]["tracks"][0]["sends"][0]["pre_fader"], true);
+    dawkey
+        .call("set_track_gain", json!({ "track": track, "gain_db": 0.0 }))
+        .await
+        .unwrap();
+
+    // The send's level automates, in dB.
+    dawkey
+        .call(
+            "set_automation",
+            json!({ "track": track, "target": { "kind": "send", "bus": verb }, "points": [
+                { "time_s": 0.0, "value": -144.0 }, { "time_s": 0.0001, "value": -144.0 },
+                { "time_s": 0.5, "value": -144.0 }, { "time_s": 0.5001, "value": 0.0 },
+            ] }),
+        )
+        .await
+        .unwrap();
+    let before = peak(&dawkey, 0.1, 0.4).await.unwrap();
+    assert!(
+        approx(Some(before), HALF_CENTER_DB),
+        "no send yet: {before}"
+    );
+    let after = peak(&dawkey, 0.6, 0.9).await.unwrap();
+    assert!(after > before + 1.0, "{after} vs {before}");
+
+    // Removing the send takes its lane; the bus going takes the send.
+    dawkey
+        .call("remove_track_send", json!({ "track": track, "bus": verb }))
+        .await
+        .unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert!(state["project"]["tracks"][0].get("sends").is_none());
+    assert!(state["project"]["tracks"][0].get("automation").is_none());
+    dawkey
+        .call("set_track_send", json!({ "track": track, "bus": verb }))
+        .await
+        .unwrap();
+    dawkey
+        .call("remove_track", json!({ "track": verb }))
+        .await
+        .unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert!(state["project"]["tracks"][0].get("sends").is_none());
+    dawkey.call("undo", json!({})).await.unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(state["project"]["tracks"][0]["sends"][0]["bus"], verb);
+
+    // No loops, no sends to tracks, none from the master.
+    let other = dawkey
+        .call("add_track", json!({ "name": "Other", "kind": "bus" }))
+        .await
+        .unwrap()["track"]
+        .as_u64()
+        .unwrap();
+    dawkey
+        .call("set_track_output", json!({ "track": verb, "bus": other }))
+        .await
+        .unwrap();
+    for (args, expected) in [
+        (json!({ "track": other, "bus": verb }), "loop"),
+        (json!({ "track": verb, "bus": verb }), "loop"),
+        (json!({ "track": track, "bus": track }), "not a bus"),
+        (json!({ "track": 0, "bus": verb }), "master"),
+        (json!({ "track": track, "bus": 99 }), "99"),
+        (
+            json!({ "track": track, "bus": other, "gain_db": 50 }),
+            "gain_db",
+        ),
+    ] {
+        let err = dawkey.call_err("set_track_send", args).await.unwrap();
+        assert!(err.contains(expected), "{err}");
+    }
+    let err = dawkey
+        .call_err("remove_track_send", json!({ "track": track, "bus": other }))
+        .await
+        .unwrap();
+    assert!(err.contains("no send"), "{err}");
+    dawkey.shutdown().await.unwrap();
+}

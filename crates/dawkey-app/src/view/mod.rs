@@ -108,6 +108,11 @@ pub(crate) struct TrackView {
     /// The bus it goes to (`None`: the master), and that bus's name.
     pub(crate) output: Option<TrackId>,
     pub(crate) output_name: String,
+    /// Aux sends: the bus, its name, the level (with automation at the
+    /// playhead) and whether it's pre-fader.
+    pub(crate) sends: Vec<SendView>,
+    /// There's a bus it could send to that it doesn't yet.
+    pub(crate) can_add_send: bool,
     pub(crate) gain_db: f32,
     pub(crate) pan: f32,
     pub(crate) mute: bool,
@@ -135,6 +140,15 @@ pub(crate) struct TrackView {
     /// Linear peak levels.
     pub(crate) level: [f32; 2],
     pub(crate) clips: Vec<ClipView>,
+}
+
+/// An aux send as the mixer shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SendView {
+    pub(crate) bus: TrackId,
+    pub(crate) bus_name: String,
+    pub(crate) gain_db: f32,
+    pub(crate) pre_fader: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +279,7 @@ pub(crate) fn lane_label_kind(
     match target {
         AutomationTarget::Gain => ("Gain".to_owned(), LaneKind::Gain),
         AutomationTarget::Pan => ("Pan".to_owned(), LaneKind::Pan),
+        AutomationTarget::Send { bus } => (format!("Send to bus {bus}"), LaneKind::Gain),
         AutomationTarget::Param { plugin, param } => {
             let info = track
                 .plugin(*plugin)
