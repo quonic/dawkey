@@ -45,6 +45,7 @@ pub(crate) const RELOAD_PLUGIN: &str = "reload_plugin";
 pub(crate) const SHOW_PLUGIN_GUI: &str = "show_plugin_gui";
 pub(crate) const GET_PLUGIN: &str = "get_plugin";
 pub(crate) const GET_CHANGES: &str = "get_changes";
+pub(crate) const BATCH: &str = "batch";
 
 /// Takes no arguments.
 #[derive(Deserialize, JsonSchema)]
@@ -761,9 +762,10 @@ pub(crate) fn build_tools() -> Vec<Tool> {
             mutating.clone().idempotent(true),
         ),
         tool::<ReloadPlugin>(RELOAD_PLUGIN, "", mutating.clone().idempotent(true)),
-        tool::<ShowPluginGui>(SHOW_PLUGIN_GUI, "", mutating.idempotent(true)),
+        tool::<ShowPluginGui>(SHOW_PLUGIN_GUI, "", mutating.clone().idempotent(true)),
         tool::<GetPlugin>(GET_PLUGIN, "", read_only.clone()),
         tool::<GetChanges>(GET_CHANGES, "", read_only),
+        tool::<crate::batch::Batch>(BATCH, "", mutating),
     ];
     tools.extend(COMMAND_SPECS.iter().map(command_tool));
     tools

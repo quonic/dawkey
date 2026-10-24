@@ -1372,3 +1372,110 @@ async fn bridged_plugins_run_in_processes_of_their_own() {
         assert!(!Path::new("/proc").join(pid.to_string()).exists(), "{pid}");
     }
 }
+
+/// A batch applies several commands as one call and one undo step, where
+/// later ones refer to what earlier ones made; a failure applies nothing.
+#[tokio::test]
+async fn batches_commands() {
+    let setup = setup();
+    let dawkey = start(&setup).await;
+    dawkey
+        .call("set_tempo", json!({ "bpm": 120 }))
+        .await
+        .unwrap();
+    let result = dawkey
+        .call(
+            "batch",
+            json!({
+                "label": "set up the mix",
+                "operations": [
+                    { "tool": "add_track", "args": { "name": "Verb", "kind": "bus" } },
+                    { "tool": "add_midi_clip", "args": {
+                        "track_name": "Keys", "position_bar": 2,
+                        "notes": [{ "pitch": 60, "start_beats": 0, "length_beats": 1 }],
+                    } },
+                    { "tool": "set_track_output", "args": { "track": "$1.track", "bus": "$0.track" } },
+                    { "tool": "add_plugin", "args": { "track": "$1.track", "plugin": "clap:dawkey.test.gain" } },
+                    { "tool": "set_plugin_param", "args": { "plugin": "$3.plugin", "param": "1", "value": -6 } },
+                    { "tool": "set_track_pan", "args": { "track": "$1.track", "pan": -0.5 } },
+                    { "tool": "edit_midi_notes", "args": { "clip": "$1.clip", "notes": [{ "id": "$1.notes[0]", "pitch": 67 }] } },
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+    let outcomes = result["outcomes"].as_array().unwrap();
+    assert_eq!(outcomes.len(), 7);
+    let bus = outcomes[0]["track"].as_u64().unwrap();
+    let keys = outcomes[1]["track"].as_u64().unwrap();
+    assert_eq!(result["revision"], 2, "one undo step");
+
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(state["undo"], "set up the mix");
+    let track = state["project"]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == keys)
+        .unwrap();
+    assert_eq!(track["output"], bus);
+    assert_eq!(track["pan"], -0.5);
+    assert_eq!(track["plugins"][0]["plugin"], "clap:dawkey.test.gain");
+    assert_eq!(track["clips"][0]["start"], 96_000); // bar 2 at 120 bpm
+    assert_eq!(track["clips"][0]["notes"][0]["pitch"], 67);
+    let slot = outcomes[3]["plugin"].clone();
+    let plugin = dawkey
+        .call("get_plugin", json!({ "plugin": slot }))
+        .await
+        .unwrap();
+    assert_eq!(plugin["params"][0]["value"], -6.0);
+
+    // One undo reverts it all.
+    dawkey.call("undo", json!({})).await.unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(state["project"]["tracks"], json!([]));
+
+    // A failure in the middle applies nothing, and says where.
+    let err = dawkey
+        .call_err(
+            "batch",
+            json!({ "operations": [
+                { "tool": "add_track", "args": { "name": "A" } },
+                { "tool": "add_plugin", "args": { "track": "$0.track", "plugin": "clap:not.there" } },
+            ] }),
+        )
+        .await
+        .unwrap();
+    assert!(err.contains("operation 1: add_plugin:"), "{err}");
+    assert!(err.contains("clap:not.there"), "{err}");
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(state["project"]["tracks"], json!([]));
+    assert_eq!(state["revision"], 3);
+
+    // Bad batches.
+    for (ops, expected) in [
+        (json!([]), "at least one"),
+        (json!([{ "tool": "get_state" }]), "can't be in a batch"),
+        (json!([{ "tool": "nope" }]), "unknown tool"),
+        (
+            json!([{ "tool": "set_track_gain", "args": { "track": "$0.track", "gain_db": 0 } }]),
+            "hasn't run yet",
+        ),
+        (
+            json!([{ "tool": "add_track", "args": { "name": "A" } },
+                   { "tool": "set_track_gain", "args": { "track": "$0.clip", "gain_db": 0 } }]),
+            "returned no \"clip\"",
+        ),
+        (
+            json!([{ "tool": "add_track", "args": { "name": "A", "bogus": 1 } }]),
+            "add_track: invalid arguments: unknown field `bogus`",
+        ),
+    ] {
+        let err = dawkey
+            .call_err("batch", json!({ "operations": ops }))
+            .await
+            .unwrap();
+        assert!(err.contains(expected), "{err}");
+    }
+    dawkey.shutdown().await.unwrap();
+}

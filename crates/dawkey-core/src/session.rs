@@ -262,7 +262,9 @@ impl Session {
         merge_key: &str,
     ) -> Result<Outcome, CoreError> {
         let label = command.name().to_owned();
-        let (mut outcomes, inverses) = self.apply_commands(vec![command])?;
+        let mut command = Some(command);
+        let (mut outcomes, inverses) =
+            self.apply_commands(1, |_, _| Ok(command.take().expect("one command")))?;
         if !inverses.is_empty() {
             self.revision += 1;
             let change = Change::new(
@@ -313,7 +315,28 @@ impl Session {
         label: impl Into<String>,
         commands: Vec<Command>,
     ) -> Result<Vec<Outcome>, CoreError> {
-        let (outcomes, inverses) = self.apply_commands(commands)?;
+        let mut commands = commands.into_iter();
+        let count = commands.len();
+        self.execute_batch_with(label, count, |_, _| {
+            Ok(commands.next().expect("one command per step"))
+        })
+    }
+
+    /// Runs `count` commands as a single undo step, each made by `next`
+    /// from the project as the earlier ones left it and their outcomes (so
+    /// a command can use IDs an earlier one created). All-or-nothing: if
+    /// `next` or a command fails, the project is left as it was before the
+    /// batch.
+    pub fn execute_batch_with<F>(
+        &mut self,
+        label: impl Into<String>,
+        count: usize,
+        next: F,
+    ) -> Result<Vec<Outcome>, CoreError>
+    where
+        F: FnMut(&Project, &[Outcome]) -> Result<Command, CoreError>,
+    {
+        let (outcomes, inverses) = self.apply_commands(count, next)?;
         if !inverses.is_empty() {
             let label = label.into();
             self.end_merge();
@@ -336,15 +359,37 @@ impl Session {
         Ok(outcomes)
     }
 
-    /// Applies commands all-or-nothing. Returns their outcomes and the
-    /// inverse edits, in the order that reverts them all.
-    fn apply_commands(
+    /// Applies `count` commands from `next` all-or-nothing. Returns their
+    /// outcomes and the inverse edits, in the order that reverts them all.
+    fn apply_commands<F>(
         &mut self,
-        commands: Vec<Command>,
-    ) -> Result<(Vec<Outcome>, Vec<Edit>), CoreError> {
-        let mut outcomes = Vec::with_capacity(commands.len());
+        count: usize,
+        mut next: F,
+    ) -> Result<(Vec<Outcome>, Vec<Edit>), CoreError>
+    where
+        F: FnMut(&Project, &[Outcome]) -> Result<Command, CoreError>,
+    {
+        let mut outcomes = Vec::with_capacity(count);
         let mut inverses: Vec<Edit> = Vec::new();
-        for command in commands {
+        // In a batch, an error says which step failed.
+        let step = |index: usize, name: Option<&str>, err: CoreError| {
+            if count < 2 {
+                return err;
+            }
+            match name {
+                Some(name) => err.in_context(&format!("operation {index} ({name})")),
+                None => err.in_context(&format!("operation {index}")),
+            }
+        };
+        for index in 0..count {
+            let command = match next(&self.project, &outcomes) {
+                Ok(command) => command,
+                Err(err) => {
+                    edit::rollback(&mut self.project, inverses);
+                    return Err(step(index, None, err));
+                }
+            };
+            let name = command.name();
             let result = command
                 .into_edits(&mut self.project)
                 .and_then(|(edits, outcome)| {
@@ -360,7 +405,7 @@ impl Session {
                 }
                 Err(err) => {
                     edit::rollback(&mut self.project, inverses);
-                    return Err(err);
+                    return Err(step(index, Some(name), err));
                 }
             }
         }

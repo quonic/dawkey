@@ -681,6 +681,34 @@ impl Studio {
         result
     }
 
+    /// Runs `count` commands as one undo step, each made by `next` from the
+    /// project as the earlier ones left it and their outcomes; see
+    /// [`Session::execute_batch_with`]. Plugin commands are checked against
+    /// the catalog like single ones. The engine graph is compiled once.
+    pub fn execute_batch_with<F>(
+        &mut self,
+        label: impl Into<String>,
+        count: usize,
+        mut next: F,
+    ) -> Result<Vec<Outcome>, CoreError>
+    where
+        F: FnMut(&Project, &[Outcome]) -> Result<Command, CoreError>,
+    {
+        let plugins = &mut self.plugins;
+        let result = self
+            .session
+            .execute_batch_with(label, count, |project, outcomes| {
+                let command = next(project, outcomes)?;
+                let name = command.name();
+                let named = |e: CoreError| e.in_context(name);
+                let command = plugins.resolve(project, command).map_err(named)?;
+                plugins.check(project, &command).map_err(named)?;
+                Ok(command)
+            });
+        self.sync();
+        result
+    }
+
     /// Runs a command that may join the previous undo step; see
     /// [`Session::execute_merging`].
     pub fn execute_merging(

@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+mod batch;
 pub mod http;
 mod state;
 mod times;
@@ -49,7 +50,9 @@ tracks; open_project and new_project return such a summary). Every result
 carries `revision` and `instance` (which changes when Dawkey restarts);
 get_changes lists what changed since a revision (from the window or another
 client too), and a client that subscribes to the `dawkey://project`
-resource is told when the project changes past what it last saw. Every tool call that changes
+resource is told when the project changes past what it last saw. batch
+applies several commands in one call and one undo step (later ones can use
+what earlier ones made: `$0.track`). Every tool call that changes
 the project is one undo step, so `undo` reverts exactly one call. Changes are
 not written to disk until save_project is called.
 
@@ -239,6 +242,23 @@ impl DawkeyMcp {
                     tracks: tracks.map(|ids| ids.into_iter().map(|id| id.0).collect()),
                 };
                 run(studio, move |s| Ok::<_, CoreError>(state_json(s, trim))).await
+            }
+            BATCH => {
+                let batch::Batch { operations, label } = try_args!(parse(args));
+                let prepared = tool_try!(self.prepare_batch(operations));
+                let label = label.unwrap_or_else(|| "batch".to_owned());
+                run(studio, move |s| {
+                    let outcomes =
+                        s.execute_batch_with(label, prepared.len(), |project, outcomes| {
+                            prepared[outcomes.len()].command(project, outcomes)
+                        })?;
+                    Ok::<_, CoreError>(json!({
+                        "outcomes": outcomes,
+                        "revision": revision(s),
+                        "instance": *INSTANCE_ID,
+                    }))
+                })
+                .await
             }
             GET_CHANGES => {
                 let GetChanges { since_revision } = try_args!(parse(args));
@@ -728,6 +748,54 @@ impl DawkeyMcp {
             }
         };
         Ok(result)
+    }
+
+    /// Checks a batch's operations are commands, and finds their specs.
+    fn prepare_batch(
+        &self,
+        operations: Vec<batch::Operation>,
+    ) -> Result<Vec<batch::Prepared>, String> {
+        if operations.is_empty() {
+            return Err("a batch needs at least one operation".to_owned());
+        }
+        operations
+            .into_iter()
+            .enumerate()
+            .map(|(index, op)| {
+                let spec = CommandSpec::find(&op.tool).ok_or_else(|| {
+                    let known = self.tools.iter().any(|t| t.name == op.tool);
+                    if known {
+                        format!(
+                            "operation {index}: {} can't be in a batch; only commands that                              change the project can (add_track, add_plugin, set_track_gain,                              ...)",
+                            op.tool
+                        )
+                    } else {
+                        format!("operation {index}: unknown tool {}", op.tool)
+                    }
+                })?;
+                if !op.args.is_object() && !op.args.is_null() {
+                    return Err(format!(
+                        "operation {index} ({}): args must be an object",
+                        op.tool
+                    ));
+                }
+                let stems = self
+                    .tools
+                    .iter()
+                    .find(|t| t.name == op.tool)
+                    .map(|t| times::position_stems(&Value::Object((*t.input_schema).clone())))
+                    .unwrap_or_default();
+                Ok(batch::Prepared {
+                    spec,
+                    args: if op.args.is_null() {
+                        json!({})
+                    } else {
+                        op.args
+                    },
+                    stems,
+                })
+            })
+            .collect()
     }
 
     /// The transport state once the audio thread has applied a command sent
