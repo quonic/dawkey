@@ -284,6 +284,11 @@ pub(crate) fn render_track(
         out.flush(device);
         out.send_due(device, Some(frames as u32));
     }
+    // For pre-fader sends.
+    if let Some([l, r]) = &mut track.pre {
+        l[..frames].copy_from_slice(left);
+        r[..frames].copy_from_slice(right);
+    }
     apply_fader(&track.fader, position, playing, left, right);
 }
 

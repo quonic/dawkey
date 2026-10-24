@@ -478,6 +478,44 @@ async fn exports_the_song_to_wav_and_flac() {
         (44_100, 88_200)
     );
 
+    // Ogg Vorbis and Opus, from the extension, with tags.
+    let ogg = dir.path().join("song.ogg");
+    let exported = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": ogg, "quality": 7, "tags": { "artist": "Me" } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exported["format"], "ogg");
+    assert_eq!(exported["analysis"]["frames"], 72_000);
+    let decoded = dawkey_media::decode_file(&ogg, 48_000).unwrap().audio;
+    assert_eq!(decoded.frames(), 72_000);
+    let opus = dir.path().join("song.opus");
+    let exported = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": opus, "bitrate_kbps": 96, "sample_rate": 44_100 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exported["format"], "opus");
+    assert_eq!(
+        exported["sample_rate"], 44_100,
+        "what the header says the source was"
+    );
+    assert!(std::fs::read(&opus).unwrap().starts_with(b"OggS"));
+    for (args, expected) in [
+        (json!({ "path": ogg, "quality": 12 }), "quality is 0 to 10"),
+        (
+            json!({ "path": opus, "bitrate_kbps": 1000 }),
+            "bitrate_kbps",
+        ),
+    ] {
+        let err = dawkey.call_err("export_audio", args).await.unwrap();
+        assert!(err.contains(expected), "{err}");
+    }
+
     // Bad requests are tool errors.
     for (args, expected) in [
         (json!({ "path": dir.path().join("x.mp3") }), "give a format"),
@@ -487,5 +525,383 @@ async fn exports_the_song_to_wav_and_flac() {
         let err = dawkey.call_err("export_audio", args).await.unwrap();
         assert!(err.contains(expected), "{err}");
     }
+    dawkey.shutdown().await.unwrap();
+}
+
+/// Output paths in folders that don't exist yet: the folders are made, and
+/// a path that can't be written fails before the render runs.
+#[tokio::test]
+async fn makes_output_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav = write_wav(dir.path(), "saw.wav", &[saw(48_000)], 48_000);
+    let dawkey = start().await;
+    dawkey
+        .call("import_audio", json!({ "path": wav }))
+        .await
+        .unwrap();
+
+    let rendered_to = dir.path().join("stems/new/1_saw.wav");
+    let rendered = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0.0, "end_s": 0.5, "output_path": rendered_to }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rendered["output_path"], json!(rendered_to));
+    assert!(rendered_to.is_file());
+
+    let exported_to = dir.path().join("exports/game/song.flac");
+    dawkey
+        .call("export_audio", json!({ "path": exported_to }))
+        .await
+        .unwrap();
+    assert!(exported_to.is_file());
+
+    // A folder that can't be made (a file is in the way) is an error that
+    // names it.
+    let blocked = wav.join("x/song.wav");
+    let err = dawkey
+        .call_err(
+            "render_range",
+            json!({ "start_s": 0.0, "end_s": 0.5, "output_path": blocked }),
+        )
+        .await
+        .unwrap();
+    assert!(err.contains("saw.wav"), "{err}");
+    let err = dawkey
+        .call_err("export_audio", json!({ "path": blocked }))
+        .await
+        .unwrap();
+    assert!(err.contains("saw.wav"), "{err}");
+    dawkey.shutdown().await.unwrap();
+}
+
+/// A signal of one frequency: a square wave at `hz` (no transcendental
+/// functions, so it's exact), at `level`.
+fn square(frames: usize, rate: usize, hz: usize, level: f32) -> Vec<f32> {
+    let period = rate / hz;
+    (0..frames)
+        .map(|i| {
+            if i % period < period / 2 {
+                level
+            } else {
+                -level
+            }
+        })
+        .collect()
+}
+
+/// render_range and export_audio render chosen tracks, stems (one render
+/// per track) and analyze segments; the analysis has band levels.
+#[tokio::test]
+async fn renders_stems_and_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    // A low tone for 1 s, and a high one from 1 to 2 s.
+    let low = write_wav(
+        dir.path(),
+        "low.wav",
+        &[square(48_000, 48_000, 100, 0.5)],
+        48_000,
+    );
+    let high = write_wav(
+        dir.path(),
+        "high.wav",
+        &[square(48_000, 48_000, 6000, 0.5)],
+        48_000,
+    );
+    let dawkey = start().await;
+    dawkey
+        .call("set_tempo", json!({ "bpm": 120 }))
+        .await
+        .unwrap(); // a bar is 2 s
+    let bass = dawkey
+        .call("import_audio", json!({ "path": low }))
+        .await
+        .unwrap()["track"]
+        .as_u64()
+        .unwrap();
+    let lead = dawkey
+        .call("import_audio", json!({ "path": high, "position_s": 1.0 }))
+        .await
+        .unwrap()["track"]
+        .as_u64()
+        .unwrap();
+    dawkey
+        .call(
+            "rename_track",
+            json!({ "track": lead, "name": "Lead/Synth" }),
+        )
+        .await
+        .unwrap();
+
+    // Brightness: the low tone sits in the low band, the high one up top.
+    let mix = dawkey
+        .call("render_range", json!({ "start_s": 0, "end_s": 2 }))
+        .await
+        .unwrap();
+    let bands = &mix["analysis"]["bands"];
+    assert!(bands["low_dbfs"].as_f64().unwrap() > bands["high_dbfs"].as_f64().unwrap() - 6.0);
+    assert!(mix.get("stems").is_none() && mix.get("tracks").is_none());
+
+    // Only the lead: silent in its first second.
+    let only_lead = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0, "end_s": 2, "tracks": [lead] }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(only_lead["tracks"], json!([lead]));
+    let first_half = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0, "end_s": 1, "tracks": [lead] }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_half["analysis"]["silent"], true);
+    let bands = &only_lead["analysis"]["bands"];
+    assert!(bands["high_dbfs"].as_f64().unwrap() > bands["low_dbfs"].as_f64().unwrap() + 20.0);
+
+    // Stems: one per track, with files, and per-bar segments of each.
+    let stems_dir = dir.path().join("stems");
+    let stems = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0, "end_s": 2, "stems": true, "stems_dir": stems_dir, "segment_length_s": 1 }),
+        )
+        .await
+        .unwrap();
+    let stems = stems["stems"].as_array().unwrap();
+    assert_eq!(stems.len(), 2);
+    assert_eq!(stems[0]["track"], bass);
+    assert_eq!(stems[1]["name"], "Lead/Synth");
+    assert_eq!(
+        stems[1]["output_path"],
+        json!(stems_dir.join(format!("{lead}-Lead_Synth.wav")))
+    );
+    assert!(stems_dir.join(format!("{lead}-Lead_Synth.wav")).is_file());
+    // The bass plays in the first second only, the lead in the second.
+    let segments = |stem: &Value| -> Vec<bool> {
+        stem["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["analysis"]["silent"].as_bool().unwrap())
+            .collect()
+    };
+    assert_eq!(segments(&stems[0]), [false, true]);
+    assert_eq!(segments(&stems[1]), [true, false]);
+    assert_eq!(stems[1]["segments"][1]["start_s"], 1.0);
+    assert_eq!(stems[1]["segments"][1]["end_s"], 2.0);
+    assert_eq!(
+        stems[0]["analysis"]["hash"],
+        first_half_hash(&dawkey, bass).await
+    );
+
+    // Segments by bars (at 120 bpm a bar is 2 s), from mid-bar, and
+    // explicit ranges.
+    let by_bars = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 1, "end_s": 5, "segment_bars": 1 }),
+        )
+        .await
+        .unwrap();
+    let starts: Vec<f64> = by_bars["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["start_s"].as_f64().unwrap())
+        .collect();
+    assert_eq!(starts, [1.0, 2.0, 4.0]);
+    let ranges = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0, "end_s": 2, "segments": [
+                { "start_s": 0.25, "end_s": 0.75 }, { "start_s": 1.5, "end_s": 1.75 }
+            ] }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ranges["segments"][1]["analysis"]["frames"], 12_000);
+    assert_eq!(ranges["segments"][0]["analysis"]["frames"], 24_000);
+    assert_eq!(ranges["analysis"]["frames"], 96_000);
+
+    // Exports: stems to files beside the path, with segments.
+    let out = dir.path().join("mix/song.flac");
+    let exported = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": out, "stems": true, "segment_length_beats": 2, "bit_depth": 16 }),
+        )
+        .await
+        .unwrap();
+    let stems = exported["stems"].as_array().unwrap();
+    assert_eq!(stems.len(), 2);
+    let lead_file = dir.path().join(format!("mix/song-{lead}-Lead_Synth.flac"));
+    assert_eq!(stems[1]["path"], json!(lead_file));
+    assert!(lead_file.is_file());
+    assert!(!out.exists(), "stems only");
+    assert_eq!(stems[1]["segments"].as_array().unwrap().len(), 2);
+    assert_eq!(stems[1]["segments"][0]["analysis"]["silent"], true);
+    assert_eq!(stems[1]["segments"][1]["analysis"]["silent"], false);
+    // One track, through the mix.
+    let only_out = dir.path().join("mix/bass.wav");
+    let only = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": only_out, "tracks": [bass], "bit_depth": 32 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(only["tracks"], json!([bass]));
+    assert!(only_out.is_file());
+    assert_eq!(
+        only["analysis"]["hash"],
+        first_half_hash(&dawkey, bass).await
+    );
+
+    // Bad input.
+    for (args, expected) in [
+        (
+            json!({ "start_s": 0, "end_s": 1, "tracks": [] }),
+            "tracks is empty",
+        ),
+        (json!({ "start_s": 0, "end_s": 1, "tracks": [0] }), "master"),
+        (json!({ "start_s": 0, "end_s": 1, "tracks": [99] }), "99"),
+        (
+            json!({ "start_s": 0, "end_s": 1, "stems_dir": "/tmp/x" }),
+            "stems_dir needs",
+        ),
+        (
+            json!({ "start_s": 0, "end_s": 1, "segment_length_s": 0.5, "segment_bars": 1 }),
+            "give one of",
+        ),
+        (
+            json!({ "start_s": 0, "end_s": 1, "segment_bars": 0 }),
+            "at least 1",
+        ),
+        (
+            json!({ "start_s": 0, "end_s": 1, "segments": [{ "start_s": 5, "end_s": 6 }] }),
+            "outside the range",
+        ),
+    ] {
+        let err = dawkey.call_err("render_range", args).await.unwrap();
+        assert!(err.contains(expected), "{err}");
+    }
+    dawkey.shutdown().await.unwrap();
+}
+
+/// The hash of the mix with only `track` heard, 0 to 2 s.
+async fn first_half_hash(dawkey: &Harness, track: u64) -> Value {
+    dawkey
+        .call("set_track_solo", json!({ "track": track, "solo": true }))
+        .await
+        .unwrap();
+    let rendered = dawkey
+        .call("render_range", json!({ "start_s": 0, "end_s": 2 }))
+        .await
+        .unwrap();
+    dawkey
+        .call("set_track_solo", json!({ "track": track, "solo": false }))
+        .await
+        .unwrap();
+    rendered["analysis"]["hash"].clone()
+}
+
+/// A loop export folds the tail onto the start and is exactly the range
+/// long, and reports the jump at the seam.
+#[tokio::test]
+async fn exports_seamless_loops() {
+    let dir = tempfile::tempdir().unwrap();
+    // The "song": a second of 0.5; its "tail": half a second of 0.25.
+    let body = write_wav(dir.path(), "body.wav", &[vec![0.5; 48_000]], 48_000);
+    let tail = write_wav(dir.path(), "tail.wav", &[vec![0.25; 24_000]], 48_000);
+    let dawkey = start().await;
+    let track = dawkey
+        .call("import_audio", json!({ "path": body }))
+        .await
+        .unwrap()["track"]
+        .clone();
+    dawkey
+        .call(
+            "import_audio",
+            json!({ "path": tail, "track": track, "position_s": 1.0 }),
+        )
+        .await
+        .unwrap();
+
+    let out = dir.path().join("loop.wav");
+    let exported = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": out, "loop": true, "start_s": 0, "end_s": 1, "tail_s": 0.5, "bit_depth": 32 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exported["loop"], true);
+    assert_eq!(exported["end_s"], 1.0);
+    assert_eq!(exported["tail_s"], 0.5);
+    assert_eq!(exported["analysis"]["frames"], 48_000);
+    let decoded = dawkey_media::decode_file(&out, 48_000).unwrap().audio;
+    assert_eq!(decoded.frames(), 48_000);
+    let left = &decoded.channels()[0];
+    // Center pan is -3 dB: 0.5 → 0.354, and 0.75 → 0.530 where the tail
+    // was added.
+    let center = |x: f32| x * std::f32::consts::FRAC_1_SQRT_2;
+    assert!((left[0] - center(0.75)).abs() < 1e-3, "{}", left[0]);
+    assert!(
+        (left[23_999] - center(0.75)).abs() < 1e-3,
+        "{}",
+        left[23_999]
+    );
+    assert!(
+        (left[24_000] - center(0.5)).abs() < 1e-3,
+        "{}",
+        left[24_000]
+    );
+    assert!(
+        (left[47_999] - center(0.5)).abs() < 1e-3,
+        "{}",
+        left[47_999]
+    );
+    let jump = exported["seam"]["jump"][0].as_f64().unwrap();
+    assert!((jump - f64::from(center(0.25))).abs() < 1e-3, "{jump}");
+    assert!(exported["seam"]["jump_dbfs"][0].as_f64().unwrap() < -10.0);
+
+    // Without a tail, a loop export is the plain export of the range.
+    let plain = dir.path().join("plain.wav");
+    let plain_result = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": plain, "start_s": 0, "end_s": 1, "bit_depth": 32 }),
+        )
+        .await
+        .unwrap();
+    let looped = dir.path().join("looped.wav");
+    let loop_result = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": looped, "loop": true, "start_s": 0, "end_s": 1, "bit_depth": 32 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        loop_result["analysis"]["hash"],
+        plain_result["analysis"]["hash"]
+    );
+    assert_eq!(loop_result["seam"]["jump"][0], 0.0);
+
+    // Too long to hold in memory.
+    let err = dawkey
+        .call_err(
+            "export_audio",
+            json!({ "path": out, "loop": true, "start_s": 0, "end_s": 700 }),
+        )
+        .await
+        .unwrap();
+    assert!(err.contains("600"), "{err}");
     dawkey.shutdown().await.unwrap();
 }

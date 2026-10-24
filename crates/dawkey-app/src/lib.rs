@@ -592,7 +592,7 @@ impl App {
     ) -> Result<MidiImport, String> {
         let import = self
             .studio
-            .import_midi(file, request.position_s, None)
+            .import_midi(file, request.position_s, None, &[], false)
             .map_err(|e| e.to_string())?;
         self.rebuild();
         Ok(import)
@@ -745,6 +745,29 @@ impl App {
                 .output
                 .and_then(|b| project.track(b))
                 .map_or_else(|| "Master".to_owned(), |b| b.name.clone()),
+            sends: t
+                .sends
+                .iter()
+                .map(|send| view::SendView {
+                    bus: send.bus,
+                    bus_name: project
+                        .track(send.bus)
+                        .map_or_else(|| format!("Bus {}", send.bus), |b| b.name.clone()),
+                    gain_db: automated(
+                        t,
+                        dawkey_core::AutomationTarget::Send { bus: send.bus },
+                        send.gain_db,
+                    ),
+                    pre_fader: send.pre_fader,
+                })
+                .collect(),
+            can_add_send: !t.is_master()
+                && project.tracks.iter().any(|b| {
+                    b.kind == dawkey_core::TrackKind::Bus
+                        && b.id != t.id
+                        && !t.sends.iter().any(|s| s.bus == b.id)
+                        && !project.depends_on(t.id, b.id)
+                }),
             gain_db: automated(t, dawkey_core::AutomationTarget::Gain, t.gain_db),
             pan: automated(t, dawkey_core::AutomationTarget::Pan, t.pan),
             mute: t.mute,

@@ -397,6 +397,7 @@ pub(crate) fn scan_file(path: &Path) -> Result<Vec<PluginInfo>, PluginError> {
                 })
                 .collect(),
             params: params(&mut instance),
+            properties: Vec::new(),
         });
     }
     Ok(found)

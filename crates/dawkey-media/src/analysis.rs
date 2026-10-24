@@ -22,6 +22,136 @@ pub struct Analysis {
     /// FNV-1a hash of the samples quantized to 24 bits, as hex. Equal hashes
     /// mean the audio is identical to 24-bit precision.
     pub hash: String,
+    /// Levels in three bands, a rough measure of brightness.
+    pub bands: Bands,
+}
+
+/// RMS levels of the channels' mean in three bands, in dBFS (`None` for
+/// silence): a rough measure of brightness, for telling instruments apart
+/// and spotting masking without listening. The bands are split with
+/// first-order filters, so they overlap.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Bands {
+    /// Below about 250 Hz.
+    pub low_dbfs: Option<f64>,
+    /// About 250 Hz to 4 kHz.
+    pub mid_dbfs: Option<f64>,
+    /// Above about 4 kHz.
+    pub high_dbfs: Option<f64>,
+}
+
+/// Where the bands split, in Hz.
+const BAND_LOW_HZ: f64 = 250.0;
+const BAND_HIGH_HZ: f64 = 4000.0;
+
+/// Splits a signal into three bands with two first-order low-passes.
+#[derive(Debug, Clone)]
+struct BandSplitter {
+    /// Coefficients and states of the low-passes at the two split points.
+    a: [f64; 2],
+    z: [f64; 2],
+    sum_sq: [f64; 3],
+}
+
+impl BandSplitter {
+    fn new(sample_rate: u32) -> Self {
+        let coefficient = |hz: f64| {
+            let x = (-2.0 * std::f64::consts::PI * hz / f64::from(sample_rate.max(1))).exp();
+            1.0 - x
+        };
+        Self {
+            a: [coefficient(BAND_LOW_HZ), coefficient(BAND_HIGH_HZ)],
+            z: [0.0; 2],
+            sum_sq: [0.0; 3],
+        }
+    }
+
+    fn add(&mut self, x: f64) {
+        self.z[0] += self.a[0] * (x - self.z[0]);
+        self.z[1] += self.a[1] * (x - self.z[1]);
+        let (low, below_high) = (self.z[0], self.z[1]);
+        for (sum, band) in self
+            .sum_sq
+            .iter_mut()
+            .zip([low, below_high - low, x - below_high])
+        {
+            *sum += band * band;
+        }
+    }
+
+    fn finish(&self, frames: usize) -> Bands {
+        let level = |sum: f64| match frames {
+            0 => None,
+            _ => gain_to_db((sum / frames as f64).sqrt()),
+        };
+        Bands {
+            low_dbfs: level(self.sum_sq[0]),
+            mid_dbfs: level(self.sum_sq[1]),
+            high_dbfs: level(self.sum_sq[2]),
+        }
+    }
+}
+
+/// Analyzes ranges of a block stream separately (loudness over time): a
+/// segment is `[start, end)` in frames from the start of the stream.
+#[derive(Debug)]
+pub struct SegmentAnalyzers {
+    segments: Vec<(usize, usize, Analyzer)>,
+    at: usize,
+}
+
+impl SegmentAnalyzers {
+    pub fn new(channels: usize, sample_rate: u32, segments: &[(usize, usize)]) -> Self {
+        Self {
+            segments: segments
+                .iter()
+                .map(|&(start, end)| (start, end, Analyzer::new(channels, sample_rate)))
+                .collect(),
+            at: 0,
+        }
+    }
+
+    /// Whether there are segments to analyze.
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    /// Adds the next block of the stream.
+    pub fn add(&mut self, planes: &[&[f32]]) {
+        let frames = planes.first().map_or(0, |p| p.len());
+        let (block_start, block_end) = (self.at, self.at + frames);
+        for (start, end, analyzer) in &mut self.segments {
+            let (from, to) = ((*start).max(block_start), (*end).min(block_end));
+            if from < to {
+                let slices: Vec<&[f32]> = planes
+                    .iter()
+                    .map(|p| &p[from - block_start..to - block_start])
+                    .collect();
+                analyzer.add(&slices);
+            }
+        }
+        self.at = block_end;
+    }
+
+    /// One analysis per segment, in order.
+    pub fn finish(self) -> Vec<Analysis> {
+        self.segments
+            .into_iter()
+            .map(|(_, _, analyzer)| analyzer.finish())
+            .collect()
+    }
+}
+
+/// Analyzes `segments` (frames) of planar audio separately.
+pub fn analyze_segments(
+    channels: &[Vec<f32>],
+    sample_rate: u32,
+    segments: &[(usize, usize)],
+) -> Vec<Analysis> {
+    let mut analyzers = SegmentAnalyzers::new(channels.len(), sample_rate, segments);
+    let planes: Vec<&[f32]> = channels.iter().map(Vec::as_slice).collect();
+    analyzers.add(&planes);
+    analyzers.finish()
 }
 
 pub fn gain_to_db(gain: f64) -> Option<f64> {
@@ -47,6 +177,7 @@ pub struct Analyzer {
     sum_sq: Vec<f64>,
     meter: Option<EbuR128>,
     hash: u64,
+    bands: BandSplitter,
 }
 
 impl std::fmt::Debug for Analyzer {
@@ -68,6 +199,7 @@ impl Analyzer {
                 .then(|| EbuR128::new(channels as u32, sample_rate, Mode::I).ok())
                 .flatten(),
             hash: FNV_OFFSET,
+            bands: BandSplitter::new(sample_rate),
         }
     }
 
@@ -86,8 +218,11 @@ impl Analyzer {
         {
             self.meter = None;
         }
+        let channels = planes.len().max(1) as f64;
         for frame in 0..frames {
+            let mut sum = 0.0;
             for plane in planes {
+                sum += f64::from(plane[frame]);
                 let quantized =
                     (f64::from(plane[frame]).clamp(-1.0, 1.0) * 8_388_607.0).round() as i32;
                 for byte in quantized.to_le_bytes() {
@@ -95,6 +230,7 @@ impl Analyzer {
                     self.hash = self.hash.wrapping_mul(FNV_PRIME);
                 }
             }
+            self.bands.add(sum / channels);
         }
         self.frames += frames;
     }
@@ -126,6 +262,7 @@ impl Analyzer {
                 .and_then(|m| m.loudness_global().ok())
                 .filter(|l| l.is_finite()),
             hash: format!("{:016x}", self.hash),
+            bands: self.bands.finish(frames),
         }
     }
 }

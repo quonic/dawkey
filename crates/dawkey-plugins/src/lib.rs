@@ -40,6 +40,7 @@ use dawkey_engine::PluginProcessor;
 use serde::{Deserialize, Serialize};
 
 pub use bridge::{BridgeProgram, Sandbox, run_plugin_host};
+pub use lv2::{StateProperty, StateValue, lv2_state_properties, lv2_state_set};
 pub use scan::{
     Catalog, ScanFailure, SearchPath, clap_files, scan, scan_clap_file, scan_lv2, scan_plugin_file,
     scan_vst3_bundle, vst3_binary, vst3_bundles,
@@ -80,6 +81,28 @@ pub struct PluginInfo {
     pub outputs: Vec<OutputInfo>,
     /// Parameters, in the order the engine indexes them.
     pub params: Vec<ParamInfo>,
+    /// LV2: properties the plugin declares besides its parameters
+    /// (`patch:writable`, `patch:readable`): a soundfont path, a string, a
+    /// choice. Set with the plugin's saved state (see
+    /// [`lv2_state_properties`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<PropertyInfo>,
+}
+
+/// A property an LV2 plugin declares (`patch:writable` or `patch:readable`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PropertyInfo {
+    /// The property's URI (its key in the plugin's saved state).
+    pub uri: String,
+    /// `rdfs:label`, or the URI's fragment.
+    pub label: String,
+    /// `rdfs:range`: the value's type (`atom:Path`, `atom:String`,
+    /// `atom:Float`, `atom:Int`, `atom:Bool`, `atom:URI`, ...), if said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
+    /// The plugin takes changes to it (`patch:writable`); else it only
+    /// reports it (`patch:readable`).
+    pub writable: bool,
 }
 
 /// One of a plugin's other audio outputs.

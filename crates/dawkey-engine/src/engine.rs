@@ -7,7 +7,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use serde::Serialize;
 
 use crate::MAX_BLOCK;
-use crate::graph::Graph;
+use crate::graph::{Graph, SendNode};
 use crate::meter::{MeterBank, MeterReading};
 use crate::midi::{MidiEvent, MidiOut};
 use crate::mix::{self, Live, MidiOutput};
@@ -490,7 +490,10 @@ impl EngineProcessor {
         let meters = &self.graph.meters;
         let tracks = &mut self.graph.tracks;
         for track in tracks.iter_mut() {
-            for buffer in [&mut track.sum, &mut track.tap].into_iter().flatten() {
+            for buffer in [&mut track.sum, &mut track.tap, &mut track.pre]
+                .into_iter()
+                .flatten()
+            {
                 buffer[0][..frames].fill(0.0);
                 buffer[1][..frames].fill(0.0);
             }
@@ -559,6 +562,56 @@ impl EngineProcessor {
             }
             if let (None, Some(m)) = (metered, track.meter) {
                 meters.tracks[m].record(peak(lane_l), peak(lane_r));
+            }
+            // Aux sends: the signal after the fader (before lining up), or
+            // before it, at the send's level, to their buses.
+            for send in &mut track.sends {
+                let Some([to_l, to_r]) = &mut later[send.dest - i - 1].sum else {
+                    continue;
+                };
+                let SendNode {
+                    buffer,
+                    lane,
+                    fixed,
+                    offset,
+                    delay,
+                    pre_fader,
+                    ..
+                } = send;
+                let [l, r] = buffer;
+                let (l, r) = (&mut l[..frames], &mut r[..frames]);
+                match (&track.pre, *pre_fader) {
+                    (Some([pre_l, pre_r]), true) => {
+                        l.copy_from_slice(&pre_l[..frames]);
+                        r.copy_from_slice(&pre_r[..frames]);
+                    }
+                    _ => {
+                        l.copy_from_slice(lane_l);
+                        r.copy_from_slice(lane_r);
+                    }
+                }
+                let at = position.saturating_sub(u64::from(*offset));
+                match lane {
+                    Some(lane) if playing => {
+                        for (k, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
+                            let g = crate::graph::lane_value(lane, at + k as u64)
+                                .map_or(*fixed, |v| crate::graph::db_to_gain(v as f32));
+                            *a *= g;
+                            *b *= g;
+                        }
+                    }
+                    _ => {
+                        for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+                            *a *= *fixed;
+                            *b *= *fixed;
+                        }
+                    }
+                }
+                if let Some(delay) = delay {
+                    delay.process(l, r);
+                }
+                add_into(&mut to_l[..frames], l);
+                add_into(&mut to_r[..frames], r);
             }
             let (to_l, to_r) = match track.dest {
                 Some(d) => match &mut later[d - i - 1].sum {

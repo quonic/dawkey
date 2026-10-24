@@ -115,6 +115,7 @@ pollster = "1"
 raw-window-handle = "0.6"
 reqwest = { version = "0.13", default-features = false }
 rmcp = { version = "3.5", default-features = false }
+opus-pure = "0.2"
 rtrb = "0.4"
 rubato = "5"
 schemars = "1"
@@ -130,6 +131,7 @@ tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+vorbis_rs = "0.5"
 vst3 = "0.3"
 wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }

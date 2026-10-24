@@ -12,8 +12,8 @@ use crate::error::CoreError;
 use crate::model::{
     AutomationLane, AutomationPoint, AutomationTarget, CC_MAX, Clip, ClipContent, ClipId,
     ControlPoint, Controller, DEVICE_LATENCY_MS_MAX, GAIN_DB_MAX, GAIN_DB_MIN, MASTER, MIDI_MAX,
-    MidiOutput, Note, NoteId, PluginId, PluginSlot, Project, SourceId, SynthParams, TEMPO_BPM_MAX,
-    TEMPO_BPM_MIN, TimeSignature, Track, TrackId, TrackKind, Waveform,
+    MidiOutput, Note, NoteId, PluginId, PluginSlot, Project, Send, SourceId, SynthParams,
+    TEMPO_BPM_MAX, TEMPO_BPM_MIN, TimeSignature, Track, TrackId, TrackKind, Waveform,
 };
 use crate::model::{InputChannels, Region, TimeRange};
 use crate::session::Outcome;
@@ -129,6 +129,8 @@ commands! {
     SetTrackMute => "set_track_mute", Setter;
     SetTrackSolo => "set_track_solo", Setter;
     SetTrackOutput => "set_track_output", Setter;
+    SetTrackSend => "set_track_send", Setter;
+    RemoveTrackSend => "remove_track_send", Destructive;
     SetTempo => "set_tempo", Setter;
     RemoveTempoChange => "remove_tempo_change", Destructive;
     SetTempoMap => "set_tempo_map", Setter;
@@ -233,8 +235,21 @@ impl RemoveTrack {
                 prop: TrackProp::Output(None),
             })
             .collect();
-        // Sidechains from it, and plugin outputs to it, stop.
+        // Sidechains from it, plugin outputs to it, and sends to it stop.
         for track in project.all_tracks().filter(|t| t.id != gone) {
+            if track.sends.iter().any(|s| s.bus == gone) {
+                edits.push(Edit::SetTrack {
+                    id: track.id,
+                    prop: TrackProp::Sends(
+                        track
+                            .sends
+                            .iter()
+                            .copied()
+                            .filter(|s| s.bus != gone)
+                            .collect(),
+                    ),
+                });
+            }
             let routed = |p: &PluginSlot| {
                 p.sidechain == Some(gone) || p.outputs.values().any(|&b| b == gone)
             };
@@ -286,6 +301,111 @@ impl SetTrackOutput {
             }
         }
         Ok(set_track(self.track, TrackProp::Output(bus)))
+    }
+}
+
+/// Send a copy of a track's (or bus's) signal to a bus at its own level,
+/// besides where its output goes: an aux send, as for sharing one reverb
+/// among tracks with a different amount each. Adds the send, or changes
+/// the one to that bus. The level is after the fader and pan unless
+/// `pre_fader`. Automate it with target `{ "kind": "send", "bus": <bus>
+/// }`. A send can't make a loop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetTrackSend {
+    pub track: TrackId,
+    /// The bus's track ID.
+    pub bus: TrackId,
+    /// The send's level in dB (-144 to +12). Defaults to 0 for a new send,
+    /// or the level it has.
+    #[serde(default)]
+    pub gain_db: Option<f32>,
+    /// Take the signal before the fader and pan. Defaults to false for a
+    /// new send, or what it is.
+    #[serde(default)]
+    pub pre_fader: Option<bool>,
+}
+
+impl SetTrackSend {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        require_not_master(project, self.track, "sent elsewhere")?;
+        let bus = self.bus;
+        let target = project.track(bus).ok_or(CoreError::TrackNotFound(bus))?;
+        if target.kind != TrackKind::Bus {
+            return Err(CoreError::invalid(format!(
+                "track {bus} is not a bus (add_track with kind \"bus\" makes one)"
+            )));
+        }
+        if project.depends_on(self.track, bus) {
+            return Err(CoreError::invalid(format!(
+                "track {} already takes bus {bus}'s signal: that would make a loop",
+                self.track
+            )));
+        }
+        let track = project
+            .track(self.track)
+            .ok_or(CoreError::TrackNotFound(self.track))?;
+        let mut sends = track.sends.clone();
+        let existing = sends.iter().find(|s| s.bus == bus).copied();
+        let gain_db = self
+            .gain_db
+            .unwrap_or_else(|| existing.map_or(0.0, |s| s.gain_db));
+        validate_gain(gain_db)?;
+        let send = Send {
+            bus,
+            gain_db,
+            pre_fader: self
+                .pre_fader
+                .unwrap_or_else(|| existing.is_some_and(|s| s.pre_fader)),
+        };
+        match sends.iter_mut().find(|s| s.bus == bus) {
+            Some(slot) => *slot = send,
+            None => sends.push(send),
+        }
+        Ok(set_track(self.track, TrackProp::Sends(sends)))
+    }
+}
+
+/// Remove a track's send to a bus (its automation lane for the send goes
+/// too).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveTrackSend {
+    pub track: TrackId,
+    pub bus: TrackId,
+}
+
+impl RemoveTrackSend {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let track = project
+            .track(self.track)
+            .ok_or(CoreError::TrackNotFound(self.track))?;
+        if !track.sends.iter().any(|s| s.bus == self.bus) {
+            return Err(CoreError::invalid(format!(
+                "track {} has no send to bus {}",
+                self.track, self.bus
+            )));
+        }
+        let sends = track
+            .sends
+            .iter()
+            .copied()
+            .filter(|s| s.bus != self.bus)
+            .collect();
+        let (mut edits, outcome) = set_track(self.track, TrackProp::Sends(sends));
+        let lanes: Vec<AutomationLane> = track
+            .automation
+            .iter()
+            .filter(|l| l.target != AutomationTarget::Send { bus: self.bus })
+            .cloned()
+            .collect();
+        if lanes.len() != track.automation.len() {
+            edits.push(Edit::SetTrack {
+                id: self.track,
+                prop: TrackProp::Automation(lanes),
+            });
+        }
+        Ok((edits, outcome))
     }
 }
 
@@ -2940,6 +3060,13 @@ fn automation_track<'a>(
             "plugin {plugin} is not on track {id}"
         )));
     }
+    if let AutomationTarget::Send { bus } = target
+        && !track.sends.iter().any(|s| s.bus == *bus)
+    {
+        return Err(CoreError::invalid(format!(
+            "track {id} has no send to bus {bus} (set_track_send adds one)"
+        )));
+    }
     Ok(track)
 }
 
@@ -2952,7 +3079,7 @@ fn point(
 ) -> Result<AutomationPoint, CoreError> {
     let frame = position_frames(project, time_s)?;
     match target {
-        AutomationTarget::Gain
+        AutomationTarget::Gain | AutomationTarget::Send { .. }
             if !(f64::from(GAIN_DB_MIN)..=f64::from(GAIN_DB_MAX)).contains(&value) =>
         {
             Err(CoreError::invalid(format!(

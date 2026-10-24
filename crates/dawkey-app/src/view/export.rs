@@ -29,16 +29,27 @@ pub(super) fn dialog(
     let format = match settings.format {
         FileFormat::Wav => "WAV",
         FileFormat::Flac => "FLAC",
+        FileFormat::Ogg => "Ogg Vorbis",
+        FileFormat::Opus => "Opus",
     };
-    let bits = match settings.sample {
-        SampleFormat::Int16 => "16-bit",
-        SampleFormat::Int24 => "24-bit",
-        SampleFormat::Float32 => "32-bit float",
+    let (bits_label, bits) = match settings.format {
+        FileFormat::Ogg => ("Quality", format!("q {:.0}", settings.quality)),
+        FileFormat::Opus => ("Bitrate", format!("{} kbit/s", settings.bitrate_kbps)),
+        _ => (
+            "Samples",
+            match settings.sample {
+                SampleFormat::Int16 => "16-bit",
+                SampleFormat::Int24 => "24-bit",
+                SampleFormat::Float32 => "32-bit float",
+            }
+            .to_owned(),
+        ),
     };
     let khz = |rate: u32| format!("{} kHz", f64::from(rate) / 1000.0);
-    let rate = match settings.sample_rate {
-        None => format!("Project ({})", khz(model.sample_rate)),
-        Some(rate) => khz(rate),
+    let rate = match (settings.format, settings.sample_rate) {
+        (FileFormat::Opus, _) => "48 kHz (Opus)".to_owned(),
+        (_, None) => format!("Project ({})", khz(model.sample_rate)),
+        (_, Some(rate)) => khz(rate),
     };
     let range = match (settings.range, model.loop_range) {
         (ExportRange::Loop, Some((start, end))) => {
@@ -109,7 +120,7 @@ pub(super) fn dialog(
                 }),
         )
         .child(row("export/format", "Format", format.to_owned()))
-        .child(row("export/bits", "Samples", bits.to_owned()))
+        .child(row("export/bits", bits_label, bits))
         .child(row("export/rate", "Sample rate", rate))
         .child(row("export/range", "Range", range))
         .child(row("export/tail", "Tail", tail))

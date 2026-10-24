@@ -13,17 +13,38 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use anyhow::{Context, bail};
-use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
-use rmcp::service::RunningService;
+use std::sync::{Arc, Mutex};
+
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ReadResourceRequestParams, Resource,
+    ResourceUpdatedNotificationParam, SubscribeRequestParams, Tool,
+};
+use rmcp::service::{NotificationContext, RunningService};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
-use rmcp::{RoleClient, ServiceExt};
+use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde_json::Value;
+
+/// The test client: remembers the resource-updated notifications it gets.
+#[derive(Debug, Clone, Default)]
+struct Client {
+    updated: Arc<Mutex<Vec<String>>>,
+}
+
+impl ClientHandler for Client {
+    async fn on_resource_updated(
+        &self,
+        params: ResourceUpdatedNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        self.updated.lock().unwrap().push(params.uri);
+    }
+}
 
 /// A running Dawkey process with an MCP client connected to it.
 #[derive(Debug)]
 pub struct Harness {
-    client: RunningService<RoleClient, ()>,
+    client: RunningService<RoleClient, Client>,
     /// The process's XDG cache directory (where recordings of unsaved
     /// projects go), so tests never write to the real one.
     _cache: tempfile::TempDir,
@@ -71,7 +92,10 @@ impl Harness {
         });
         let transport = TokioChildProcess::new(command)
             .with_context(|| format!("spawning {}", binary.as_ref().display()))?;
-        let client = ().serve(transport).await.context("MCP handshake")?;
+        let client = Client::default()
+            .serve(transport)
+            .await
+            .context("MCP handshake")?;
         Ok(Self {
             client,
             _cache: cache,
@@ -117,7 +141,10 @@ impl Harness {
         let transport = StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(url.clone()).auth_header(token),
         );
-        let client = ().serve(transport).await.context("MCP handshake")?;
+        let client = Client::default()
+            .serve(transport)
+            .await
+            .context("MCP handshake")?;
         Ok(Self {
             client,
             _cache: cache,
@@ -130,7 +157,10 @@ impl Harness {
         let transport = StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(url.to_owned()).auth_header(token),
         );
-        let client = ().serve(transport).await.context("MCP handshake")?;
+        let client = Client::default()
+            .serve(transport)
+            .await
+            .context("MCP handshake")?;
         Ok(Self {
             client,
             _cache: tempfile::tempdir()?,
@@ -162,6 +192,44 @@ impl Harness {
         };
         let params = CallToolRequestParams::new(tool.to_owned()).with_arguments(args);
         Ok(self.client.call_tool(params).await?)
+    }
+
+    /// The server's resources.
+    pub async fn resources(&self) -> anyhow::Result<Vec<Resource>> {
+        Ok(self.client.list_all_resources().await?)
+    }
+
+    /// Reads a resource's text as JSON.
+    pub async fn read_resource(&self, uri: &str) -> anyhow::Result<Value> {
+        let params = ReadResourceRequestParams::new(uri.to_owned());
+        let result = match self.client.read_resource_once(params).await? {
+            rmcp::model::ReadResourceResponse::Complete(result) => result,
+            other => bail!("the resource needs input: {other:?}"),
+        };
+        let text = result
+            .contents
+            .iter()
+            .find_map(|c| match c {
+                rmcp::model::ResourceContents::TextResourceContents { text, .. } => Some(text),
+                _ => None,
+            })
+            .context("the resource has no text")?;
+        Ok(serde_json::from_str(text)?)
+    }
+
+    /// Subscribes to a resource's updates (see
+    /// [`resource_updates`](Self::resource_updates)).
+    pub async fn subscribe(&self, uri: &str) -> anyhow::Result<()> {
+        let params = SubscribeRequestParams::new(uri.to_owned());
+        #[allow(deprecated, reason = "what clients on today's protocol versions use")]
+        self.client.subscribe(params).await?;
+        Ok(())
+    }
+
+    /// The URIs of the resource-updated notifications received so far, and
+    /// forgets them.
+    pub fn resource_updates(&self) -> Vec<String> {
+        std::mem::take(&mut *self.client.service().updated.lock().unwrap())
     }
 
     /// Calls a tool and returns its structured result. Fails if the tool

@@ -132,6 +132,29 @@ async fn lists_the_installed_plugins() {
         "sorted by name"
     );
     assert_eq!(listed["scan_failures"], 0);
+    assert_eq!(listed["total"], 24);
+    // Compact entries by default: no ports or parameter counts.
+    assert_eq!(listed["plugins"][0]["kind"], "instrument");
+    assert!(listed["plugins"][0].get("audio_inputs").is_none());
+    assert!(listed.get("next").is_none());
+    // Paged.
+    let page = dawkey
+        .call("list_plugins", json!({ "first": 20, "count": 3 }))
+        .await
+        .unwrap();
+    assert_eq!(page["plugins"].as_array().unwrap().len(), 3);
+    assert_eq!(page["plugins"][0]["id"], "clap:dawkey.test.tempo");
+    assert_eq!(page["total"], 24);
+    assert_eq!(page["next"], 23);
+    let detailed = dawkey
+        .call(
+            "list_plugins",
+            json!({ "query": "clap:dawkey.test.gain", "detail": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(detailed["plugins"][0]["audio_inputs"], 2);
+    assert_eq!(detailed["plugins"][0]["param_count"], 1);
 
     let instruments = dawkey
         .call(
@@ -152,7 +175,7 @@ async fn lists_the_installed_plugins() {
         .unwrap();
     let effects = effects["plugins"].as_array().unwrap();
     assert_eq!(effects.len(), 3);
-    assert!(effects.iter().all(|p| p["midi_output"] == true));
+    assert!(effects.iter().all(|p| p["kind"] == "midi_effect"));
     let found = dawkey
         .call("list_plugins", json!({ "query": "LV2" }))
         .await
@@ -1348,4 +1371,423 @@ async fn bridged_plugins_run_in_processes_of_their_own() {
     for pid in pids {
         assert!(!Path::new("/proc").join(pid.to_string()).exists(), "{pid}");
     }
+}
+
+/// A batch applies several commands as one call and one undo step, where
+/// later ones refer to what earlier ones made; a failure applies nothing.
+#[tokio::test]
+async fn batches_commands() {
+    let setup = setup();
+    let dawkey = start(&setup).await;
+    dawkey
+        .call("set_tempo", json!({ "bpm": 120 }))
+        .await
+        .unwrap();
+    let result = dawkey
+        .call(
+            "batch",
+            json!({
+                "label": "set up the mix",
+                "operations": [
+                    { "tool": "add_track", "args": { "name": "Verb", "kind": "bus" } },
+                    { "tool": "add_midi_clip", "args": {
+                        "track_name": "Keys", "position_bar": 2,
+                        "notes": [{ "pitch": 60, "start_beats": 0, "length_beats": 1 }],
+                    } },
+                    { "tool": "set_track_output", "args": { "track": "$1.track", "bus": "$0.track" } },
+                    { "tool": "add_plugin", "args": { "track": "$1.track", "plugin": "clap:dawkey.test.gain" } },
+                    { "tool": "set_plugin_param", "args": { "plugin": "$3.plugin", "param": "1", "value": -6 } },
+                    { "tool": "set_track_pan", "args": { "track": "$1.track", "pan": -0.5 } },
+                    { "tool": "edit_midi_notes", "args": { "clip": "$1.clip", "notes": [{ "id": "$1.notes[0]", "pitch": 67 }] } },
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+    let outcomes = result["outcomes"].as_array().unwrap();
+    assert_eq!(outcomes.len(), 7);
+    let bus = outcomes[0]["track"].as_u64().unwrap();
+    let keys = outcomes[1]["track"].as_u64().unwrap();
+    assert_eq!(result["revision"], 2, "one undo step");
+
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(state["undo"], "set up the mix");
+    let track = state["project"]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == keys)
+        .unwrap();
+    assert_eq!(track["output"], bus);
+    assert_eq!(track["pan"], -0.5);
+    assert_eq!(track["plugins"][0]["plugin"], "clap:dawkey.test.gain");
+    assert_eq!(track["clips"][0]["start"], 96_000); // bar 2 at 120 bpm
+    assert_eq!(track["clips"][0]["notes"][0]["pitch"], 67);
+    let slot = outcomes[3]["plugin"].clone();
+    let plugin = dawkey
+        .call("get_plugin", json!({ "plugin": slot }))
+        .await
+        .unwrap();
+    assert_eq!(plugin["params"][0]["value"], -6.0);
+
+    // One undo reverts it all.
+    dawkey.call("undo", json!({})).await.unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(state["project"]["tracks"], json!([]));
+
+    // A failure in the middle applies nothing, and says where.
+    let err = dawkey
+        .call_err(
+            "batch",
+            json!({ "operations": [
+                { "tool": "add_track", "args": { "name": "A" } },
+                { "tool": "add_plugin", "args": { "track": "$0.track", "plugin": "clap:not.there" } },
+            ] }),
+        )
+        .await
+        .unwrap();
+    assert!(err.contains("operation 1: add_plugin:"), "{err}");
+    assert!(err.contains("clap:not.there"), "{err}");
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(state["project"]["tracks"], json!([]));
+    assert_eq!(state["revision"], 3);
+
+    // Bad batches.
+    for (ops, expected) in [
+        (json!([]), "at least one"),
+        (json!([{ "tool": "get_state" }]), "can't be in a batch"),
+        (json!([{ "tool": "nope" }]), "unknown tool"),
+        (
+            json!([{ "tool": "set_track_gain", "args": { "track": "$0.track", "gain_db": 0 } }]),
+            "hasn't run yet",
+        ),
+        (
+            json!([{ "tool": "add_track", "args": { "name": "A" } },
+                   { "tool": "set_track_gain", "args": { "track": "$0.clip", "gain_db": 0 } }]),
+            "returned no \"clip\"",
+        ),
+        (
+            json!([{ "tool": "add_track", "args": { "name": "A", "bogus": 1 } }]),
+            "add_track: invalid arguments: unknown field `bogus`",
+        ),
+    ] {
+        let err = dawkey
+            .call_err("batch", json!({ "operations": ops }))
+            .await
+            .unwrap();
+        assert!(err.contains(expected), "{err}");
+    }
+    dawkey.shutdown().await.unwrap();
+}
+
+/// Aux sends: a copy of a track's signal to a bus at its own level, post or
+/// pre fader, automatable, and never a loop.
+#[tokio::test]
+async fn aux_sends() {
+    let setup = setup();
+    let dawkey = start(&setup).await;
+    let track = signal_track(&dawkey, &setup.wav).await;
+    let verb = dawkey
+        .call("add_track", json!({ "name": "Verb", "kind": "bus" }))
+        .await
+        .unwrap()["track"]
+        .as_u64()
+        .unwrap();
+    // The bus halves what reaches it, so its share can be told apart.
+    let slot = add_plugin(&dawkey, &json!(verb), "clap:dawkey.test.gain").await;
+    dawkey
+        .call(
+            "set_plugin_param",
+            json!({ "plugin": slot, "param": "1", "value": HALF_DB }),
+        )
+        .await
+        .unwrap();
+    let direct = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    assert!(approx(Some(direct), HALF_CENTER_DB));
+
+    // A send at 0 dB adds a halved copy: 1.5 times the direct signal.
+    let set = dawkey
+        .call("set_track_send", json!({ "track": track, "bus": verb }))
+        .await
+        .unwrap();
+    assert!(set["revision"].is_u64());
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(
+        state["project"]["tracks"][0]["sends"],
+        json!([{ "bus": verb, "gain_db": 0.0 }])
+    );
+    let with_send = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    assert!(
+        approx(Some(with_send), direct + 20.0 * 1.5f64.log10()),
+        "{with_send}"
+    );
+
+    // At -6.02 dB the copy is a quarter: 1.25 times.
+    dawkey
+        .call(
+            "set_track_send",
+            json!({ "track": track, "bus": verb, "gain_db": HALF_DB }),
+        )
+        .await
+        .unwrap();
+    let quieter = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    assert!(
+        approx(Some(quieter), direct + 20.0 * 1.25f64.log10()),
+        "{quieter}"
+    );
+
+    // Post-fader: pulling the fader down takes the send with it. Pre-fader:
+    // the send stays.
+    dawkey
+        .call(
+            "set_track_gain",
+            json!({ "track": track, "gain_db": -144.0 }),
+        )
+        .await
+        .unwrap();
+    let faded = peak(&dawkey, 0.0, 0.5).await.unwrap_or(-200.0);
+    assert!(faded < -140.0, "faded out, send and all: {faded}");
+    dawkey
+        .call(
+            "set_track_send",
+            json!({ "track": track, "bus": verb, "pre_fader": true }),
+        )
+        .await
+        .unwrap();
+    let pre = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    // Before the fader and pan law: the half-scale clip, the send's -6 dB,
+    // and the bus's plugin halving it.
+    assert!(approx(Some(pre), 3.0 * HALF_DB), "{pre}");
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(state["project"]["tracks"][0]["sends"][0]["pre_fader"], true);
+    dawkey
+        .call("set_track_gain", json!({ "track": track, "gain_db": 0.0 }))
+        .await
+        .unwrap();
+
+    // The send's level automates, in dB.
+    dawkey
+        .call(
+            "set_automation",
+            json!({ "track": track, "target": { "kind": "send", "bus": verb }, "points": [
+                { "time_s": 0.0, "value": -144.0 }, { "time_s": 0.0001, "value": -144.0 },
+                { "time_s": 0.5, "value": -144.0 }, { "time_s": 0.5001, "value": 0.0 },
+            ] }),
+        )
+        .await
+        .unwrap();
+    let before = peak(&dawkey, 0.1, 0.4).await.unwrap();
+    assert!(
+        approx(Some(before), HALF_CENTER_DB),
+        "no send yet: {before}"
+    );
+    let after = peak(&dawkey, 0.6, 0.9).await.unwrap();
+    assert!(after > before + 1.0, "{after} vs {before}");
+
+    // Removing the send takes its lane; the bus going takes the send.
+    dawkey
+        .call("remove_track_send", json!({ "track": track, "bus": verb }))
+        .await
+        .unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert!(state["project"]["tracks"][0].get("sends").is_none());
+    assert!(state["project"]["tracks"][0].get("automation").is_none());
+    dawkey
+        .call("set_track_send", json!({ "track": track, "bus": verb }))
+        .await
+        .unwrap();
+    dawkey
+        .call("remove_track", json!({ "track": verb }))
+        .await
+        .unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert!(state["project"]["tracks"][0].get("sends").is_none());
+    dawkey.call("undo", json!({})).await.unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(state["project"]["tracks"][0]["sends"][0]["bus"], verb);
+
+    // No loops, no sends to tracks, none from the master.
+    let other = dawkey
+        .call("add_track", json!({ "name": "Other", "kind": "bus" }))
+        .await
+        .unwrap()["track"]
+        .as_u64()
+        .unwrap();
+    dawkey
+        .call("set_track_output", json!({ "track": verb, "bus": other }))
+        .await
+        .unwrap();
+    for (args, expected) in [
+        (json!({ "track": other, "bus": verb }), "loop"),
+        (json!({ "track": verb, "bus": verb }), "loop"),
+        (json!({ "track": track, "bus": track }), "not a bus"),
+        (json!({ "track": 0, "bus": verb }), "master"),
+        (json!({ "track": track, "bus": 99 }), "99"),
+        (
+            json!({ "track": track, "bus": other, "gain_db": 50 }),
+            "gain_db",
+        ),
+    ] {
+        let err = dawkey.call_err("set_track_send", args).await.unwrap();
+        assert!(err.contains(expected), "{err}");
+    }
+    let err = dawkey
+        .call_err("remove_track_send", json!({ "track": track, "bus": other }))
+        .await
+        .unwrap();
+    assert!(err.contains("no send"), "{err}");
+    dawkey.shutdown().await.unwrap();
+}
+
+/// An LV2 plugin's properties beyond its parameters: listed from its TTL
+/// and its saved state, and set by rewriting the state and reloading.
+#[tokio::test]
+async fn plugin_properties() {
+    let setup = setup();
+    let dawkey = start(&setup).await;
+    let track = signal_track(&dawkey, &setup.wav).await;
+    let slot = add_plugin(&dawkey, &track, "lv2:urn:dawkey:test:memo").await;
+    let details = dawkey
+        .call("get_plugin", json!({ "plugin": slot }))
+        .await
+        .unwrap();
+    assert_eq!(
+        details["properties"],
+        json!([{
+            "uri": "urn:dawkey:test:memo#memo",
+            "label": "Memo",
+            "range": "http://lv2plug.in/ns/ext/atom#Float",
+            "writable": true,
+        }])
+    );
+    assert!(details.get("state").is_none(), "nothing saved yet");
+    // The memo adds nothing yet.
+    assert!(approx(peak(&dawkey, 0.0, 0.5).await, HALF_CENTER_DB));
+
+    // Set it: the plugin starts over with 0.25 added to its audio.
+    let set = dawkey
+        .call(
+            "set_plugin_property",
+            json!({ "plugin": slot, "key": "urn:dawkey:test:memo#memo", "value": 0.25, "kind": "Float" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        set["state"],
+        json!([{
+            "key": "urn:dawkey:test:memo#memo",
+            "kind": "http://lv2plug.in/ns/ext/atom#Float",
+            "value": 0.25,
+        }])
+    );
+    assert!(set["revision"].is_u64());
+    let louder = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    // 0.5 + 0.25 at center pan.
+    assert!(
+        approx(Some(louder), HALF_CENTER_DB + 20.0 * 1.5f64.log10()),
+        "{louder}"
+    );
+
+    // Once it has run, the plugin saves the memo as a file of its own (its
+    // state says where, as a path), so a change says its type.
+    let state = dawkey
+        .call("get_plugin", json!({ "plugin": slot }))
+        .await
+        .unwrap()["state"]
+        .clone();
+    assert_eq!(state[0]["kind"], "http://lv2plug.in/ns/ext/atom#Path");
+    assert!(state[0]["value"].is_string());
+    dawkey
+        .call(
+            "set_plugin_property",
+            json!({ "plugin": slot, "key": "urn:dawkey:test:memo#memo", "value": 0.5, "kind": "Float" }),
+        )
+        .await
+        .unwrap();
+    let full = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    assert!(
+        approx(Some(full), HALF_CENTER_DB + 20.0 * 2.0f64.log10()),
+        "{full}"
+    );
+
+    // It's saved with the project, and survives reopening it.
+    let dir = tempfile::tempdir().unwrap();
+    let saved = dawkey
+        .call("save_project", json!({ "path": dir.path().join("Memo") }))
+        .await
+        .unwrap();
+    dawkey.call("new_project", json!({})).await.unwrap();
+    dawkey
+        .call("open_project", json!({ "path": saved["path"] }))
+        .await
+        .unwrap();
+    let reopened = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    assert!(approx(Some(reopened), full), "{reopened}");
+
+    // Other kinds, and removing a key.
+    dawkey
+        .call(
+            "set_plugin_property",
+            json!({ "plugin": slot, "key": "urn:example:note", "value": "/tmp/x.sf2" }),
+        )
+        .await
+        .unwrap();
+    let state = dawkey
+        .call("get_plugin", json!({ "plugin": slot }))
+        .await
+        .unwrap()["state"]
+        .clone();
+    let note = state
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["key"] == "urn:example:note")
+        .unwrap();
+    assert_eq!(note["kind"], "http://lv2plug.in/ns/ext/atom#Path");
+    assert_eq!(note["value"], "/tmp/x.sf2");
+    dawkey
+        .call(
+            "set_plugin_property",
+            json!({ "plugin": slot, "key": "urn:example:note", "value": null }),
+        )
+        .await
+        .unwrap();
+    let state = dawkey
+        .call("get_plugin", json!({ "plugin": slot }))
+        .await
+        .unwrap()["state"]
+        .clone();
+    assert!(
+        state
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["key"] != "urn:example:note")
+    );
+
+    // Bad input.
+    let clap = add_plugin(&dawkey, &track, "clap:dawkey.test.gain").await;
+    for (args, expected) in [
+        (
+            json!({ "plugin": clap, "key": "urn:x", "value": 1 }),
+            "not an LV2 plugin",
+        ),
+        (
+            json!({ "plugin": slot, "key": "urn:x", "value": 1, "kind": "Chunk" }),
+            "can't be written",
+        ),
+        (
+            json!({ "plugin": slot, "key": "urn:x", "value": "text", "kind": "Int" }),
+            "whole number",
+        ),
+        (
+            json!({ "plugin": slot, "key": " ", "value": 1 }),
+            "needs a key",
+        ),
+        (json!({ "plugin": 999, "key": "urn:x", "value": 1 }), "999"),
+    ] {
+        let err = dawkey.call_err("set_plugin_property", args).await.unwrap();
+        assert!(err.contains(expected), "{err}");
+    }
+    dawkey.shutdown().await.unwrap();
 }

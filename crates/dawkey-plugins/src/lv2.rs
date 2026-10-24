@@ -471,6 +471,220 @@ struct Property {
     value: Vec<u8>,
 }
 
+/// The properties a plugin declares with `patch:writable` and
+/// `patch:readable` in its TTL, with their labels and ranges.
+fn declared_properties(world: &World, plugin: &Plugin) -> Vec<crate::PropertyInfo> {
+    let label = world.new_uri("http://www.w3.org/2000/01/rdf-schema#label");
+    let range = world.new_uri("http://www.w3.org/2000/01/rdf-schema#range");
+    let mut found: Vec<crate::PropertyInfo> = Vec::new();
+    for (predicate, writable) in [("writable", true), ("readable", false)] {
+        let predicate = world.new_uri(&format!("{PATCH}{predicate}"));
+        for node in plugin.value(&predicate).iter() {
+            let Some(uri) = node.as_uri().map(str::to_owned) else {
+                continue;
+            };
+            if let Some(known) = found.iter_mut().find(|p| p.uri == uri) {
+                known.writable |= writable;
+                continue;
+            }
+            let text = |predicate: &lilv::node::Node| {
+                world.get(Some(&node), Some(predicate), None).and_then(|n| {
+                    n.as_str()
+                        .map(str::to_owned)
+                        .or_else(|| n.as_uri().map(str::to_owned))
+                })
+            };
+            found.push(crate::PropertyInfo {
+                label: text(&label)
+                    .unwrap_or_else(|| uri.rsplit(['#', '/']).next().unwrap_or(&uri).to_owned()),
+                range: text(&range),
+                uri,
+                writable,
+            });
+        }
+    }
+    found
+}
+
+/// A property in an LV2 plugin's saved state, readable.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct StateProperty {
+    /// The key's URI.
+    pub key: String,
+    /// The value's type URI (`http://lv2plug.in/ns/ext/atom#Path`, ...).
+    pub kind: String,
+    pub value: StateValue,
+}
+
+/// A saved property's value, as far as its type is known.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(untagged)]
+pub enum StateValue {
+    /// `atom:String`, `atom:Path`, `atom:URI`, `atom:Literal`.
+    Text(String),
+    /// `atom:Int`, `atom:Long`.
+    Int(i64),
+    /// `atom:Float`, `atom:Double`.
+    Float(f64),
+    /// `atom:Bool`.
+    Bool(bool),
+    /// Anything else: its size in bytes.
+    Bytes { bytes: usize },
+}
+
+/// The properties in state [`Lv2Instance::save_state`] saved (`None` if it
+/// isn't such state).
+pub fn lv2_state_properties(state: &[u8]) -> Option<Vec<StateProperty>> {
+    let properties = decode_state(state)?;
+    Some(
+        properties
+            .iter()
+            .map(|p| {
+                let kind = p.kind.to_string_lossy().into_owned();
+                let value = match kind.strip_prefix(ATOM) {
+                    Some("String" | "Path" | "URI" | "Literal") => StateValue::Text(
+                        String::from_utf8_lossy(p.value.strip_suffix(b"\0").unwrap_or(&p.value))
+                            .into_owned(),
+                    ),
+                    Some("Int") if p.value.len() == 4 => StateValue::Int(i64::from(
+                        i32::from_le_bytes(p.value[..4].try_into().expect("4 bytes")),
+                    )),
+                    Some("Long") if p.value.len() == 8 => {
+                        StateValue::Int(i64::from_le_bytes(p.value[..8].try_into().expect("8")))
+                    }
+                    Some("Float") if p.value.len() == 4 => StateValue::Float(f64::from(
+                        f32::from_le_bytes(p.value[..4].try_into().expect("4 bytes")),
+                    )),
+                    Some("Double") if p.value.len() == 8 => {
+                        StateValue::Float(f64::from_le_bytes(p.value[..8].try_into().expect("8")))
+                    }
+                    Some("Bool") if p.value.len() == 4 => StateValue::Bool(
+                        i32::from_le_bytes(p.value[..4].try_into().expect("4 bytes")) != 0,
+                    ),
+                    _ => StateValue::Bytes {
+                        bytes: p.value.len(),
+                    },
+                };
+                StateProperty {
+                    key: p.key.to_string_lossy().into_owned(),
+                    kind,
+                    value,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// `state` (saved LV2 state, or `None` for none yet) with property `key`
+/// set to `value`, encoded as `kind` (a type URI; `atom:` names like
+/// `Path` are allowed): a text type takes a string, `Int`/`Long` a whole
+/// number, `Float`/`Double` a number, `Bool` a boolean. Without a kind, an
+/// existing property keeps its type, and a new one gets `atom:String` for
+/// text (`atom:Path` if it looks like a path), `atom:Int`/`atom:Float` for
+/// numbers, `atom:Bool` for booleans. A JSON `null` removes the property.
+pub fn lv2_state_set(
+    state: Option<&[u8]>,
+    key: &str,
+    kind: Option<&str>,
+    value: &serde_json::Value,
+) -> Result<Vec<u8>, String> {
+    let mut properties = match state {
+        Some(bytes) => decode_state(bytes).ok_or("the plugin's saved state is damaged")?,
+        None => Vec::new(),
+    };
+    let key_c = CString::new(key).map_err(|_| "the key has a NUL in it")?;
+    if value.is_null() {
+        properties.retain(|p| p.key != key_c);
+        return Ok(encode_state(&properties));
+    }
+    let existing = properties.iter().find(|p| p.key == key_c);
+    let kind = match kind {
+        Some(k) if k.contains(':') || k.contains('/') => k.to_owned(),
+        Some(k) => format!("{ATOM}{k}"),
+        None => match existing {
+            Some(p) => p.kind.to_string_lossy().into_owned(),
+            None => match value {
+                serde_json::Value::String(s) if s.starts_with('/') => format!("{ATOM}Path"),
+                serde_json::Value::String(_) => format!("{ATOM}String"),
+                serde_json::Value::Bool(_) => format!("{ATOM}Bool"),
+                serde_json::Value::Number(n) if n.is_i64() || n.is_u64() => format!("{ATOM}Int"),
+                serde_json::Value::Number(_) => format!("{ATOM}Float"),
+                other => {
+                    return Err(format!(
+                        "a property value is text, a number or a boolean, not {other}"
+                    ));
+                }
+            },
+        },
+    };
+    let bytes: Vec<u8> = match kind.strip_prefix(ATOM) {
+        Some("String" | "Path" | "URI" | "Literal") => {
+            let text = match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let mut bytes = text.into_bytes();
+            bytes.push(0);
+            bytes
+        }
+        Some("Int") => {
+            let n = value
+                .as_i64()
+                .ok_or_else(|| format!("{kind} takes a whole number, not {value}"))?;
+            i32::try_from(n)
+                .map_err(|_| "out of range for a 32-bit integer")?
+                .to_le_bytes()
+                .to_vec()
+        }
+        Some("Long") => value
+            .as_i64()
+            .ok_or_else(|| format!("{kind} takes a whole number, not {value}"))?
+            .to_le_bytes()
+            .to_vec(),
+        Some("Float") => (value
+            .as_f64()
+            .ok_or_else(|| format!("{kind} takes a number, not {value}"))?
+            as f32)
+            .to_le_bytes()
+            .to_vec(),
+        Some("Double") => value
+            .as_f64()
+            .ok_or_else(|| format!("{kind} takes a number, not {value}"))?
+            .to_le_bytes()
+            .to_vec(),
+        Some("Bool") => i32::from(
+            value
+                .as_bool()
+                .ok_or_else(|| format!("{kind} takes true or false, not {value}"))?,
+        )
+        .to_le_bytes()
+        .to_vec(),
+        _ => {
+            return Err(format!(
+                "{kind} can't be written from JSON; give a kind such as String, Path, Int, Float \
+                 or Bool"
+            ));
+        }
+    };
+    let kind_c = CString::new(kind).map_err(|_| "the kind has a NUL in it")?;
+    // LV2_STATE_IS_POD; portable too for numbers and text.
+    let flags = 0b11;
+    match properties.iter_mut().find(|p| p.key == key_c) {
+        Some(p) => {
+            p.kind = kind_c;
+            p.value = bytes;
+            p.flags = flags;
+        }
+        None => properties.push(Property {
+            key: key_c,
+            kind: kind_c,
+            flags,
+            value: bytes,
+        }),
+    }
+    Ok(encode_state(&properties))
+}
+
 /// Saved state: [`STATE_MAGIC`], a count, then each property's key, type,
 /// flags and value (lengths and numbers as little-endian `u32`s).
 fn encode_state(properties: &[Property]) -> Vec<u8> {
@@ -1528,12 +1742,14 @@ pub(crate) fn scan(path: Option<&[PathBuf]>) -> (Vec<PluginInfo>, Vec<(PathBuf, 
             .author_name()
             .and_then(|n| n.as_str().map(str::to_owned))
             .unwrap_or_default();
+        let properties = declared_properties(&world, &plugin);
         found.push(PluginInfo {
             id: format!("lv2:{uri}"),
             format: PluginFormat::Lv2,
             name,
             vendor,
             path,
+            properties,
             instrument: kinds.iter().any(|k| k.atom && k.input && k.midi),
             midi_output: kinds.iter().any(|k| k.atom && !k.input && k.midi),
             audio_inputs: roles.main_in.len() as u32,
