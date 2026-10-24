@@ -107,7 +107,8 @@ built-in synth (set_synth). add_midi_clip creates a clip with notes;
 add_midi_notes, edit_midi_notes, remove_midi_notes and quantize_midi_notes
 edit them, and set_midi_controls sets pitch bend, CCs, pressure, program
 changes and MIDI 2.0 per-note controllers (per-note pitch bend, volume,
-brightness, ...). import_midi reads a .mid file. Note times are in beats (quarter
+brightness, ...). import_midi reads a .mid file, onto new tracks or
+(`targets`) onto existing ones, keeping their mix and plugins. Note times are in beats (quarter
 notes) from the clip's start; clip positions and ranges are in seconds, or
 in beats from the project's start (`*_beats` instead of `*_s`, e.g.
 start_beats) or bars as the ruler numbers them (`*_bar`, from 1; end_bar 33
@@ -248,10 +249,12 @@ impl DawkeyMcp {
                 let prepared = tool_try!(self.prepare_batch(operations));
                 let label = label.unwrap_or_else(|| "batch".to_owned());
                 run(studio, move |s| {
-                    let outcomes =
-                        s.execute_batch_with(label, prepared.len(), |project, outcomes| {
-                            prepared[outcomes.len()].command(project, outcomes)
-                        })?;
+                    let outcomes = s.execute_batch_with(label, |project, outcomes| {
+                        prepared
+                            .get(outcomes.len())
+                            .map(|op| op.command(project, outcomes))
+                            .transpose()
+                    })?;
                     Ok::<_, CoreError>(json!({
                         "outcomes": outcomes,
                         "revision": revision(s),
@@ -345,11 +348,46 @@ impl DawkeyMcp {
                 let ImportMidi {
                     path,
                     position_s,
+                    targets,
+                    replace,
                     use_file_tempo,
                 } = try_args!(parse(args));
                 let file = tool_try!(blocking(move || dawkey_media::read_midi_file(&path)).await);
+                let targets: Vec<dawkey_studio::MidiImportTarget> = tool_try!(
+                    targets
+                        .iter()
+                        .map(|t| {
+                            let file_track = match (t.file_track, &t.file_track_name) {
+                                (Some(index), None) => index,
+                                (None, Some(name)) => file
+                                    .tracks
+                                    .iter()
+                                    .position(|ft| &ft.name == name)
+                                    .ok_or_else(|| {
+                                        let names: Vec<&str> =
+                                            file.tracks.iter().map(|t| t.name.as_str()).collect();
+                                        format!(
+                                            "the file has no track named {name:?}; its tracks \
+                                             with notes are {names:?}"
+                                        )
+                                    })?,
+                                _ => {
+                                    return Err(
+                                        "give each target a file_track or a file_track_name"
+                                            .to_owned(),
+                                    );
+                                }
+                            };
+                            Ok(dawkey_studio::MidiImportTarget {
+                                file_track,
+                                track: t.track,
+                            })
+                        })
+                        .collect::<Result<_, String>>()
+                );
                 run(studio, move |s| {
-                    let import = s.import_midi(&file, position_s, use_file_tempo)?;
+                    let import =
+                        s.import_midi(&file, position_s, use_file_tempo, &targets, replace)?;
                     let mut result = to_json(&import);
                     result["revision"] = json!(revision(s));
                     Ok::<_, dawkey_studio::StudioError>(result)

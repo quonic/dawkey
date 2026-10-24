@@ -154,8 +154,11 @@ pub(crate) struct ImportAudio {
 
 /// Import a Standard MIDI File (.mid): each of its tracks (split by MIDI
 /// channel) becomes a new MIDI track with one clip, with its notes and
-/// controllers (pitch bend, CCs, channel pressure). One undo step. Returns
-/// the new track and clip IDs.
+/// controllers (pitch bend, CCs, channel pressure), unless `targets` maps
+/// it onto an existing MIDI track, which keeps its plugins, mix and
+/// routing and gets the clip in place of its clips there (or beside them
+/// with `replace: false`). One undo step. Returns the track and clip IDs
+/// (`tracks`, `clips`), and the clips replaced (`removed_clips`).
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ImportMidi {
@@ -164,6 +167,14 @@ pub(crate) struct ImportMidi {
     /// Timeline position of the file's start, in seconds. Defaults to 0.
     #[serde(default)]
     pub(crate) position_s: f64,
+    /// File tracks to put on existing MIDI tracks. The rest become new
+    /// tracks.
+    #[serde(default)]
+    pub(crate) targets: Vec<ImportMidiTarget>,
+    /// Whether a mapped track's clips that the imported clip overlaps are
+    /// removed (default), or kept beside it.
+    #[serde(default = "yes")]
+    pub(crate) replace: bool,
     /// Take the file's tempo map and time signature, so it plays as
     /// written (MIDI clips already in the project keep their beat
     /// positions). Defaults to true if the project has no clips yet;
@@ -171,6 +182,22 @@ pub(crate) struct ImportMidi {
     /// tempo.
     #[serde(default)]
     pub(crate) use_file_tempo: Option<bool>,
+}
+
+/// A MIDI file track and the project track it goes on.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ImportMidiTarget {
+    /// Index of the track in the file, counting only tracks with notes
+    /// (one per file track and channel), from 0; as a plain import lists
+    /// them in `tracks`.
+    #[serde(default)]
+    pub(crate) file_track: Option<usize>,
+    /// Or the track's name in the file (the first with that name).
+    #[serde(default)]
+    pub(crate) file_track_name: Option<String>,
+    /// The existing MIDI track to put its clip on.
+    pub(crate) track: TrackId,
 }
 
 /// Plugin kinds for list_plugins.

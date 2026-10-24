@@ -15,7 +15,7 @@ mod recorder;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,7 +25,7 @@ use dawkey_backend_pipewire::{
 };
 use dawkey_core::{
     AddClip, AddMidiClip, AutomationTarget, Command, ControlSpec, Controller, CoreError,
-    MeterChange, MeterMap, NoteSpec, Outcome, PluginId, Project, Session, SetTempoMap,
+    MeterChange, MeterMap, NoteSpec, Outcome, PluginId, Project, RemoveClip, Session, SetTempoMap,
     SetTimeSignatureMap, SourceId, TempoChange, TimeRange, TimeSignature, TrackId, TrackKind,
 };
 use dawkey_engine::{
@@ -322,12 +322,26 @@ pub struct ParamState {
 /// What an imported MIDI file became.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MidiImport {
-    /// One new track and clip per file track (and channel) with notes.
+    /// The track each clip went on: one per file track (and channel) with
+    /// notes, new unless it was mapped to an existing one.
     pub tracks: Vec<TrackId>,
     pub clips: Vec<dawkey_core::ClipId>,
     pub notes: usize,
     /// The file's tempo map and time signature were adopted.
     pub used_file_tempo: bool,
+    /// Clips of mapped tracks that the imported clips replaced.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed_clips: Vec<dawkey_core::ClipId>,
+}
+
+/// Where a MIDI file's track goes when importing: onto an existing MIDI
+/// track instead of a new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MidiImportTarget {
+    /// Index of the track in the file (as [`MidiFile::tracks`] has them).
+    pub file_track: usize,
+    /// The MIDI track to put its clip on.
+    pub track: TrackId,
 }
 
 /// MIDI the engine sent to a device (virtual backend).
@@ -681,30 +695,29 @@ impl Studio {
         result
     }
 
-    /// Runs `count` commands as one undo step, each made by `next` from the
-    /// project as the earlier ones left it and their outcomes; see
+    /// Runs commands as one undo step until `next` makes none, each made
+    /// from the project as the earlier ones left it and their outcomes; see
     /// [`Session::execute_batch_with`]. Plugin commands are checked against
     /// the catalog like single ones. The engine graph is compiled once.
     pub fn execute_batch_with<F>(
         &mut self,
         label: impl Into<String>,
-        count: usize,
         mut next: F,
     ) -> Result<Vec<Outcome>, CoreError>
     where
-        F: FnMut(&Project, &[Outcome]) -> Result<Command, CoreError>,
+        F: FnMut(&Project, &[Outcome]) -> Result<Option<Command>, CoreError>,
     {
         let plugins = &mut self.plugins;
-        let result = self
-            .session
-            .execute_batch_with(label, count, |project, outcomes| {
-                let command = next(project, outcomes)?;
-                let name = command.name();
-                let named = |e: CoreError| e.in_context(name);
-                let command = plugins.resolve(project, command).map_err(named)?;
-                plugins.check(project, &command).map_err(named)?;
-                Ok(command)
-            });
+        let result = self.session.execute_batch_with(label, |project, outcomes| {
+            let Some(command) = next(project, outcomes)? else {
+                return Ok(None);
+            };
+            let name = command.name();
+            let named = |e: CoreError| e.in_context(name);
+            let command = plugins.resolve(project, command).map_err(named)?;
+            plugins.check(project, &command).map_err(named)?;
+            Ok(Some(command))
+        });
         self.sync();
         result
     }
@@ -1186,14 +1199,59 @@ impl Studio {
         file: &MidiFile,
         position_s: f64,
         use_file_tempo: Option<bool>,
+        targets: &[MidiImportTarget],
+        replace: bool,
     ) -> Result<MidiImport, StudioError> {
         if file.tracks.is_empty() {
             return Err(StudioError::Invalid("the MIDI file has no notes".into()));
         }
         let project = self.session.project();
+        for target in targets {
+            if target.file_track >= file.tracks.len() {
+                return Err(StudioError::Invalid(format!(
+                    "the file has {} tracks with notes, so there's no file track {}",
+                    file.tracks.len(),
+                    target.file_track
+                )));
+            }
+            match project.track(target.track) {
+                None => return Err(CoreError::TrackNotFound(target.track).into()),
+                Some(t) if t.kind != TrackKind::Midi => {
+                    return Err(StudioError::Invalid(format!(
+                        "track {} ({}) is not a MIDI track",
+                        target.track, t.name
+                    )));
+                }
+                Some(_) => {}
+            }
+            if targets
+                .iter()
+                .filter(|t| t.file_track == target.file_track)
+                .count()
+                > 1
+            {
+                return Err(StudioError::Invalid(format!(
+                    "file track {} is mapped more than once",
+                    target.file_track
+                )));
+            }
+        }
         let empty = project.tracks.iter().all(|t| t.clips.is_empty());
         let adopt = use_file_tempo.unwrap_or(empty);
-        let mut commands = Vec::new();
+
+        /// A step of the import: a command, or working out which clips of a
+        /// mapped track the clip just added replaces.
+        enum Step {
+            Command(Command),
+            Replace { track: TrackId, added: usize },
+        }
+        let mut steps = VecDeque::new();
+        let mut command_count = 0;
+        let mut push = |steps: &mut VecDeque<Step>, command: Command| {
+            steps.push_back(Step::Command(command));
+            command_count += 1;
+            command_count - 1
+        };
         if adopt {
             // The file's beat 0 lands at `position_s`, at its first tempo.
             let first = file
@@ -1202,18 +1260,21 @@ impl Studio {
                 .filter(|(beat, _)| *beat <= 0.0)
                 .map_or(120.0, |&(_, bpm)| bpm);
             let offset = position_s * first / 60.0;
-            commands.push(Command::from(SetTempoMap {
-                bpm: first,
-                changes: file
-                    .tempo
-                    .iter()
-                    .filter(|(beat, _)| *beat > 0.0)
-                    .map(|&(beat, bpm)| TempoChange::new(beat + offset, bpm))
-                    .collect(),
-            }));
-            commands.push(meter_map_of(file, offset).into());
+            push(
+                &mut steps,
+                Command::from(SetTempoMap {
+                    bpm: first,
+                    changes: file
+                        .tempo
+                        .iter()
+                        .filter(|(beat, _)| *beat > 0.0)
+                        .map(|&(beat, bpm)| TempoChange::new(beat + offset, bpm))
+                        .collect(),
+                }),
+            );
+            push(&mut steps, meter_map_of(file, offset).into());
         }
-        for track in &file.tracks {
+        for (index, track) in file.tracks.iter().enumerate() {
             let notes = track
                 .notes
                 .iter()
@@ -1236,9 +1297,12 @@ impl Studio {
                     })
                 })
                 .collect();
-            commands.push(
+            let target = targets.iter().find(|t| t.file_track == index);
+            let added = push(
+                &mut steps,
                 AddMidiClip {
-                    track_name: Some(track.name.clone()),
+                    track: target.map(|t| t.track),
+                    track_name: target.is_none().then(|| track.name.clone()),
                     position_s,
                     notes,
                     controls,
@@ -1246,11 +1310,48 @@ impl Studio {
                 }
                 .into(),
             );
+            if let Some(target) = target
+                && replace
+            {
+                steps.push_back(Step::Replace {
+                    track: target.track,
+                    added,
+                });
+            }
         }
-        let outcomes = self.session.execute_batch("import_midi", commands)?;
-        self.sync();
+        let mut removed = Vec::new();
+        let outcomes = self.execute_batch_with("import_midi", |project, outcomes| {
+            loop {
+                match steps.pop_front() {
+                    None => return Ok(None),
+                    Some(Step::Command(command)) => return Ok(Some(command)),
+                    Some(Step::Replace { track, added }) => {
+                        // The clips the new one overlaps go, in front of the
+                        // remaining steps.
+                        let new = outcomes[added].clip.expect("add_midi_clip makes a clip");
+                        let Some((_, clip)) = project.clip(new) else {
+                            continue;
+                        };
+                        let (start, end) = (clip.start, clip.end());
+                        let Some(track) = project.track(track) else {
+                            continue;
+                        };
+                        for old in track
+                            .clips
+                            .iter()
+                            .filter(|c| c.id != new && c.start < end && c.end() > start)
+                            .rev()
+                        {
+                            removed.push(old.id);
+                            steps.push_front(Step::Command(RemoveClip { clip: old.id }.into()));
+                        }
+                    }
+                }
+            }
+        })?;
         let mut import = MidiImport {
             used_file_tempo: adopt,
+            removed_clips: removed,
             ..MidiImport::default()
         };
         for outcome in outcomes {

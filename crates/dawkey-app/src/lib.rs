@@ -592,7 +592,7 @@ impl App {
     ) -> Result<MidiImport, String> {
         let import = self
             .studio
-            .import_midi(file, request.position_s, None)
+            .import_midi(file, request.position_s, None, &[], false)
             .map_err(|e| e.to_string())?;
         self.rebuild();
         Ok(import)
