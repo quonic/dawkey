@@ -843,8 +843,9 @@ fn clip_node(
             });
         });
     // Keep the name visible when the clip starts left of the view.
-    let label_x = (x_of(view, visible_from) - x).max(0.0) + 7.0;
-    let label_rect = Rect::new(label_x, 2.0, (w - label_x).max(0.0), 16.0);
+    let label_boarder = 7.0;
+    let label_x = (x_of(view, visible_from) - x).max(0.0) + label_boarder;
+    let label_rect = Rect::new(label_x, 2.0, (w - label_x - label_boarder).max(0.0), 16.0);
     // Clips (not takes) have their name as a handle of its own:
     // double-click it to type a new one.
     let renamable = !ghost && look != Look::Take;
