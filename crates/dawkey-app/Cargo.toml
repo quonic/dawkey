@@ -1,6 +1,6 @@
 [package]
 name = "dawkey-app"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Dawkey's application: views, UI actions, and the App state shared by the GUI and MCP"
