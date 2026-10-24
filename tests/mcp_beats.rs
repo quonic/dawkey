@@ -143,3 +143,89 @@ async fn positions_in_beats_and_bars() {
     }
     dawkey.shutdown().await.unwrap();
 }
+
+/// get_state can leave out notes, controls, automation points and tracks,
+/// and open_project returns a summary.
+#[tokio::test]
+async fn smaller_states() {
+    let dir = tempfile::tempdir().unwrap();
+    let dawkey = start().await;
+    let added = dawkey
+        .call(
+            "add_midi_clip",
+            json!({
+                "notes": [
+                    { "pitch": 60, "start_beats": 0, "length_beats": 1 },
+                    { "pitch": 72, "start_beats": 1, "length_beats": 1 },
+                ],
+                "controls": [{ "controller": { "kind": "pitch_bend" }, "time_beats": 0.5, "value": 8192 }],
+            }),
+        )
+        .await
+        .unwrap();
+    let midi = added["track"].as_u64().unwrap();
+    let other = dawkey
+        .call("add_track", json!({ "name": "Other" }))
+        .await
+        .unwrap();
+    let other = other["track"].as_u64().unwrap();
+    dawkey
+        .call(
+            "set_automation",
+            json!({ "track": midi, "target": { "kind": "gain" }, "points": [
+                { "time_s": 0, "value": 0 }, { "time_s": 1, "value": -6 }
+            ] }),
+        )
+        .await
+        .unwrap();
+
+    let full = dawkey.call("get_state", json!({})).await.unwrap();
+    assert!(full.get("summary").is_none());
+    let clip = &full["project"]["tracks"][0]["clips"][0];
+    assert_eq!(clip["notes"].as_array().unwrap().len(), 2);
+    assert_eq!(full["project"]["tracks"].as_array().unwrap().len(), 2);
+
+    let summary = dawkey
+        .call("get_state", json!({ "summary": true, "tracks": [midi] }))
+        .await
+        .unwrap();
+    let tracks = summary["project"]["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 1, "{other} left out");
+    let clip = &tracks[0]["clips"][0];
+    assert!(clip.get("notes").is_none());
+    assert_eq!(clip["note_count"], 2);
+    assert_eq!(clip["pitch_range"], json!([60, 72]));
+    assert_eq!(clip["control_count"], 1);
+    assert!(clip.get("controls").is_none());
+    assert_eq!(tracks[0]["automation"][0]["point_count"], 2);
+    assert!(tracks[0]["automation"][0].get("points").is_none());
+    assert_eq!(
+        summary["summary"]["left_out"],
+        json!(["notes", "controls", "automation_points", "other_tracks"])
+    );
+    assert_eq!(summary["project"]["master"]["id"], 0);
+
+    // Just the notes left out: controls stay.
+    let no_notes = dawkey
+        .call("get_state", json!({ "notes": false }))
+        .await
+        .unwrap();
+    let clip = &no_notes["project"]["tracks"][0]["clips"][0];
+    assert_eq!(clip["note_count"], 2);
+    assert_eq!(clip["controls"].as_array().unwrap().len(), 1);
+    assert_eq!(no_notes["summary"]["left_out"], json!(["notes"]));
+
+    // open_project and new_project return summaries.
+    let saved = dawkey
+        .call("save_project", json!({ "path": dir.path().join("Small") }))
+        .await
+        .unwrap();
+    let fresh = dawkey.call("new_project", json!({})).await.unwrap();
+    assert_eq!(fresh["summary"]["left_out"].as_array().unwrap().len(), 3);
+    let opened = dawkey
+        .call("open_project", json!({ "path": saved["path"] }))
+        .await
+        .unwrap();
+    assert_eq!(opened["project"]["tracks"][0]["clips"][0]["note_count"], 2);
+    dawkey.shutdown().await.unwrap();
+}

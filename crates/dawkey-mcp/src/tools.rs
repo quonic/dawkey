@@ -50,7 +50,37 @@ pub(crate) const GET_PLUGIN: &str = "get_plugin";
 #[serde(deny_unknown_fields)]
 pub(crate) struct NoArgs {}
 
-/// Start a new, empty project, replacing the open one.
+/// Get the open project (tracks, clips, audio pool) and session status
+/// (path, unsaved changes, undo/redo). The whole project by default, which
+/// can be large: `notes: false`, `controls: false` and `automation: false`
+/// (or `summary: true` for all three) replace notes, controller points and
+/// automation points with their counts, and `tracks` keeps only some
+/// tracks. `summary.left_out` says what was left out.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GetState {
+    /// Include each MIDI clip's notes. Default true; false gives
+    /// `note_count` and `pitch_range` instead.
+    #[serde(default = "yes")]
+    pub(crate) notes: bool,
+    /// Include each MIDI clip's controller points. Default true; false
+    /// gives `control_count` instead.
+    #[serde(default = "yes")]
+    pub(crate) controls: bool,
+    /// Include automation lanes' points. Default true; false gives each
+    /// lane's `point_count` instead.
+    #[serde(default = "yes")]
+    pub(crate) automation: bool,
+    /// Only these tracks (the master always comes along).
+    #[serde(default)]
+    pub(crate) tracks: Option<Vec<TrackId>>,
+    /// A compact state: like `notes`, `controls` and `automation` all false.
+    #[serde(default)]
+    pub(crate) summary: bool,
+}
+
+/// Start a new, empty project, replacing the open one. Returns a summary of
+/// the project, as get_state with `summary: true`.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NewProject {
@@ -62,7 +92,10 @@ pub(crate) struct NewProject {
     pub(crate) discard_changes: bool,
 }
 
-/// Open a project bundle (a `.dawkey` directory), replacing the open project.
+/// Open a project bundle (a `.dawkey` directory), replacing the open
+/// project. Returns a summary of the project, as get_state with `summary:
+/// true` (counts instead of notes, controller and automation points; call
+/// get_state for them).
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OpenProject {
@@ -136,7 +169,10 @@ pub(crate) enum PluginKind {
 }
 
 /// List the installed CLAP, LV2 and VST3 plugins, for add_plugin. The list is
-/// cached; rescan_plugins refreshes it after installing plugins.
+/// cached; rescan_plugins refreshes it after installing plugins. Each entry
+/// is compact (ID, name, vendor, format, kind) unless `detail` or `params`
+/// is set; `total` counts the matches, and `first`/`count` page through
+/// them (`next` is the `first` for the next page, when there is one).
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListPlugins {
@@ -145,9 +181,19 @@ pub(crate) struct ListPlugins {
     pub(crate) query: Option<String>,
     #[serde(default)]
     pub(crate) kind: Option<PluginKind>,
-    /// Include each plugin's parameters (IDs, names, ranges).
+    /// Include each plugin's parameters (IDs, names, ranges). Implies
+    /// `detail`.
     #[serde(default)]
     pub(crate) params: bool,
+    /// Include each plugin's ports, sidechain, outputs and parameter count.
+    #[serde(default)]
+    pub(crate) detail: bool,
+    /// Index of the first match to list. Defaults to 0.
+    #[serde(default)]
+    pub(crate) first: usize,
+    /// How many matches to list. Defaults to 100.
+    #[serde(default)]
+    pub(crate) count: Option<usize>,
 }
 
 /// Get a plugin slot on a track: which plugin, whether it's running, and
@@ -634,12 +680,7 @@ pub(crate) fn build_tools() -> Vec<Tool> {
         .destructive(false)
         .open_world(false);
     let mut tools = vec![
-        tool::<NoArgs>(
-            GET_STATE,
-            "Get the open project (tracks, clips, audio pool) and session status \
-             (path, unsaved changes, undo/redo).",
-            read_only.clone(),
-        ),
+        tool::<GetState>(GET_STATE, "", read_only.clone()),
         tool::<NoArgs>(UNDO, "Undo the last change.", mutating.clone()),
         tool::<NoArgs>(REDO, "Redo the last undone change.", mutating.clone()),
         tool::<NewProject>(NEW_PROJECT, "", mutating.clone().destructive(true)),

@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod http;
+mod state;
 mod times;
 mod tools;
 
@@ -37,8 +38,10 @@ use crate::tools::*;
 
 const INSTRUCTIONS: &str = "\
 Dawkey is a digital audio workstation. These tools edit and play the open
-project. Call get_state first: it returns the whole project, including the
-track, clip and source IDs that other tools take. Every tool call that changes
+project. Call get_state first: it returns the project, including the
+track, clip and source IDs that other tools take (`summary: true`, or
+`notes: false`, leaves the notes out of a big project, and `tracks` picks
+tracks; open_project and new_project return such a summary). Every tool call that changes
 the project is one undo step, so `undo` reverts exactly one call. Changes are
 not written to disk until save_project is called.
 
@@ -190,8 +193,20 @@ impl DawkeyMcp {
         }
         let result = match name {
             GET_STATE => {
-                let NoArgs {} = try_args!(parse(args));
-                run(studio, |s| Ok::<_, CoreError>(state_json(s))).await
+                let GetState {
+                    notes,
+                    controls,
+                    automation,
+                    tracks,
+                    summary,
+                } = try_args!(parse(args));
+                let trim = state::Trim {
+                    notes: summary || !notes,
+                    controls: summary || !controls,
+                    automation: summary || !automation,
+                    tracks: tracks.map(|ids| ids.into_iter().map(|id| id.0).collect()),
+                };
+                run(studio, move |s| Ok::<_, CoreError>(state_json(s, trim))).await
             }
             UNDO => {
                 let NoArgs {} = try_args!(parse(args));
@@ -219,7 +234,7 @@ impl DawkeyMcp {
                     let project = Project::new(name.unwrap_or_else(|| "Untitled".into()));
                     s.replace(LoadedProject::new(project))
                         .map_err(|e| e.to_string())?;
-                    Ok::<_, String>(state_json(s))
+                    Ok::<_, String>(state_json(s, state::Trim::summary()))
                 })
                 .await
             }
@@ -240,7 +255,7 @@ impl DawkeyMcp {
                 run(studio, move |s| {
                     refuse_if_dirty(s.session(), discard_changes)?;
                     s.replace(loaded).map_err(|e| e.to_string())?;
-                    Ok::<_, String>(state_json(s))
+                    Ok::<_, String>(state_json(s, state::Trim::summary()))
                 })
                 .await
             }
@@ -502,11 +517,16 @@ impl DawkeyMcp {
                     query,
                     kind,
                     params,
+                    detail,
+                    first,
+                    count,
                 } = try_args!(parse(args));
+                let detail = detail || params;
+                let count = count.unwrap_or(100);
                 run(studio, move |s| {
                     let query = query.map(|q| q.to_lowercase());
                     let catalog = s.plugin_catalog();
-                    let plugins: Vec<Value> = catalog
+                    let matching: Vec<_> = catalog
                         .plugins
                         .iter()
                         .filter(|p| match kind {
@@ -522,18 +542,33 @@ impl DawkeyMcp {
                                     .any(|f| f.to_lowercase().contains(q))
                             })
                         })
+                        .collect();
+                    let total = matching.len();
+                    let plugins: Vec<Value> = matching
+                        .into_iter()
+                        .skip(first)
+                        .take(count)
                         .map(|p| {
+                            let kind = match (p.instrument, p.midi_output) {
+                                (true, false) => "instrument",
+                                (true, true) => "midi_effect",
+                                (false, _) => "effect",
+                            };
                             let mut v = json!({
                                 "id": p.id,
                                 "name": p.name,
                                 "vendor": p.vendor,
                                 "format": p.format,
-                                "instrument": p.instrument,
-                                "midi_output": p.midi_output,
-                                "audio_inputs": p.audio_inputs,
-                                "audio_outputs": p.audio_outputs,
-                                "param_count": p.params.len(),
+                                "kind": kind,
                             });
+                            if !detail {
+                                return v;
+                            }
+                            v["instrument"] = json!(p.instrument);
+                            v["midi_output"] = json!(p.midi_output);
+                            v["audio_inputs"] = json!(p.audio_inputs);
+                            v["audio_outputs"] = json!(p.audio_outputs);
+                            v["param_count"] = json!(p.params.len());
                             if p.sidechain {
                                 v["sidechain"] = json!(true);
                             }
@@ -546,10 +581,15 @@ impl DawkeyMcp {
                             v
                         })
                         .collect();
-                    Ok::<_, String>(json!({
+                    let mut result = json!({
                         "plugins": plugins,
+                        "total": total,
                         "scan_failures": catalog.failures.len(),
-                    }))
+                    });
+                    if first + count < total {
+                        result["next"] = json!(first + count);
+                    }
+                    Ok::<_, String>(result)
                 })
                 .await
             }
@@ -1038,10 +1078,12 @@ fn parse_key_combo(combo: &str) -> Result<(String, Modifiers), String> {
     Ok((key, modifiers))
 }
 
-/// The session state as get_state returns it, with beats added.
-fn state_json(studio: &Studio) -> Value {
+/// The session state as get_state returns it: with beats added, and with
+/// what `trim` says left out.
+fn state_json(studio: &Studio, trim: state::Trim) -> Value {
     let mut state = to_json(&studio.session().state());
     times::with_beats(studio.session().project(), &mut state);
+    trim.apply(&mut state);
     state
 }
 

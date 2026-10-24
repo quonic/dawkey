@@ -132,6 +132,29 @@ async fn lists_the_installed_plugins() {
         "sorted by name"
     );
     assert_eq!(listed["scan_failures"], 0);
+    assert_eq!(listed["total"], 24);
+    // Compact entries by default: no ports or parameter counts.
+    assert_eq!(listed["plugins"][0]["kind"], "instrument");
+    assert!(listed["plugins"][0].get("audio_inputs").is_none());
+    assert!(listed.get("next").is_none());
+    // Paged.
+    let page = dawkey
+        .call("list_plugins", json!({ "first": 20, "count": 3 }))
+        .await
+        .unwrap();
+    assert_eq!(page["plugins"].as_array().unwrap().len(), 3);
+    assert_eq!(page["plugins"][0]["id"], "clap:dawkey.test.tempo");
+    assert_eq!(page["total"], 24);
+    assert_eq!(page["next"], 23);
+    let detailed = dawkey
+        .call(
+            "list_plugins",
+            json!({ "query": "clap:dawkey.test.gain", "detail": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(detailed["plugins"][0]["audio_inputs"], 2);
+    assert_eq!(detailed["plugins"][0]["param_count"], 1);
 
     let instruments = dawkey
         .call(
@@ -152,7 +175,7 @@ async fn lists_the_installed_plugins() {
         .unwrap();
     let effects = effects["plugins"].as_array().unwrap();
     assert_eq!(effects.len(), 3);
-    assert!(effects.iter().all(|p| p["midi_output"] == true));
+    assert!(effects.iter().all(|p| p["kind"] == "midi_effect"));
     let found = dawkey
         .call("list_plugins", json!({ "query": "LV2" }))
         .await
