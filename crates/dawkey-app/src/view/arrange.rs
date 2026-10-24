@@ -823,7 +823,7 @@ fn clip_node(
             .role(Role::Clip)
             .accessible_label(clip.name.clone())
             .value(format!(
-                "{start_s:.3} s – {end_s:.3} s{}",
+                "{start_s:.3} s - {end_s:.3} s{}",
                 if clip.muted { " (muted)" } else { "" }
             ))
             .clickable()
@@ -1141,7 +1141,7 @@ fn ruler(model: &ViewModel, view: &ViewState) -> Node {
                     "Punch range"
                 })
                 .value(format!(
-                    "{start:.3} s – {end:.3} s{}",
+                    "{start:.3} s - {end:.3} s{}",
                     if enabled { "" } else { " (off)" }
                 ))
                 .style(|s| {

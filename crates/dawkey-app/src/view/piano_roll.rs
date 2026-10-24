@@ -871,7 +871,7 @@ fn grid(
                 .role(Role::Note)
                 .accessible_label(name)
                 .value(format!(
-                    "{start:.3}–{:.3} beats · velocity {}",
+                    "{start:.3}-{:.3} beats · velocity {}",
                     start + length,
                     note.velocity
                 ))

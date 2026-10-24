@@ -201,7 +201,7 @@ fn arrange_shows_clips_with_waveforms() {
     let node = tree.find(&format!("clip/{clip}")).unwrap();
     assert_eq!(node.role, Role::Clip);
     assert_eq!(node.name.as_deref(), Some("ramp"));
-    assert_eq!(node.value.as_deref(), Some("1.000 s – 3.000 s"));
+    assert_eq!(node.value.as_deref(), Some("1.000 s - 3.000 s"));
     // 80 px per second: 2 s is 160 px wide.
     assert_eq!(node.bounds.w, 160.0);
     let lane = tree.find(&format!("track/{track}/lane")).unwrap();
@@ -1023,7 +1023,7 @@ fn ranges_from_ruler_drags() {
     let tree = app.access_tree();
     assert_eq!(
         tree.find("timeline/loop").unwrap().value.as_deref(),
-        Some("1.000 s – 3.000 s")
+        Some("1.000 s - 3.000 s")
     );
     assert_eq!(tree.find("transport/loop").unwrap().checked, Some(true));
     app.key("l", Modifiers::default()).unwrap();
@@ -1140,7 +1140,7 @@ fn midi_tracks_and_clips_in_the_arrange_view() {
         .find(&format!("clip/{clip}"))
         .unwrap()
         .clone();
-    assert_eq!(node.value.as_deref(), Some("1.000 s – 3.000 s"));
+    assert_eq!(node.value.as_deref(), Some("1.000 s - 3.000 s"));
     let bar = app.scene().primitives.into_iter().any(|p| {
         matches!(p, dawkey_ui::Primitive::Rect { rect, .. }
             if rect.x == node.bounds.x && (rect.w - 80.0).abs() < 0.01)
@@ -1157,7 +1157,7 @@ fn midi_tracks_and_clips_in_the_arrange_view() {
     assert_eq!(note.name.as_deref(), Some("C4"));
     assert_eq!(
         note.value.as_deref(),
-        Some("0.000–2.000 beats · velocity 100")
+        Some("0.000-2.000 beats · velocity 100")
     );
 
     // Audio clips can't be dragged onto MIDI tracks.

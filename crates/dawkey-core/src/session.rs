@@ -1106,7 +1106,7 @@ mod tests {
         let src = s.add_source("Vox", "/tmp/vox.wav", 1, 96_000);
         let first = place(&mut s, src, None, 0.0);
         let (track, a) = (first.track.unwrap(), first.clip.unwrap());
-        // A second take over 0.5–1.5 s: a lane up, and the first take goes
+        // A second take over 0.5-1.5 s: a lane up, and the first take goes
         // silent under it.
         let take = |s: &mut Session, at: f64, muted: bool| {
             s.execute(
@@ -1157,7 +1157,7 @@ mod tests {
         assert_eq!(s.project().clip(c).unwrap().1.lane, 2);
         assert_eq!(clips(&s).iter().filter(|c| !c.2).count(), 3);
 
-        // Comping 1.0–1.25 s of the muted take: it plays there and the
+        // Comping 1.0-1.25 s of the muted take: it plays there and the
         // second take doesn't. One undo step.
         let playing = s
             .execute(

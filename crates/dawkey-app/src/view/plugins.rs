@@ -563,7 +563,7 @@ fn editor(
         list = list
             .child(control)
             .child(
-                Node::label(format!("{} – {}", format_param(p.min), format_param(p.max)))
+                Node::label(format!("{} - {}", format_param(p.min), format_param(p.max)))
                     .absolute(Rect::new(440.0, y, 90.0, ROW_H - 6.0))
                     .style(|s| {
                         s.color = pal().text_dim;
