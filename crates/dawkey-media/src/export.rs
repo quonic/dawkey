@@ -104,6 +104,35 @@ pub trait BlockSource {
     fn read(&mut self, left: &mut [f32], right: &mut [f32]) -> usize;
 }
 
+/// Stereo audio in memory, as a block source (for exporting a render that
+/// was put together in memory, like a wrapped loop).
+#[derive(Debug)]
+pub struct MemorySource {
+    left: Vec<f32>,
+    right: Vec<f32>,
+    at: usize,
+}
+
+impl MemorySource {
+    /// `channels` is one or two planes of the same length (one is mono,
+    /// played on both sides).
+    pub fn new(mut channels: Vec<Vec<f32>>) -> Self {
+        let right = channels.pop().unwrap_or_default();
+        let left = channels.pop().unwrap_or_else(|| right.clone());
+        Self { left, right, at: 0 }
+    }
+}
+
+impl BlockSource for MemorySource {
+    fn read(&mut self, left: &mut [f32], right: &mut [f32]) -> usize {
+        let n = left.len().min(self.left.len() - self.at);
+        left[..n].copy_from_slice(&self.left[self.at..self.at + n]);
+        right[..n].copy_from_slice(&self.right[self.at..self.at + n]);
+        self.at += n;
+        n
+    }
+}
+
 /// How far an export is, shared with whoever waits for it, and a way to
 /// stop it.
 #[derive(Debug, Default)]

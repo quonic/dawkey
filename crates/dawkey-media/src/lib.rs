@@ -19,8 +19,8 @@ pub use analysis::{
 };
 pub use decode::{DecodedFile, decode_file};
 pub use export::{
-    BlockSource, ExportAnalysis, ExportProgress, ExportSpec, FileFormat, SampleFormat, export,
-    export_segmented,
+    BlockSource, ExportAnalysis, ExportProgress, ExportSpec, FileFormat, MemorySource,
+    SampleFormat, export, export_segmented,
 };
 pub use midi_file::{
     MidiFile, MidiFileControl, MidiFileNote, MidiFileTrack, parse_midi_file, read_midi_file,

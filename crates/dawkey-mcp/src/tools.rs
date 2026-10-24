@@ -531,7 +531,9 @@ pub(crate) struct SegmentRange {
 /// tracks (as soloing them would); `stems: true` writes a file per track
 /// beside `path` (`<name>-<track id>-<track name>.<ext>`), listed under
 /// `stems`. `segment_length_s` (or `_beats`), `segment_bars` or `segments`
-/// add an analysis per segment.
+/// add an analysis per segment. `loop: true` makes a file that loops
+/// seamlessly: the range plus `tail_s` is rendered, the tail is added onto
+/// the start, and exactly the range's length is written.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExportAudio {
@@ -554,9 +556,17 @@ pub(crate) struct ExportAudio {
     #[serde(default)]
     pub(crate) end_s: Option<f64>,
     /// Seconds after the end to include, so reverb and delay tails ring
-    /// out. Default 0.
+    /// out (with `loop`, wrapped onto the start instead). Default 0.
     #[serde(default)]
     pub(crate) tail_s: Option<f64>,
+    /// Make a seamless loop of the range (the loop range, or the song):
+    /// what rings out past the end for `tail_s` is added onto the start, so
+    /// the decay carries across the seam when a player loops the file, and
+    /// the file is exactly the range long. The result's `seam` says how big
+    /// the jump from the last sample to the first is, to check for a click.
+    /// The range can be at most 600 s.
+    #[serde(default, rename = "loop")]
+    pub(crate) wrap: bool,
     /// Export only these tracks (and the buses and master they go through),
     /// as if they were soloed. With `stems`, the tracks to export stems of.
     #[serde(default)]

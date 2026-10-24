@@ -103,7 +103,8 @@ can check a mix without listening: `tracks` hears only some tracks (as
 soloing would), `stems: true` renders each track on its own, and
 segment_length_s / segment_bars / segments analyze it over time.
 export_audio writes the mix (the whole song by default) to a WAV or FLAC
-file, or stems with `stems: true`. get_engine_status says whether this instance plays
+file, or stems with `stems: true`, or a seamless loop with `loop: true`
+(the tail folded onto the start). get_engine_status says whether this instance plays
 through PipeWire or runs a virtual clock (advanced with advance_clock).
 
 MIDI: MIDI tracks (add_track with kind `midi`) play their clips through a
@@ -1107,6 +1108,7 @@ impl DawkeyMcp {
             start_s,
             end_s,
             tail_s,
+            wrap,
             tracks,
             stems,
             segment_length_s,
@@ -1138,7 +1140,9 @@ impl DawkeyMcp {
         // Make the file's folder first, so a bad path fails before the
         // render, not after it.
         dawkey_media::make_output_folder(&path).map_err(|e| e.to_string())?;
-        let (spec, end_s) = run(&self.app, move |s| {
+        // A loop is the range without the tail; otherwise the tail is part
+        // of the file.
+        let (spec, range_end_s) = run(&self.app, move |s| {
             let project = s.session().project();
             let end_s = match end_s {
                 Some(end_s) => end_s,
@@ -1150,7 +1154,7 @@ impl DawkeyMcp {
                     );
                 }
                 None => project.frames_to_seconds(project.end()),
-            } + tail_s;
+            };
             let spec = dawkey_media::ExportSpec {
                 file,
                 sample,
@@ -1160,6 +1164,11 @@ impl DawkeyMcp {
             Ok::<_, String>((spec, end_s))
         })
         .await?;
+        let end_s = if wrap {
+            range_end_s
+        } else {
+            range_end_s + tail_s
+        };
         let wanted = SegmentSpec {
             length_s: segment_length_s,
             bars: segment_bars,
@@ -1171,11 +1180,6 @@ impl DawkeyMcp {
 
         let mut exported = Vec::new();
         for (solo, track) in &plan.renders {
-            let solo = solo.clone();
-            let job = run(&self.app, move |s| {
-                s.export_job_solo(start_s, end_s, solo.as_deref())
-            })
-            .await?;
             let target = match track {
                 Some((id, name)) => stem_path(&path, *id, name),
                 None => path.clone(),
@@ -1186,25 +1190,53 @@ impl DawkeyMcp {
                 .map(|&(from, to)| (from - start_s, to - start_s))
                 .collect();
             let absolute = plan.segments.clone();
-            let (result, leftovers) = blocking(move || {
-                let progress = dawkey_media::ExportProgress::default();
-                let (result, leftovers) = job.run_segmented(&spec, &target, &progress, &segments);
-                let result = result.map(|measured| {
-                    let mut result = json!({
-                        "path": target,
-                        "format": spec.file,
-                        "sample_format": spec.sample,
-                        "sample_rate": spec.sample_rate,
-                        "analysis": measured.analysis,
+            let solo = solo.clone();
+            let (result, leftovers) = if wrap {
+                // The range and its tail in memory, the tail folded onto
+                // the start.
+                let job = run(&self.app, move |s| {
+                    s.render_job_solo(start_s, end_s + tail_s, solo.as_deref())
+                })
+                .await?;
+                blocking(move || {
+                    let rate = job.sample_rate();
+                    let (mut audio, leftovers) = job.run();
+                    let length = ((end_s - start_s) * f64::from(rate)).round() as usize;
+                    let seam = wrap_tail(&mut audio, length);
+                    let mut source = dawkey_media::MemorySource::new(audio);
+                    let progress = dawkey_media::ExportProgress::default();
+                    let result = dawkey_media::export_segmented(
+                        &mut source,
+                        rate,
+                        &spec,
+                        &target,
+                        &progress,
+                        &segments,
+                    )
+                    .map(|measured| {
+                        let mut result = export_json(&target, &spec, measured, &absolute);
+                        result["loop"] = json!(true);
+                        result["seam"] = seam;
+                        result
                     });
-                    if !absolute.is_empty() {
-                        result["segments"] = segments_json(&absolute, measured.segments);
-                    }
-                    result
-                });
-                Ok::<_, String>((result, leftovers))
-            })
-            .await?;
+                    Ok::<_, String>((result, leftovers))
+                })
+                .await?
+            } else {
+                let job = run(&self.app, move |s| {
+                    s.export_job_solo(start_s, end_s, solo.as_deref())
+                })
+                .await?;
+                blocking(move || {
+                    let progress = dawkey_media::ExportProgress::default();
+                    let (result, leftovers) =
+                        job.run_segmented(&spec, &target, &progress, &segments);
+                    let result =
+                        result.map(|measured| export_json(&target, &spec, measured, &absolute));
+                    Ok::<_, String>((result, leftovers))
+                })
+                .await?
+            };
             // The render's plugin instances are unloaded on the studio's
             // thread.
             run(&self.app, move |s| {
@@ -1219,7 +1251,7 @@ impl DawkeyMcp {
             }
             exported.push(result);
         }
-        let mut result = json!({ "start_s": start_s, "end_s": end_s });
+        let mut result = json!({ "start_s": start_s, "end_s": end_s, "tail_s": tail_s });
         if let Some(tracks) = &plan.tracks {
             result["tracks"] = json!(tracks);
         }
@@ -1246,6 +1278,51 @@ struct RenderPlan {
     /// The tracks asked for, to echo back.
     tracks: Option<Vec<TrackId>>,
     sample_rate: u32,
+}
+
+/// What an export wrote, as reported.
+fn export_json(
+    path: &std::path::Path,
+    spec: &dawkey_media::ExportSpec,
+    measured: dawkey_media::ExportAnalysis,
+    segments: &[(f64, f64)],
+) -> Value {
+    let mut result = json!({
+        "path": path,
+        "format": spec.file,
+        "sample_format": spec.sample,
+        "sample_rate": spec.sample_rate,
+        "analysis": measured.analysis,
+    });
+    if !segments.is_empty() {
+        result["segments"] = segments_json(segments, measured.segments);
+    }
+    result
+}
+
+/// Folds what `audio` has past `length` frames (the tail) onto its start
+/// and cuts it to `length`, so it loops seamlessly. Returns the seam: the
+/// jump from the last sample to the first, per channel, as a linear
+/// difference and in dBFS.
+fn wrap_tail(audio: &mut [Vec<f32>], length: usize) -> Value {
+    let mut jump = Vec::new();
+    for channel in audio.iter_mut() {
+        let length = length.min(channel.len());
+        let tail: Vec<f32> = channel[length..].to_vec();
+        channel.truncate(length);
+        for (sample, extra) in channel.iter_mut().zip(&tail) {
+            *sample += extra;
+        }
+        let (first, last) = (
+            channel.first().copied().unwrap_or(0.0),
+            channel.last().copied().unwrap_or(0.0),
+        );
+        jump.push(f64::from((first - last).abs()));
+    }
+    json!({
+        "jump": jump,
+        "jump_dbfs": jump.iter().map(|&j| dawkey_media::gain_to_db(j)).collect::<Vec<_>>(),
+    })
 }
 
 /// Segments and their analyses, as reported.

@@ -772,3 +772,98 @@ async fn first_half_hash(dawkey: &Harness, track: u64) -> Value {
         .unwrap();
     rendered["analysis"]["hash"].clone()
 }
+
+/// A loop export folds the tail onto the start and is exactly the range
+/// long, and reports the jump at the seam.
+#[tokio::test]
+async fn exports_seamless_loops() {
+    let dir = tempfile::tempdir().unwrap();
+    // The "song": a second of 0.5; its "tail": half a second of 0.25.
+    let body = write_wav(dir.path(), "body.wav", &[vec![0.5; 48_000]], 48_000);
+    let tail = write_wav(dir.path(), "tail.wav", &[vec![0.25; 24_000]], 48_000);
+    let dawkey = start().await;
+    let track = dawkey
+        .call("import_audio", json!({ "path": body }))
+        .await
+        .unwrap()["track"]
+        .clone();
+    dawkey
+        .call(
+            "import_audio",
+            json!({ "path": tail, "track": track, "position_s": 1.0 }),
+        )
+        .await
+        .unwrap();
+
+    let out = dir.path().join("loop.wav");
+    let exported = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": out, "loop": true, "start_s": 0, "end_s": 1, "tail_s": 0.5, "bit_depth": 32 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exported["loop"], true);
+    assert_eq!(exported["end_s"], 1.0);
+    assert_eq!(exported["tail_s"], 0.5);
+    assert_eq!(exported["analysis"]["frames"], 48_000);
+    let decoded = dawkey_media::decode_file(&out, 48_000).unwrap().audio;
+    assert_eq!(decoded.frames(), 48_000);
+    let left = &decoded.channels()[0];
+    // Center pan is -3 dB: 0.5 → 0.354, and 0.75 → 0.530 where the tail
+    // was added.
+    let center = |x: f32| x * std::f32::consts::FRAC_1_SQRT_2;
+    assert!((left[0] - center(0.75)).abs() < 1e-3, "{}", left[0]);
+    assert!(
+        (left[23_999] - center(0.75)).abs() < 1e-3,
+        "{}",
+        left[23_999]
+    );
+    assert!(
+        (left[24_000] - center(0.5)).abs() < 1e-3,
+        "{}",
+        left[24_000]
+    );
+    assert!(
+        (left[47_999] - center(0.5)).abs() < 1e-3,
+        "{}",
+        left[47_999]
+    );
+    let jump = exported["seam"]["jump"][0].as_f64().unwrap();
+    assert!((jump - f64::from(center(0.25))).abs() < 1e-3, "{jump}");
+    assert!(exported["seam"]["jump_dbfs"][0].as_f64().unwrap() < -10.0);
+
+    // Without a tail, a loop export is the plain export of the range.
+    let plain = dir.path().join("plain.wav");
+    let plain_result = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": plain, "start_s": 0, "end_s": 1, "bit_depth": 32 }),
+        )
+        .await
+        .unwrap();
+    let looped = dir.path().join("looped.wav");
+    let loop_result = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": looped, "loop": true, "start_s": 0, "end_s": 1, "bit_depth": 32 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        loop_result["analysis"]["hash"],
+        plain_result["analysis"]["hash"]
+    );
+    assert_eq!(loop_result["seam"]["jump"][0], 0.0);
+
+    // Too long to hold in memory.
+    let err = dawkey
+        .call_err(
+            "export_audio",
+            json!({ "path": out, "loop": true, "start_s": 0, "end_s": 700 }),
+        )
+        .await
+        .unwrap();
+    assert!(err.contains("600"), "{err}");
+    dawkey.shutdown().await.unwrap();
+}
