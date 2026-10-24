@@ -14,9 +14,14 @@ mod peaks;
 
 use std::path::{Path, PathBuf};
 
-pub use analysis::{Analysis, Analyzer, analyze, gain_to_db};
+pub use analysis::{
+    Analysis, Analyzer, Bands, SegmentAnalyzers, analyze, analyze_segments, gain_to_db,
+};
 pub use decode::{DecodedFile, decode_file};
-pub use export::{BlockSource, ExportProgress, ExportSpec, FileFormat, SampleFormat, export};
+pub use export::{
+    BlockSource, ExportAnalysis, ExportProgress, ExportSpec, FileFormat, SampleFormat, export,
+    export_segmented,
+};
 pub use midi_file::{
     MidiFile, MidiFileControl, MidiFileNote, MidiFileTrack, parse_midi_file, read_midi_file,
 };

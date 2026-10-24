@@ -15,7 +15,7 @@ use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Fft, FixedSync, Indexing, Resampler};
 use serde::{Deserialize, Serialize};
 
-use crate::{Analysis, Analyzer, MediaError};
+use crate::{Analysis, Analyzer, MediaError, SegmentAnalyzers};
 
 /// Frames pulled from the source at a time.
 const BLOCK: usize = 4096;
@@ -114,6 +114,14 @@ pub struct ExportProgress {
     pub cancel: AtomicBool,
 }
 
+/// What an export measured: the whole file, and its segments if asked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportAnalysis {
+    pub analysis: Analysis,
+    /// One per segment asked for, in order.
+    pub segments: Vec<Analysis>,
+}
+
 /// Writes everything `source` (at `source_rate`) has to `path`, as `spec`
 /// says. Returns the analysis of what was written (before dithering).
 pub fn export(
@@ -123,13 +131,34 @@ pub fn export(
     path: &Path,
     progress: &ExportProgress,
 ) -> Result<Analysis, MediaError> {
+    export_segmented(source, source_rate, spec, path, progress, &[]).map(|r| r.analysis)
+}
+
+/// [`export`], also analyzing `segments` of the file separately: each is
+/// `[start, end)` in seconds from the start of the source.
+pub fn export_segmented(
+    source: &mut dyn BlockSource,
+    source_rate: u32,
+    spec: &ExportSpec,
+    path: &Path,
+    progress: &ExportProgress,
+    segments: &[(f64, f64)],
+) -> Result<ExportAnalysis, MediaError> {
     spec.check().map_err(|reason| MediaError::Unsupported {
         path: path.to_owned(),
         reason,
     })?;
     crate::make_output_folder(path)?;
     let partial = partial_path(path);
-    let pipeline = Pipeline::new(source, source_rate, spec, path, progress)?;
+    let mut pipeline = Pipeline::new(source, source_rate, spec, path, progress)?;
+    let frames_at_file_rate: Vec<(usize, usize)> = segments
+        .iter()
+        .map(|&(start, end)| {
+            let frame = |s: f64| (s.max(0.0) * f64::from(spec.sample_rate)).round() as usize;
+            (frame(start), frame(end))
+        })
+        .collect();
+    pipeline.segments = SegmentAnalyzers::new(2, spec.sample_rate, &frames_at_file_rate);
     let result = match spec.file {
         FileFormat::Wav => write_wav(pipeline, spec, &partial),
         FileFormat::Flac => write_flac(pipeline, spec, &partial),
@@ -168,6 +197,17 @@ struct Pipeline<'a> {
     scratch: [Vec<f32>; 2],
     ended: bool,
     analyzer: Analyzer,
+    segments: SegmentAnalyzers,
+}
+
+impl Pipeline<'_> {
+    /// What was measured, once everything has been pulled.
+    fn finish(self) -> ExportAnalysis {
+        ExportAnalysis {
+            analysis: self.analyzer.finish(),
+            segments: self.segments.finish(),
+        }
+    }
 }
 
 impl<'a> Pipeline<'a> {
@@ -194,6 +234,7 @@ impl<'a> Pipeline<'a> {
             scratch: [vec![0.0; BLOCK], vec![0.0; BLOCK]],
             ended: false,
             analyzer: Analyzer::new(2, spec.sample_rate),
+            segments: SegmentAnalyzers::new(2, spec.sample_rate, &[]),
         })
     }
 
@@ -237,6 +278,9 @@ impl<'a> Pipeline<'a> {
         left.extend(self.queue[0].drain(..n));
         right.extend(self.queue[1].drain(..n));
         self.analyzer.add(&[left, right]);
+        if !self.segments.is_empty() {
+            self.segments.add(&[left, right]);
+        }
         Ok(())
     }
 }
@@ -390,7 +434,7 @@ fn write_wav(
     mut pipeline: Pipeline,
     spec: &ExportSpec,
     path: &Path,
-) -> Result<Analysis, MediaError> {
+) -> Result<ExportAnalysis, MediaError> {
     let wav_err = |source| MediaError::Wav {
         path: pipeline.path.clone(),
         source,
@@ -430,7 +474,7 @@ fn write_wav(
         path: pipeline.path.clone(),
         source,
     })?;
-    Ok(pipeline.analyzer.finish())
+    Ok(pipeline.finish())
 }
 
 /// The pipeline as flacenc reads it.
@@ -483,7 +527,7 @@ fn write_flac(
     mut pipeline: Pipeline,
     spec: &ExportSpec,
     path: &Path,
-) -> Result<Analysis, MediaError> {
+) -> Result<ExportAnalysis, MediaError> {
     use flacenc::component::BitRepr;
     use flacenc::error::Verify;
     let encode_err = |path: &Path, reason: String| MediaError::Encode {
@@ -516,7 +560,7 @@ fn write_flac(
         path: path.to_owned(),
         source,
     })?;
-    Ok(pipeline.analyzer.finish())
+    Ok(pipeline.finish())
 }
 
 /// flacenc gives the last (shorter) block's length as the stream's minimum

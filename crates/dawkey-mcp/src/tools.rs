@@ -472,7 +472,14 @@ pub(crate) struct SetRecordOffset {
 
 /// Render part of the project offline (independent of the transport) and
 /// analyze it: peak and RMS per channel in dBFS, integrated loudness (LUFS),
-/// and a hash for comparing renders. Optionally write it to a WAV file.
+/// levels in three bands (`bands`, a rough brightness), and a hash for
+/// comparing renders. Optionally write it to a WAV file. `tracks` renders
+/// only those tracks (as soloing them would: through their buses and the
+/// master); `stems: true` renders each track separately (one render per
+/// track, `stems` in the result, each with its analysis, and a file each in
+/// `stems_dir`). `segment_length_s` (or `_beats`), `segment_bars` or
+/// `segments` add an analysis per segment, to see how levels and loudness
+/// change over time.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RenderRange {
@@ -484,13 +491,47 @@ pub(crate) struct RenderRange {
     /// stereo WAV file.
     #[serde(default)]
     pub(crate) output_path: Option<PathBuf>,
+    /// Render only these tracks (and the buses and master they go through),
+    /// as if they were soloed. With `stems`, the tracks to render stems of.
+    #[serde(default)]
+    pub(crate) tracks: Option<Vec<TrackId>>,
+    /// Render each track separately, soloed in turn: every audio and MIDI
+    /// track that isn't muted, or `tracks`. The result's `stems` has one
+    /// entry per track with its analysis.
+    #[serde(default)]
+    pub(crate) stems: bool,
+    /// With `stems`, write each stem to this folder as
+    /// `<track id>-<track name>.wav` (32-bit float).
+    #[serde(default)]
+    pub(crate) stems_dir: Option<PathBuf>,
+    /// Analyze the range in segments this long (seconds), from its start.
+    #[serde(default)]
+    pub(crate) segment_length_s: Option<f64>,
+    /// Analyze the range in segments of this many bars, cut at bar lines.
+    #[serde(default)]
+    pub(crate) segment_bars: Option<u32>,
+    /// Analyze these parts of the range separately (absolute seconds).
+    #[serde(default)]
+    pub(crate) segments: Option<Vec<SegmentRange>>,
+}
+
+/// A part of a render to analyze on its own.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SegmentRange {
+    pub(crate) start_s: f64,
+    pub(crate) end_s: f64,
 }
 
 /// Export the mix, or part of it, to an audio file, rendered offline: WAV
 /// (16 or 24-bit, or 32-bit float) or FLAC (16 or 24-bit). By default the
 /// whole song, from the start to where the last clip ends, in 24-bit at the
 /// project's sample rate. Reports the levels and loudness of what was
-/// written. Whole-number samples are dithered.
+/// written. Whole-number samples are dithered. `tracks` exports only those
+/// tracks (as soloing them would); `stems: true` writes a file per track
+/// beside `path` (`<name>-<track id>-<track name>.<ext>`), listed under
+/// `stems`. `segment_length_s` (or `_beats`), `segment_bars` or `segments`
+/// add an analysis per segment.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExportAudio {
@@ -516,6 +557,24 @@ pub(crate) struct ExportAudio {
     /// out. Default 0.
     #[serde(default)]
     pub(crate) tail_s: Option<f64>,
+    /// Export only these tracks (and the buses and master they go through),
+    /// as if they were soloed. With `stems`, the tracks to export stems of.
+    #[serde(default)]
+    pub(crate) tracks: Option<Vec<TrackId>>,
+    /// Export each track to a file of its own, soloed in turn: every audio
+    /// and MIDI track that isn't muted, or `tracks`. The mix itself isn't
+    /// written then.
+    #[serde(default)]
+    pub(crate) stems: bool,
+    /// Analyze the export in segments this long (seconds), from its start.
+    #[serde(default)]
+    pub(crate) segment_length_s: Option<f64>,
+    /// Analyze the export in segments of this many bars, cut at bar lines.
+    #[serde(default)]
+    pub(crate) segment_bars: Option<u32>,
+    /// Analyze these parts of the export separately (absolute seconds).
+    #[serde(default)]
+    pub(crate) segments: Option<Vec<SegmentRange>>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]

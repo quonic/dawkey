@@ -192,6 +192,94 @@ impl Maps {
     }
 }
 
+/// How a render's range is cut into segments to analyze separately.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SegmentSpec {
+    /// Segments this long in seconds, from the range's start.
+    pub(crate) length_s: Option<f64>,
+    /// Segments of this many bars, cut at bar lines.
+    pub(crate) bars: Option<u32>,
+    /// Explicit ranges, in absolute seconds.
+    pub(crate) ranges: Option<Vec<(f64, f64)>>,
+}
+
+impl Maps {
+    /// The segments of `[start_s, end_s)` that `spec` asks for, as absolute
+    /// seconds, clipped to the range. Empty if none were asked for.
+    pub(crate) fn segments(
+        &self,
+        start_s: f64,
+        end_s: f64,
+        spec: &SegmentSpec,
+    ) -> Result<Vec<(f64, f64)>, String> {
+        let given = [
+            spec.length_s.is_some(),
+            spec.bars.is_some(),
+            spec.ranges.is_some(),
+        ]
+        .iter()
+        .filter(|&&g| g)
+        .count();
+        if given > 1 {
+            return Err(
+                "give one of segment_length_s (or segment_length_beats), segment_bars and \
+                 segments"
+                    .to_owned(),
+            );
+        }
+        let mut segments = Vec::new();
+        if let Some(length) = spec.length_s {
+            if length.is_nan() || length <= 0.0 || !length.is_finite() {
+                return Err(format!(
+                    "segment_length_s must be more than 0, got {length}"
+                ));
+            }
+            let mut from = start_s;
+            while from < end_s - 1e-9 {
+                let to = (from + length).min(end_s);
+                segments.push((from, to));
+                from = to;
+            }
+        } else if let Some(bars) = spec.bars {
+            if bars == 0 {
+                return Err("segment_bars must be at least 1".to_owned());
+            }
+            let mut from = start_s;
+            let mut bar = self
+                .meter
+                .bar_at(self.tempo.beat_at_seconds(start_s) + 1e-9);
+            while from < end_s - 1e-9 {
+                bar += bars;
+                let to = self.tempo.seconds_at(self.meter.bar_start(bar)).min(end_s);
+                if to <= from {
+                    break;
+                }
+                segments.push((from, to));
+                from = to;
+            }
+        } else if let Some(ranges) = &spec.ranges {
+            for &(from, to) in ranges {
+                if from.is_nan() || to.is_nan() || from >= to {
+                    return Err(format!(
+                        "a segment's end_s must be after its start_s, got {from}..{to}"
+                    ));
+                }
+                let (from, to) = (from.max(start_s), to.min(end_s));
+                if from >= to {
+                    return Err(format!(
+                        "segment {from}..{to} is outside the range {start_s}..{end_s}"
+                    ));
+                }
+                segments.push((from, to));
+            }
+        }
+        if segments.len() > 10_000 {
+            return Err(format!("that's {} segments; at most 10000", segments.len()));
+        }
+        Ok(segments)
+    }
+}
+
 /// Removes `key` from `args`, checking it's a number and that its `*_s`
 /// isn't given as well. Returns the stem and the value (`None` for null).
 fn take_number(args: &mut Map<String, Value>, key: &str) -> Result<(String, Option<f64>), String> {

@@ -538,3 +538,237 @@ async fn makes_output_folders() {
     assert!(err.contains("saw.wav"), "{err}");
     dawkey.shutdown().await.unwrap();
 }
+
+/// A signal of one frequency: a square wave at `hz` (no transcendental
+/// functions, so it's exact), at `level`.
+fn square(frames: usize, rate: usize, hz: usize, level: f32) -> Vec<f32> {
+    let period = rate / hz;
+    (0..frames)
+        .map(|i| {
+            if i % period < period / 2 {
+                level
+            } else {
+                -level
+            }
+        })
+        .collect()
+}
+
+/// render_range and export_audio render chosen tracks, stems (one render
+/// per track) and analyze segments; the analysis has band levels.
+#[tokio::test]
+async fn renders_stems_and_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    // A low tone for 1 s, and a high one from 1 to 2 s.
+    let low = write_wav(
+        dir.path(),
+        "low.wav",
+        &[square(48_000, 48_000, 100, 0.5)],
+        48_000,
+    );
+    let high = write_wav(
+        dir.path(),
+        "high.wav",
+        &[square(48_000, 48_000, 6000, 0.5)],
+        48_000,
+    );
+    let dawkey = start().await;
+    dawkey
+        .call("set_tempo", json!({ "bpm": 120 }))
+        .await
+        .unwrap(); // a bar is 2 s
+    let bass = dawkey
+        .call("import_audio", json!({ "path": low }))
+        .await
+        .unwrap()["track"]
+        .as_u64()
+        .unwrap();
+    let lead = dawkey
+        .call("import_audio", json!({ "path": high, "position_s": 1.0 }))
+        .await
+        .unwrap()["track"]
+        .as_u64()
+        .unwrap();
+    dawkey
+        .call(
+            "rename_track",
+            json!({ "track": lead, "name": "Lead/Synth" }),
+        )
+        .await
+        .unwrap();
+
+    // Brightness: the low tone sits in the low band, the high one up top.
+    let mix = dawkey
+        .call("render_range", json!({ "start_s": 0, "end_s": 2 }))
+        .await
+        .unwrap();
+    let bands = &mix["analysis"]["bands"];
+    assert!(bands["low_dbfs"].as_f64().unwrap() > bands["high_dbfs"].as_f64().unwrap() - 6.0);
+    assert!(mix.get("stems").is_none() && mix.get("tracks").is_none());
+
+    // Only the lead: silent in its first second.
+    let only_lead = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0, "end_s": 2, "tracks": [lead] }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(only_lead["tracks"], json!([lead]));
+    let first_half = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0, "end_s": 1, "tracks": [lead] }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_half["analysis"]["silent"], true);
+    let bands = &only_lead["analysis"]["bands"];
+    assert!(bands["high_dbfs"].as_f64().unwrap() > bands["low_dbfs"].as_f64().unwrap() + 20.0);
+
+    // Stems: one per track, with files, and per-bar segments of each.
+    let stems_dir = dir.path().join("stems");
+    let stems = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0, "end_s": 2, "stems": true, "stems_dir": stems_dir, "segment_length_s": 1 }),
+        )
+        .await
+        .unwrap();
+    let stems = stems["stems"].as_array().unwrap();
+    assert_eq!(stems.len(), 2);
+    assert_eq!(stems[0]["track"], bass);
+    assert_eq!(stems[1]["name"], "Lead/Synth");
+    assert_eq!(
+        stems[1]["output_path"],
+        json!(stems_dir.join(format!("{lead}-Lead_Synth.wav")))
+    );
+    assert!(stems_dir.join(format!("{lead}-Lead_Synth.wav")).is_file());
+    // The bass plays in the first second only, the lead in the second.
+    let segments = |stem: &Value| -> Vec<bool> {
+        stem["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["analysis"]["silent"].as_bool().unwrap())
+            .collect()
+    };
+    assert_eq!(segments(&stems[0]), [false, true]);
+    assert_eq!(segments(&stems[1]), [true, false]);
+    assert_eq!(stems[1]["segments"][1]["start_s"], 1.0);
+    assert_eq!(stems[1]["segments"][1]["end_s"], 2.0);
+    assert_eq!(
+        stems[0]["analysis"]["hash"],
+        first_half_hash(&dawkey, bass).await
+    );
+
+    // Segments by bars (at 120 bpm a bar is 2 s), from mid-bar, and
+    // explicit ranges.
+    let by_bars = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 1, "end_s": 5, "segment_bars": 1 }),
+        )
+        .await
+        .unwrap();
+    let starts: Vec<f64> = by_bars["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["start_s"].as_f64().unwrap())
+        .collect();
+    assert_eq!(starts, [1.0, 2.0, 4.0]);
+    let ranges = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0, "end_s": 2, "segments": [
+                { "start_s": 0.25, "end_s": 0.75 }, { "start_s": 1.5, "end_s": 1.75 }
+            ] }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ranges["segments"][1]["analysis"]["frames"], 12_000);
+    assert_eq!(ranges["segments"][0]["analysis"]["frames"], 24_000);
+    assert_eq!(ranges["analysis"]["frames"], 96_000);
+
+    // Exports: stems to files beside the path, with segments.
+    let out = dir.path().join("mix/song.flac");
+    let exported = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": out, "stems": true, "segment_length_beats": 2, "bit_depth": 16 }),
+        )
+        .await
+        .unwrap();
+    let stems = exported["stems"].as_array().unwrap();
+    assert_eq!(stems.len(), 2);
+    let lead_file = dir.path().join(format!("mix/song-{lead}-Lead_Synth.flac"));
+    assert_eq!(stems[1]["path"], json!(lead_file));
+    assert!(lead_file.is_file());
+    assert!(!out.exists(), "stems only");
+    assert_eq!(stems[1]["segments"].as_array().unwrap().len(), 2);
+    assert_eq!(stems[1]["segments"][0]["analysis"]["silent"], true);
+    assert_eq!(stems[1]["segments"][1]["analysis"]["silent"], false);
+    // One track, through the mix.
+    let only_out = dir.path().join("mix/bass.wav");
+    let only = dawkey
+        .call(
+            "export_audio",
+            json!({ "path": only_out, "tracks": [bass], "bit_depth": 32 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(only["tracks"], json!([bass]));
+    assert!(only_out.is_file());
+    assert_eq!(
+        only["analysis"]["hash"],
+        first_half_hash(&dawkey, bass).await
+    );
+
+    // Bad input.
+    for (args, expected) in [
+        (
+            json!({ "start_s": 0, "end_s": 1, "tracks": [] }),
+            "tracks is empty",
+        ),
+        (json!({ "start_s": 0, "end_s": 1, "tracks": [0] }), "master"),
+        (json!({ "start_s": 0, "end_s": 1, "tracks": [99] }), "99"),
+        (
+            json!({ "start_s": 0, "end_s": 1, "stems_dir": "/tmp/x" }),
+            "stems_dir needs",
+        ),
+        (
+            json!({ "start_s": 0, "end_s": 1, "segment_length_s": 0.5, "segment_bars": 1 }),
+            "give one of",
+        ),
+        (
+            json!({ "start_s": 0, "end_s": 1, "segment_bars": 0 }),
+            "at least 1",
+        ),
+        (
+            json!({ "start_s": 0, "end_s": 1, "segments": [{ "start_s": 5, "end_s": 6 }] }),
+            "outside the range",
+        ),
+    ] {
+        let err = dawkey.call_err("render_range", args).await.unwrap();
+        assert!(err.contains(expected), "{err}");
+    }
+    dawkey.shutdown().await.unwrap();
+}
+
+/// The hash of the mix with only `track` heard, 0 to 2 s.
+async fn first_half_hash(dawkey: &Harness, track: u64) -> Value {
+    dawkey
+        .call("set_track_solo", json!({ "track": track, "solo": true }))
+        .await
+        .unwrap();
+    let rendered = dawkey
+        .call("render_range", json!({ "start_s": 0, "end_s": 2 }))
+        .await
+        .unwrap();
+    dawkey
+        .call("set_track_solo", json!({ "track": track, "solo": false }))
+        .await
+        .unwrap();
+    rendered["analysis"]["hash"].clone()
+}

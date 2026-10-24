@@ -445,13 +445,36 @@ impl ExportJob {
     /// Renders and writes the file. Returns what was written, and the
     /// plugins to hand back to [`Studio::finish_render`] (whatever happened).
     pub fn run(
-        mut self,
+        self,
         spec: &dawkey_media::ExportSpec,
         path: &Path,
         progress: &dawkey_media::ExportProgress,
     ) -> (Result<Analysis, dawkey_media::MediaError>, RenderLeftovers) {
+        let (result, leftovers) = self.run_segmented(spec, path, progress, &[]);
+        (result.map(|r| r.analysis), leftovers)
+    }
+
+    /// [`run`](Self::run), also analyzing `segments` (`[start, end)` in
+    /// seconds from the export's start) separately.
+    pub fn run_segmented(
+        mut self,
+        spec: &dawkey_media::ExportSpec,
+        path: &Path,
+        progress: &dawkey_media::ExportProgress,
+        segments: &[(f64, f64)],
+    ) -> (
+        Result<dawkey_media::ExportAnalysis, dawkey_media::MediaError>,
+        RenderLeftovers,
+    ) {
         let mut blocks = Blocks(&mut self.render);
-        let result = dawkey_media::export(&mut blocks, self.sample_rate, spec, path, progress);
+        let result = dawkey_media::export_segmented(
+            &mut blocks,
+            self.sample_rate,
+            spec,
+            path,
+            progress,
+            segments,
+        );
         let mut graph = self.render.into_graph();
         let leftovers = RenderLeftovers {
             job: self.job,
@@ -1570,7 +1593,19 @@ impl Studio {
     /// Prepares an offline render of `[start_s, end_s)` of the current
     /// project. Uses the session's mute/solo state; ignores the transport.
     pub fn render_job(&mut self, start_s: f64, end_s: f64) -> Result<RenderJob, StudioError> {
-        let (job, graph, start, frames) = self.offline_graph(start_s, end_s, MAX_RENDER_S)?;
+        self.render_job_solo(start_s, end_s, None)
+    }
+
+    /// [`render_job`](Self::render_job) with `solo` tracks soloed (and no
+    /// others), as if their solo buttons were on: only they are heard,
+    /// through their buses and the master.
+    pub fn render_job_solo(
+        &mut self,
+        start_s: f64,
+        end_s: f64,
+        solo: Option<&[TrackId]>,
+    ) -> Result<RenderJob, StudioError> {
+        let (job, graph, start, frames) = self.offline_graph(start_s, end_s, MAX_RENDER_S, solo)?;
         Ok(RenderJob {
             job,
             graph,
@@ -1583,7 +1618,18 @@ impl Studio {
     /// Prepares an export of `[start_s, end_s)`, like
     /// [`render_job`](Self::render_job) but rendered a block at a time.
     pub fn export_job(&mut self, start_s: f64, end_s: f64) -> Result<ExportJob, StudioError> {
-        let (job, graph, start, frames) = self.offline_graph(start_s, end_s, MAX_EXPORT_S)?;
+        self.export_job_solo(start_s, end_s, None)
+    }
+
+    /// [`export_job`](Self::export_job) with `solo` tracks soloed, like
+    /// [`render_job_solo`](Self::render_job_solo).
+    pub fn export_job_solo(
+        &mut self,
+        start_s: f64,
+        end_s: f64,
+        solo: Option<&[TrackId]>,
+    ) -> Result<ExportJob, StudioError> {
+        let (job, graph, start, frames) = self.offline_graph(start_s, end_s, MAX_EXPORT_S, solo)?;
         let sample_rate = self.session.project().sample_rate;
         Ok(ExportJob {
             job,
@@ -1593,19 +1639,70 @@ impl Studio {
         })
     }
 
+    /// The tracks a stem render covers: `tracks` if given (checked), else
+    /// every audio and MIDI track that isn't muted. Each with its name.
+    pub fn stem_tracks(
+        &self,
+        tracks: Option<&[TrackId]>,
+    ) -> Result<Vec<(TrackId, String)>, StudioError> {
+        let project = self.session.project();
+        match tracks {
+            Some(ids) => {
+                self.check_solo(ids)?;
+                Ok(ids
+                    .iter()
+                    .filter_map(|&id| project.track(id).map(|t| (id, t.name.clone())))
+                    .collect())
+            }
+            None => Ok(project
+                .tracks
+                .iter()
+                .filter(|t| t.kind != TrackKind::Bus && !t.mute)
+                .map(|t| (t.id, t.name.clone()))
+                .collect()),
+        }
+    }
+
+    /// Checks tracks to solo for a render: they exist, and aren't the
+    /// master (which is always heard).
+    fn check_solo(&self, solo: &[TrackId]) -> Result<(), StudioError> {
+        let project = self.session.project();
+        if solo.is_empty() {
+            return Err(StudioError::Invalid(
+                "tracks is empty; leave it out to render everything".into(),
+            ));
+        }
+        for &id in solo {
+            if id == dawkey_core::MASTER {
+                return Err(StudioError::Invalid(
+                    "the master (track 0) is always rendered; give the tracks to hear".into(),
+                ));
+            }
+            if project.track(id).is_none() {
+                return Err(CoreError::TrackNotFound(id).into());
+            }
+        }
+        Ok(())
+    }
+
     /// A graph with fresh plugin instances for rendering `[start_s, end_s)`
-    /// (at most `max_s` long): its job number, start frame and length.
+    /// (at most `max_s` long), with `solo` tracks soloed if given: its job
+    /// number, start frame and length.
     fn offline_graph(
         &mut self,
         start_s: f64,
         end_s: f64,
         max_s: f64,
+        solo: Option<&[TrackId]>,
     ) -> Result<(u64, Graph, u64, usize), StudioError> {
         let project = self.session.project();
         if !(start_s >= 0.0 && end_s > start_s && end_s - start_s <= max_s) {
             return Err(StudioError::Invalid(format!(
                 "need 0 <= start_s < end_s and at most {max_s} s, got {start_s}..{end_s}"
             )));
+        }
+        if let Some(solo) = solo {
+            self.check_solo(solo)?;
         }
         let start = project.seconds_to_frames(start_s);
         let frames = (project.seconds_to_frames(end_s) - start) as usize;
@@ -1615,8 +1712,26 @@ impl Studio {
         let job = self.next_render_job;
         self.next_render_job += 1;
         let mut provider = self.plugins.offline_provider(job, &project.plugin_states);
-        let graph =
-            Graph::compile_with_devices(project, &self.media, &mut provider, &self.device_latency);
+        let graph = match solo {
+            Some(solo) => {
+                let mut soloed = project.clone();
+                for track in &mut soloed.tracks {
+                    track.solo = solo.contains(&track.id);
+                }
+                Graph::compile_with_devices(
+                    &soloed,
+                    &self.media,
+                    &mut provider,
+                    &self.device_latency,
+                )
+            }
+            None => Graph::compile_with_devices(
+                project,
+                &self.media,
+                &mut provider,
+                &self.device_latency,
+            ),
+        };
         Ok((job, graph, start, frames))
     }
 

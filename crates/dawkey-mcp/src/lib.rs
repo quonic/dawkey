@@ -24,7 +24,7 @@ use std::sync::{Arc, LazyLock};
 
 use base64::Engine as _;
 use dawkey_app::{App, DragFrom, ImportRequest, Platform, WindowInfo};
-use dawkey_core::{AddClip, CommandSpec, CoreError, Handle, Project, Session};
+use dawkey_core::{AddClip, CommandSpec, CoreError, Handle, Project, Session, TrackId};
 use dawkey_studio::{LoadedProject, Studio};
 use dawkey_ui::{Modifiers, Point, Size};
 use rmcp::model::{
@@ -39,6 +39,7 @@ use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::times::SegmentSpec;
 use crate::tools::*;
 
 const INSTRUCTIONS: &str = "\
@@ -97,9 +98,12 @@ midi_record_latency_ms, from the latency PipeWire reports for it);
 set_record_offset corrects the estimate.
 
 Audio: import_audio puts a file on the timeline. render_range renders any part
-of the project offline and reports levels and loudness, so you can check a mix
-without listening. export_audio writes the mix (the whole song by default) to
-a WAV or FLAC file. get_engine_status says whether this instance plays
+of the project offline and reports levels, loudness and band levels, so you
+can check a mix without listening: `tracks` hears only some tracks (as
+soloing would), `stems: true` renders each track on its own, and
+segment_length_s / segment_bars / segments analyze it over time.
+export_audio writes the mix (the whole song by default) to a WAV or FLAC
+file, or stems with `stems: true`. get_engine_status says whether this instance plays
 through PipeWire or runs a virtual clock (advanced with advance_clock).
 
 MIDI: MIDI tracks (add_track with kind `midi`) play their clips through a
@@ -956,45 +960,144 @@ impl DawkeyMcp {
             start_s,
             end_s,
             output_path,
+            tracks,
+            stems,
+            stems_dir,
+            segment_length_s,
+            segment_bars,
+            segments,
         } = args;
-        // Make the file's folder first, so a bad path fails before the
+        // Make the files' folders first, so a bad path fails before the
         // render, not after it.
         let output_path = output_path.map(|path| std::path::absolute(&path).unwrap_or(path));
         if let Some(path) = &output_path {
             dawkey_media::make_output_folder(path).map_err(|e| e.to_string())?;
         }
-        let job = run(&self.app, move |s| s.render_job(start_s, end_s)).await?;
-        let (result, leftovers) = blocking(move || {
-            let rate = job.sample_rate();
-            let (audio, leftovers) = job.run();
-            let analysis = dawkey_media::analyze(&audio, rate);
-            let written = match output_path {
-                Some(path) => dawkey_media::write_wav(&path, &audio, rate).map(|()| Some(path)),
-                None => Ok(None),
-            };
-            let result = written.map(|written| {
-                json!({
-                    "start_s": start_s,
-                    "end_s": end_s,
-                    "sample_rate": rate,
-                    "analysis": analysis,
-                    "output_path": written,
-                })
-            });
-            Ok::<_, String>((result, leftovers))
-        })
-        .await?;
-        // The render's plugin instances are unloaded on the studio's thread.
-        run(&self.app, move |s| {
-            s.finish_render(leftovers);
-            Ok::<_, String>(())
-        })
-        .await?;
-        result.map_err(|e| e.to_string())
-    }
-}
+        let stems_dir = stems_dir.map(|dir| std::path::absolute(&dir).unwrap_or(dir));
+        if let Some(dir) = &stems_dir {
+            if !stems {
+                return Err("stems_dir needs stems: true".to_owned());
+            }
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let wanted = SegmentSpec {
+            length_s: segment_length_s,
+            bars: segment_bars,
+            ranges: segments.map(|r| r.iter().map(|r| (r.start_s, r.end_s)).collect()),
+        };
+        let plan = self
+            .plan_renders(start_s, end_s, tracks, stems, wanted)
+            .await?;
 
-impl DawkeyMcp {
+        let mut rendered = Vec::new();
+        for (solo, track) in &plan.renders {
+            let solo = solo.clone();
+            let job = run(&self.app, move |s| {
+                s.render_job_solo(start_s, end_s, solo.as_deref())
+            })
+            .await?;
+            let path = match track {
+                Some((id, name)) => stems_dir
+                    .as_ref()
+                    .map(|dir| dir.join(format!("{id}-{}.wav", file_safe(name)))),
+                None => output_path.clone(),
+            };
+            let segments = plan.segments.clone();
+            let (result, leftovers) = blocking(move || {
+                let rate = job.sample_rate();
+                let (audio, leftovers) = job.run();
+                let analysis = dawkey_media::analyze(&audio, rate);
+                let frames: Vec<(usize, usize)> = segments
+                    .iter()
+                    .map(|&(from, to)| {
+                        let at =
+                            |s: f64| ((s - start_s) * f64::from(rate)).round().max(0.0) as usize;
+                        (at(from), at(to))
+                    })
+                    .collect();
+                let per_segment = dawkey_media::analyze_segments(&audio, rate, &frames);
+                let written = match path {
+                    Some(path) => dawkey_media::write_wav(&path, &audio, rate).map(|()| Some(path)),
+                    None => Ok(None),
+                };
+                let result = written.map(|written| {
+                    let mut result = json!({ "analysis": analysis });
+                    if let Some(path) = written {
+                        result["output_path"] = json!(path);
+                    }
+                    if !segments.is_empty() {
+                        result["segments"] = segments_json(&segments, per_segment);
+                    }
+                    result
+                });
+                Ok::<_, String>((result, leftovers))
+            })
+            .await?;
+            // The render's plugin instances are unloaded on the studio's
+            // thread.
+            run(&self.app, move |s| {
+                s.finish_render(leftovers);
+                Ok::<_, String>(())
+            })
+            .await?;
+            let mut result = result.map_err(|e| e.to_string())?;
+            if let Some((id, name)) = track {
+                result["track"] = json!(id);
+                result["name"] = json!(name);
+            }
+            rendered.push(result);
+        }
+        let mut result = json!({
+            "start_s": start_s,
+            "end_s": end_s,
+            "sample_rate": plan.sample_rate,
+        });
+        if let Some(tracks) = &plan.tracks {
+            result["tracks"] = json!(tracks);
+        }
+        if stems {
+            result["stems"] = Value::Array(rendered);
+        } else if let Some(Value::Object(fields)) = rendered.pop() {
+            for (key, value) in fields {
+                result[key] = value;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Works out what a render or export does: the segments to analyze
+    /// (absolute seconds), and the renders to run (what to solo in each,
+    /// and the stem's track).
+    async fn plan_renders(
+        &self,
+        start_s: f64,
+        end_s: f64,
+        tracks: Option<Vec<TrackId>>,
+        stems: bool,
+        wanted: SegmentSpec,
+    ) -> Result<RenderPlan, String> {
+        run(&self.app, move |s| {
+            let project = s.session().project();
+            let segments = times::Maps::of(project).segments(start_s, end_s, &wanted)?;
+            let renders = if stems {
+                s.stem_tracks(tracks.as_deref())
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|(id, name)| (Some(vec![id]), Some((id, name))))
+                    .collect()
+            } else {
+                vec![(tracks.clone(), None)]
+            };
+            Ok::<_, String>(RenderPlan {
+                segments,
+                renders,
+                tracks,
+                sample_rate: project.sample_rate,
+            })
+        })
+        .await
+    }
+
     async fn export_audio(&self, args: ExportAudio) -> Result<Value, String> {
         let ExportAudio {
             path,
@@ -1004,6 +1107,11 @@ impl DawkeyMcp {
             start_s,
             end_s,
             tail_s,
+            tracks,
+            stems,
+            segment_length_s,
+            segment_bars,
+            segments,
         } = args;
         let path = std::path::absolute(&path).unwrap_or(path);
         let file = match format {
@@ -1030,7 +1138,7 @@ impl DawkeyMcp {
         // Make the file's folder first, so a bad path fails before the
         // render, not after it.
         dawkey_media::make_output_folder(&path).map_err(|e| e.to_string())?;
-        let (job, spec, end_s) = run(&self.app, move |s| {
+        let (spec, end_s) = run(&self.app, move |s| {
             let project = s.session().project();
             let end_s = match end_s {
                 Some(end_s) => end_s,
@@ -1049,34 +1157,140 @@ impl DawkeyMcp {
                 sample_rate: sample_rate.unwrap_or(project.sample_rate),
             };
             spec.check()?;
-            let job = s.export_job(start_s, end_s).map_err(|e| e.to_string())?;
-            Ok::<_, String>((job, spec, end_s))
+            Ok::<_, String>((spec, end_s))
         })
         .await?;
-        let (result, leftovers) = blocking(move || {
-            let progress = dawkey_media::ExportProgress::default();
-            let (result, leftovers) = job.run(&spec, &path, &progress);
-            let result = result.map(|analysis| {
-                json!({
-                    "path": path,
-                    "format": spec.file,
-                    "sample_format": spec.sample,
-                    "sample_rate": spec.sample_rate,
-                    "start_s": start_s,
-                    "end_s": end_s,
-                    "analysis": analysis,
-                })
-            });
-            Ok::<_, String>((result, leftovers))
+        let wanted = SegmentSpec {
+            length_s: segment_length_s,
+            bars: segment_bars,
+            ranges: segments.map(|r| r.iter().map(|r| (r.start_s, r.end_s)).collect()),
+        };
+        let plan = self
+            .plan_renders(start_s, end_s, tracks, stems, wanted)
+            .await?;
+
+        let mut exported = Vec::new();
+        for (solo, track) in &plan.renders {
+            let solo = solo.clone();
+            let job = run(&self.app, move |s| {
+                s.export_job_solo(start_s, end_s, solo.as_deref())
+            })
+            .await?;
+            let target = match track {
+                Some((id, name)) => stem_path(&path, *id, name),
+                None => path.clone(),
+            };
+            let segments: Vec<(f64, f64)> = plan
+                .segments
+                .iter()
+                .map(|&(from, to)| (from - start_s, to - start_s))
+                .collect();
+            let absolute = plan.segments.clone();
+            let (result, leftovers) = blocking(move || {
+                let progress = dawkey_media::ExportProgress::default();
+                let (result, leftovers) = job.run_segmented(&spec, &target, &progress, &segments);
+                let result = result.map(|measured| {
+                    let mut result = json!({
+                        "path": target,
+                        "format": spec.file,
+                        "sample_format": spec.sample,
+                        "sample_rate": spec.sample_rate,
+                        "analysis": measured.analysis,
+                    });
+                    if !absolute.is_empty() {
+                        result["segments"] = segments_json(&absolute, measured.segments);
+                    }
+                    result
+                });
+                Ok::<_, String>((result, leftovers))
+            })
+            .await?;
+            // The render's plugin instances are unloaded on the studio's
+            // thread.
+            run(&self.app, move |s| {
+                s.finish_render(leftovers);
+                Ok::<_, String>(())
+            })
+            .await?;
+            let mut result = result.map_err(|e| e.to_string())?;
+            if let Some((id, name)) = track {
+                result["track"] = json!(id);
+                result["name"] = json!(name);
+            }
+            exported.push(result);
+        }
+        let mut result = json!({ "start_s": start_s, "end_s": end_s });
+        if let Some(tracks) = &plan.tracks {
+            result["tracks"] = json!(tracks);
+        }
+        if stems {
+            result["stems"] = Value::Array(exported);
+        } else if let Some(Value::Object(fields)) = exported.pop() {
+            for (key, value) in fields {
+                result[key] = value;
+            }
+        }
+        Ok(result)
+    }
+}
+
+/// One render of a plan: the tracks to solo (none: everything), and for a
+/// stem, its track and name.
+type PlannedRender = (Option<Vec<TrackId>>, Option<(TrackId, String)>);
+
+/// What a render or export is to do beyond the mix.
+struct RenderPlan {
+    /// Ranges to analyze separately, in absolute seconds.
+    segments: Vec<(f64, f64)>,
+    renders: Vec<PlannedRender>,
+    /// The tracks asked for, to echo back.
+    tracks: Option<Vec<TrackId>>,
+    sample_rate: u32,
+}
+
+/// Segments and their analyses, as reported.
+fn segments_json(segments: &[(f64, f64)], analyses: Vec<dawkey_media::Analysis>) -> Value {
+    Value::Array(
+        segments
+            .iter()
+            .zip(analyses)
+            .map(|(&(start_s, end_s), analysis)| {
+                json!({ "start_s": start_s, "end_s": end_s, "analysis": analysis })
+            })
+            .collect(),
+    )
+}
+
+/// `song.wav` → `song-3-Bass.wav` for track 3, "Bass".
+fn stem_path(path: &std::path::Path, track: TrackId, name: &str) -> std::path::PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    path.with_file_name(format!("{stem}-{track}-{}{extension}", file_safe(name)))
+}
+
+/// A track name as part of a file name.
+fn file_safe(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || "-_. ".contains(c) {
+                c
+            } else {
+                '_'
+            }
         })
-        .await?;
-        // The render's plugin instances are unloaded on the studio's thread.
-        run(&self.app, move |s| {
-            s.finish_render(leftovers);
-            Ok::<_, String>(())
-        })
-        .await?;
-        result.map_err(|e| e.to_string())
+        .collect();
+    let safe = safe.trim().to_owned();
+    if safe.is_empty() {
+        "track".to_owned()
+    } else {
+        safe
     }
 }
 
