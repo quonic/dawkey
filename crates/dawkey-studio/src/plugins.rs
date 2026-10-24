@@ -73,7 +73,7 @@ pub(crate) struct Plugins {
 /// different plugins, so older caches are scanned again. (3: LV2 plugins
 /// whose ports can't be read are left out; 4: LV2 plugins that require the
 /// worker are in; 5: VST3 plugins.)
-const CACHE_VERSION: u32 = 5;
+const CACHE_VERSION: u32 = 6;
 
 /// The catalog as cached on disk, with what it was scanned from.
 #[derive(Serialize, Deserialize)]
@@ -364,6 +364,21 @@ impl Plugins {
             }
         }
         states
+    }
+
+    /// What slot `slot`'s running plugin saves of itself now, if it runs
+    /// and saves anything.
+    pub(crate) fn capture_one(&mut self, slot: PluginId) -> Option<PluginState> {
+        let paths = self.state_paths(slot);
+        let live = self.live.get_mut(&slot)?;
+        match live.instance.save_state(&paths) {
+            Ok(Some(bytes)) => Some(PluginState::new(bytes)),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("plugin {slot} ({}): {e}", live.plugin);
+                None
+            }
+        }
     }
 
     /// After a compile: slots that left the project wait for their

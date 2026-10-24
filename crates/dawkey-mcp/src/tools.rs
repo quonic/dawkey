@@ -44,6 +44,7 @@ pub(crate) const RESCAN_PLUGINS: &str = "rescan_plugins";
 pub(crate) const RELOAD_PLUGIN: &str = "reload_plugin";
 pub(crate) const SHOW_PLUGIN_GUI: &str = "show_plugin_gui";
 pub(crate) const GET_PLUGIN: &str = "get_plugin";
+pub(crate) const SET_PLUGIN_PROPERTY: &str = "set_plugin_property";
 pub(crate) const GET_CHANGES: &str = "get_changes";
 pub(crate) const BATCH: &str = "batch";
 
@@ -243,7 +244,11 @@ pub(crate) struct ListPlugins {
 /// Get a plugin slot on a track: which plugin, whether it's running, and
 /// its parameters (IDs, names, ranges, current values, whether automated).
 /// Some plugins have thousands of parameters: `param_count` says how many,
-/// and `first`/`count` page through them.
+/// and `first`/`count` page through them. For LV2 plugins, `properties`
+/// lists what the plugin declares besides its parameters (a soundfont
+/// path, a file, a string: `patch:writable`/`patch:readable`), and `state`
+/// the keys in its saved state with their values; set_plugin_property sets
+/// either.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct GetPlugin {
@@ -255,6 +260,31 @@ pub(crate) struct GetPlugin {
     /// How many parameters to list. Defaults to 200.
     #[serde(default)]
     pub(crate) count: Option<usize>,
+}
+
+/// Set a property of an LV2 plugin that isn't a parameter: one of the
+/// `properties` get_plugin lists, or any key in its saved `state` (e.g. a
+/// soundfont path, `urn:calf:soundfont`, for Calf Fluidsynth). The plugin's
+/// saved state is rewritten with the value and the plugin is loaded again
+/// from it, so it starts over with the new value (its other state stays).
+/// Saved with the project; not an undo step (plugin state isn't). Only LV2
+/// plugins have properties a host can see.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetPluginProperty {
+    /// The slot's ID.
+    pub(crate) plugin: dawkey_core::PluginId,
+    /// The property's URI (its key in the state).
+    pub(crate) key: String,
+    /// The value: text (a path or string), a number, or true/false. `null`
+    /// removes the key from the state.
+    pub(crate) value: Value,
+    /// The value's type: an `atom:` name (`Path`, `String`, `URI`, `Int`,
+    /// `Long`, `Float`, `Double`, `Bool`) or a type URI. Defaults to the
+    /// type the key has in the state, else `Path` for text starting with
+    /// `/`, `String` for other text, `Int` or `Float` for numbers, `Bool`.
+    #[serde(default)]
+    pub(crate) kind: Option<String>,
 }
 
 /// Load a plugin slot's plugin again, from its saved state: one that
@@ -879,6 +909,7 @@ pub(crate) fn build_tools() -> Vec<Tool> {
         tool::<ReloadPlugin>(RELOAD_PLUGIN, "", mutating.clone().idempotent(true)),
         tool::<ShowPluginGui>(SHOW_PLUGIN_GUI, "", mutating.clone().idempotent(true)),
         tool::<GetPlugin>(GET_PLUGIN, "", read_only.clone()),
+        tool::<SetPluginProperty>(SET_PLUGIN_PROPERTY, "", mutating.clone().idempotent(true)),
         tool::<GetChanges>(GET_CHANGES, "", read_only),
         tool::<crate::batch::Batch>(BATCH, "", mutating),
     ];

@@ -1638,3 +1638,156 @@ async fn aux_sends() {
     assert!(err.contains("no send"), "{err}");
     dawkey.shutdown().await.unwrap();
 }
+
+/// An LV2 plugin's properties beyond its parameters: listed from its TTL
+/// and its saved state, and set by rewriting the state and reloading.
+#[tokio::test]
+async fn plugin_properties() {
+    let setup = setup();
+    let dawkey = start(&setup).await;
+    let track = signal_track(&dawkey, &setup.wav).await;
+    let slot = add_plugin(&dawkey, &track, "lv2:urn:dawkey:test:memo").await;
+    let details = dawkey
+        .call("get_plugin", json!({ "plugin": slot }))
+        .await
+        .unwrap();
+    assert_eq!(
+        details["properties"],
+        json!([{
+            "uri": "urn:dawkey:test:memo#memo",
+            "label": "Memo",
+            "range": "http://lv2plug.in/ns/ext/atom#Float",
+            "writable": true,
+        }])
+    );
+    assert!(details.get("state").is_none(), "nothing saved yet");
+    // The memo adds nothing yet.
+    assert!(approx(peak(&dawkey, 0.0, 0.5).await, HALF_CENTER_DB));
+
+    // Set it: the plugin starts over with 0.25 added to its audio.
+    let set = dawkey
+        .call(
+            "set_plugin_property",
+            json!({ "plugin": slot, "key": "urn:dawkey:test:memo#memo", "value": 0.25, "kind": "Float" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        set["state"],
+        json!([{
+            "key": "urn:dawkey:test:memo#memo",
+            "kind": "http://lv2plug.in/ns/ext/atom#Float",
+            "value": 0.25,
+        }])
+    );
+    assert!(set["revision"].is_u64());
+    let louder = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    // 0.5 + 0.25 at center pan.
+    assert!(
+        approx(Some(louder), HALF_CENTER_DB + 20.0 * 1.5f64.log10()),
+        "{louder}"
+    );
+
+    // Once it has run, the plugin saves the memo as a file of its own (its
+    // state says where, as a path), so a change says its type.
+    let state = dawkey
+        .call("get_plugin", json!({ "plugin": slot }))
+        .await
+        .unwrap()["state"]
+        .clone();
+    assert_eq!(state[0]["kind"], "http://lv2plug.in/ns/ext/atom#Path");
+    assert!(state[0]["value"].is_string());
+    dawkey
+        .call(
+            "set_plugin_property",
+            json!({ "plugin": slot, "key": "urn:dawkey:test:memo#memo", "value": 0.5, "kind": "Float" }),
+        )
+        .await
+        .unwrap();
+    let full = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    assert!(
+        approx(Some(full), HALF_CENTER_DB + 20.0 * 2.0f64.log10()),
+        "{full}"
+    );
+
+    // It's saved with the project, and survives reopening it.
+    let dir = tempfile::tempdir().unwrap();
+    let saved = dawkey
+        .call("save_project", json!({ "path": dir.path().join("Memo") }))
+        .await
+        .unwrap();
+    dawkey.call("new_project", json!({})).await.unwrap();
+    dawkey
+        .call("open_project", json!({ "path": saved["path"] }))
+        .await
+        .unwrap();
+    let reopened = peak(&dawkey, 0.0, 0.5).await.unwrap();
+    assert!(approx(Some(reopened), full), "{reopened}");
+
+    // Other kinds, and removing a key.
+    dawkey
+        .call(
+            "set_plugin_property",
+            json!({ "plugin": slot, "key": "urn:example:note", "value": "/tmp/x.sf2" }),
+        )
+        .await
+        .unwrap();
+    let state = dawkey
+        .call("get_plugin", json!({ "plugin": slot }))
+        .await
+        .unwrap()["state"]
+        .clone();
+    let note = state
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["key"] == "urn:example:note")
+        .unwrap();
+    assert_eq!(note["kind"], "http://lv2plug.in/ns/ext/atom#Path");
+    assert_eq!(note["value"], "/tmp/x.sf2");
+    dawkey
+        .call(
+            "set_plugin_property",
+            json!({ "plugin": slot, "key": "urn:example:note", "value": null }),
+        )
+        .await
+        .unwrap();
+    let state = dawkey
+        .call("get_plugin", json!({ "plugin": slot }))
+        .await
+        .unwrap()["state"]
+        .clone();
+    assert!(
+        state
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["key"] != "urn:example:note")
+    );
+
+    // Bad input.
+    let clap = add_plugin(&dawkey, &track, "clap:dawkey.test.gain").await;
+    for (args, expected) in [
+        (
+            json!({ "plugin": clap, "key": "urn:x", "value": 1 }),
+            "not an LV2 plugin",
+        ),
+        (
+            json!({ "plugin": slot, "key": "urn:x", "value": 1, "kind": "Chunk" }),
+            "can't be written",
+        ),
+        (
+            json!({ "plugin": slot, "key": "urn:x", "value": "text", "kind": "Int" }),
+            "whole number",
+        ),
+        (
+            json!({ "plugin": slot, "key": " ", "value": 1 }),
+            "needs a key",
+        ),
+        (json!({ "plugin": 999, "key": "urn:x", "value": 1 }), "999"),
+    ] {
+        let err = dawkey.call_err("set_plugin_property", args).await.unwrap();
+        assert!(err.contains(expected), "{err}");
+    }
+    dawkey.shutdown().await.unwrap();
+}

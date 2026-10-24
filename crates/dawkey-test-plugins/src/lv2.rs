@@ -75,12 +75,18 @@ pub const MANIFEST: &str = r#"@prefix atom: <http://lv2plug.in/ns/ext/atom#> .
         lv2:index 1 ; lv2:symbol "midi_out" ; lv2:name "MIDI Out"
     ] .
 
+<urn:dawkey:test:memo#memo>
+    a lv2:Parameter ;
+    rdfs:label "Memo" ;
+    rdfs:range atom:Float .
+
 <urn:dawkey:test:memo>
     a lv2:Plugin ;
     lv2:binary <libdawkey_test_plugins.so> ;
     doap:name "Test Memo (LV2)" ;
     lv2:requiredFeature urid:map ;
     lv2:extensionData state:interface ;
+    patch:writable <urn:dawkey:test:memo#memo> ;
     ui:ui <urn:dawkey:test:memo#gtk> ;
     lv2:port [
         a lv2:InputPort , atom:AtomPort ; atom:bufferType atom:Sequence ;

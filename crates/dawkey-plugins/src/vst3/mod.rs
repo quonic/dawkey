@@ -205,6 +205,7 @@ pub(crate) fn scan_bundle(path: &Path) -> Result<Vec<PluginInfo>, PluginError> {
                 })
                 .collect(),
             params,
+            properties: Vec::new(),
         });
     }
     Ok(found)

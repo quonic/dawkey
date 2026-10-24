@@ -267,6 +267,16 @@ pub struct PluginDetails {
     /// (in bytes), if it saved anything.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_bytes: Option<usize>,
+    /// LV2: the properties the plugin declares besides its parameters
+    /// (`patch:writable`/`patch:readable`): a soundfont, a file, a string.
+    /// set_plugin_property sets them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<dawkey_plugins::PropertyInfo>,
+    /// LV2: the keys in the plugin's saved state, with their types and
+    /// values (text and numbers readable). set_plugin_property changes
+    /// them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub state: Vec<dawkey_plugins::StateProperty>,
     /// The process it runs in, if it runs in one of its own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_id: Option<u32>,
@@ -1838,6 +1848,56 @@ impl Studio {
         Ok(())
     }
 
+    /// Sets a property of an LV2 plugin that isn't a parameter (a
+    /// `patch:writable` property, or any key in its saved state), by
+    /// rewriting what the plugin saved of itself and loading it again with
+    /// that: the plugin starts over with the new value. `kind` is the
+    /// value's type URI (or an `atom:` name like `Path`); without it an
+    /// existing key keeps its type. A null value removes the key. Not an
+    /// undo step (plugin state isn't), but saved with the project.
+    pub fn set_plugin_property(
+        &mut self,
+        plugin: PluginId,
+        key: &str,
+        kind: Option<&str>,
+        value: &serde_json::Value,
+    ) -> Result<(), StudioError> {
+        let (_, slot) = self
+            .session
+            .project()
+            .plugin(plugin)
+            .ok_or_else(|| StudioError::Invalid(format!("plugin {plugin} does not exist")))?;
+        if !slot.plugin.starts_with("lv2:") {
+            return Err(StudioError::Invalid(format!(
+                "plugin {plugin} ({}) is not an LV2 plugin; only LV2 plugins have properties \
+                 (CLAP and VST3 plugins keep theirs inside their state)",
+                slot.plugin
+            )));
+        }
+        if key.trim().is_empty() {
+            return Err(StudioError::Invalid(
+                "the property needs a key (a URI)".into(),
+            ));
+        }
+        // What the plugin has now, if it hasn't been captured yet.
+        if !self.session.project().plugin_states.contains_key(&plugin)
+            && let Some(state) = self.plugins.capture_one(plugin)
+        {
+            self.session.set_plugin_state(plugin, Some(state));
+        }
+        let current = self
+            .session
+            .project()
+            .plugin_states
+            .get(&plugin)
+            .map(|s| s.bytes().to_vec());
+        let bytes = dawkey_plugins::lv2_state_set(current.as_deref(), key, kind, value)
+            .map_err(StudioError::Invalid)?;
+        self.session
+            .set_plugin_state(plugin, Some(dawkey_core::PluginState::new(bytes)));
+        self.reload_plugin(plugin)
+    }
+
     /// Looks for plugins on `search` from now on (keeping the cache), and
     /// scans it in the background.
     pub fn change_plugin_search(&mut self, search: SearchPath) {
@@ -1960,6 +2020,17 @@ impl Studio {
                 .plugin_states
                 .get(&id)
                 .map(|s| s.bytes().len()),
+            properties: info
+                .as_ref()
+                .map(|i| i.properties.clone())
+                .unwrap_or_default(),
+            state: self
+                .session
+                .project()
+                .plugin_states
+                .get(&id)
+                .and_then(|s| dawkey_plugins::lv2_state_properties(s.bytes()))
+                .unwrap_or_default(),
             process_id: self.plugins.process_id(id),
             sandboxed: self.plugins.sandboxed(id),
             has_gui: self.plugins.gui(id).0,

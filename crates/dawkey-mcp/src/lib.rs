@@ -66,7 +66,10 @@ send to the next plugin that takes notes; on a track with a MIDI output
 device, what the effects at the start of the chain send goes to the device.
 get_plugin lists a slot's parameters (with their values as the plugin shows
 them); set_plugin_param (which also takes a value as text, e.g. `-6 dB`),
-set_automation, add_automation_point and write_automation change them.
+set_automation, add_automation_point and write_automation change them. An
+LV2 plugin's other settings (a soundfont path, a file, a choice: its
+`properties` and the keys in its saved `state`) are set with
+set_plugin_property, which reloads it with the change.
 Plugins keep what they save of themselves (state beyond parameters, and
 files LV2 plugins keep with it) in the project. A plugin running in its own
 process (`process_id` in get_plugin) that crashes stops alone: its audio
@@ -742,6 +745,30 @@ impl DawkeyMcp {
                 run(studio, move |s| {
                     s.show_plugin_gui(plugin, show)?;
                     Ok::<_, dawkey_studio::StudioError>(to_json(&s.plugin_details(plugin)))
+                })
+                .await
+            }
+            SET_PLUGIN_PROPERTY => {
+                let SetPluginProperty {
+                    plugin,
+                    key,
+                    value,
+                    kind,
+                } = try_args!(parse(args));
+                run(studio, move |s| {
+                    s.set_plugin_property(plugin, &key, kind.as_deref(), &value)?;
+                    s.plugin_details(plugin)
+                        .map(|d| {
+                            let mut result = to_json(&d);
+                            result["revision"] = json!(revision(s));
+                            result["instance"] = json!(*INSTANCE_ID);
+                            result
+                        })
+                        .ok_or_else(|| {
+                            dawkey_studio::StudioError::Invalid(format!(
+                                "plugin {plugin} does not exist"
+                            ))
+                        })
                 })
                 .await
             }
