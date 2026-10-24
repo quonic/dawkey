@@ -1,6 +1,6 @@
 [package]
 name = "dawkey-text"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "Dawkey text shaping, measuring and glyph rasterization with embedded fonts"
