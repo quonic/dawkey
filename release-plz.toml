@@ -1,0 +1,44 @@
+# release-plz (.github/workflows/release-plz.yml): each crate keeps its own
+# version and is published only when it changed since its version on
+# crates.io, or a crate it depends on did. cargo-semver-checks makes a change
+# that breaks a library's API a minor bump (0.1.x -> 0.2.0), so dawkey crates
+# already published keep building with the dependencies cargo picks for them.
+
+[workspace]
+# The library crates are parts of Dawkey, not releases of their own: no
+# changelogs, tags or GitHub releases, only their versions on crates.io.
+changelog_update = false
+git_tag_enable = false
+git_release_enable = false
+pr_labels = ["release"]
+
+# Dawkey itself: its changelog lists the changes to every crate, and its tag
+# v<version> is what the Release workflow (release.yml) builds packages for.
+[[package]]
+name = "dawkey"
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+changelog_include = [
+  "dawkey-app",
+  "dawkey-backend-pipewire",
+  "dawkey-core",
+  "dawkey-dsp",
+  "dawkey-engine",
+  "dawkey-mcp",
+  "dawkey-media",
+  "dawkey-plugins",
+  "dawkey-render",
+  "dawkey-studio",
+  "dawkey-text",
+  "dawkey-ui",
+  "dawkey-wayland",
+]
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_name = "Dawkey {{ version }}"
+git_release_body = """
+{{ changelog }}
+
+Install the package for your distribution as [packaging/README.md](https://github.com/quonic/dawkey/blob/v{{ version }}/packaging/README.md#installing-a-release) shows. `SHA256SUMS` lists each file's checksum.
+"""

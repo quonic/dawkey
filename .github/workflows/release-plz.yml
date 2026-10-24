@@ -1,0 +1,149 @@
+name: Release-plz
+
+# Publishes Dawkey's crates to crates.io with release-plz (release-plz.toml).
+# Each push to main publishes the crates whose version in Cargo.toml isn't on
+# crates.io yet, then opens (or updates) a pull request that bumps the crates
+# that changed since their published version, and those that depend on them,
+# and adds the changes to CHANGELOG.md. Merging that pull request publishes
+# them. A new version of dawkey also tags v<version> and builds its packages
+# (release.yml): a tag pushed with the workflow's token doesn't start
+# workflows of its own.
+#
+# Needs the CARGO_REGISTRY_TOKEN secret (a crates.io token with the
+# publish-update scope), and "Allow GitHub Actions to create and approve pull
+# requests" in the repository's Actions settings.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time; a newer push waits rather than cancelling a publish.
+concurrency:
+  group: release-plz
+  cancel-in-progress: false
+
+env:
+  RELEASE_PLZ_VERSION: 0.4.1
+  SEMVER_CHECKS_VERSION: 0.51.0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    if: github.repository == 'quonic/dawkey'
+    # As in ci.yml: `cargo publish` builds each crate, which needs the same
+    # system libraries.
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+
+    steps:
+      - &install
+        name: Install build dependencies
+        run: |
+          set -euo pipefail
+          dnf install -y -q --setopt=install_weak_deps=False \
+            cargo \
+            clang-devel \
+            gcc \
+            gcc-c++ \
+            git-core \
+            gzip \
+            jq \
+            libxkbcommon-devel \
+            lilv-devel \
+            pipewire-devel \
+            pkgconf-pkg-config \
+            qt5-qtbase-devel \
+            qt6-qtbase-devel \
+            rust \
+            tar \
+            wayland-devel
+          curl -sSfL "https://github.com/release-plz/release-plz/releases/download/release-plz-v$RELEASE_PLZ_VERSION/release-plz-x86_64-unknown-linux-gnu.tar.gz" |
+            tar -xz -C /usr/local/bin release-plz
+          curl -sSfL "https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v$SEMVER_CHECKS_VERSION/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz" |
+            tar -xz -C /usr/local/bin cargo-semver-checks
+
+      - &checkout
+        name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          # release-plz reads the history since each crate's published commit.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - &git
+        name: Configure git
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - &cache
+        name: Cache dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: release-plz-fedora-44-${{ hashFiles('Cargo.lock') }}
+          restore-keys: release-plz-fedora-44-
+
+      - name: Publish
+        id: release
+        env:
+          GIT_TOKEN: ${{ github.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          output=$(release-plz release --forge github --output json)
+          echo "$output"
+          tag=$(jq -r '.releases[] | select(.package_name == "dawkey") | .tag' <<<"$output")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  packages:
+    name: Packages
+    needs: publish
+    if: needs.publish.outputs.tag != ''
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.publish.outputs.tag }}
+    permissions:
+      contents: write
+
+  # After publishing, so a release pull request just merged isn't proposed
+  # again.
+  pull-request:
+    name: Release pull request
+    needs: publish
+    runs-on: ubuntu-latest
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - *install
+      - *checkout
+      - *git
+      - *cache
+
+      - name: Open or update the release pull request
+        env:
+          GIT_TOKEN: ${{ github.token }}
+        run: >
+          release-plz release-pr --forge github
+          --repo-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"

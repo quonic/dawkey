@@ -3,16 +3,28 @@ name: Release
 # Builds Dawkey's packages with packaging/build-*.sh, each in a container of
 # the distribution it's for. Pushing a tag v<version> (Cargo.toml's version;
 # the build scripts check it) attaches them, with their checksums, to that
-# tag's GitHub release, which is made if it isn't there yet. A manual run
-# only builds them, kept as the run's artifacts.
+# tag's GitHub release, which is made if it isn't there yet. release-plz.yml
+# calls it with the tag it made for a new version. A manual run only builds
+# them, kept as the run's artifacts.
 on:
   push:
     tags:
       - 'v*'
+  workflow_call:
+    inputs:
+      tag:
+        description: The tag v<version> to build and release
+        required: true
+        type: string
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# The tag being released, if any. A called workflow sees its caller's event
+# (a push to main), so the tag comes as an input.
+env:
+  TAG: ${{ inputs.tag || (github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name) || '' }}
 
 jobs:
   build:
@@ -40,6 +52,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
 
       # In a container of our own rather than the job's: the runner keeps a
       # job container up with `tail -f /dev/null`, which Ubuntu 26.04's tail
@@ -48,7 +62,7 @@ jobs:
         run: >
           docker run --rm
           --volume "$PWD:/src" --workdir /src
-          --env GITHUB_REF_TYPE --env GITHUB_REF_NAME
+          --env GITHUB_REF_TYPE=${TAG:+tag} --env GITHUB_REF_NAME=$TAG
           ${{ matrix.image }}
           bash -c '${{ matrix.script }}'
 
@@ -62,7 +76,7 @@ jobs:
   release:
     name: GitHub release
     needs: build
-    if: github.event_name == 'push'
+    if: inputs.tag || (github.event_name == 'push' && github.ref_type == 'tag')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -84,7 +98,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then

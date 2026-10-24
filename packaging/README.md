@@ -19,7 +19,9 @@ podman run --rm -v "$PWD:/src:Z" -w /src registry.fedoraproject.org/fedora:44 pa
 
 ## Releasing
 
-Bump `version` in `Cargo.toml`, merge, and push a tag `v<version>`. The release workflow (`.github/workflows/release.yml`) builds every package and attaches them, with a `SHA256SUMS` file, to the GitHub release for that tag. It makes the release, with notes generated from the merged pull requests, if there isn't one yet. If the tag doesn't match the version in `Cargo.toml`, the builds fail and nothing is released.
+Releases go through release-plz (`.github/workflows/release-plz.yml`, configured in `release-plz.toml`). After each push to `main` it opens or updates a pull request labeled `release`. That pull request bumps each crate that changed since its version on crates.io, and each crate that depends on one that did; a library whose API broke gets a minor bump. It also adds the changes to `CHANGELOG.md`. Merging it publishes those crates to crates.io and tags dawkey's new version `v<version>` with a GitHub release. The release workflow (`.github/workflows/release.yml`) then builds every package and attaches them, with a `SHA256SUMS` file, to that release.
+
+A tag `v<version>` pushed by hand works too: the release workflow builds it, and makes the release, with notes generated from the merged pull requests, if there isn't one yet. If the tag doesn't match dawkey's version in `Cargo.toml`, the builds fail and nothing is released.
 
 Running the workflow by hand (Actions → Release → Run workflow) only builds the packages and keeps them as the run's artifacts, which is a way to try a packaging change before tagging.
 

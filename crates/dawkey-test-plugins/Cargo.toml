@@ -1,6 +1,6 @@
 [package]
 name = "dawkey-test-plugins"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Tiny CLAP, LV2 and VST3 plugins that Dawkey's tests host"

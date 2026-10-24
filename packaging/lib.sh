@@ -4,7 +4,8 @@
 
 set -euo pipefail
 
-# The version in Cargo.toml's [workspace.package] (the first `version =` line).
+# The dawkey package's version in the root Cargo.toml (the first `version =`
+# line).
 dawkey_version() {
     sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1
 }
