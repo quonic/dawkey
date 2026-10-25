@@ -475,7 +475,12 @@ async fn tempo_changes_move_midi_clips() {
     let controls = &find_track(&state, track)["clips"][0]["controls"];
     assert_eq!(
         controls,
-        &json!([{ "controller": { "kind": "pitch_bend" }, "frame": 12_000, "value": 16383 }])
+        &json!([{
+            "controller": { "kind": "pitch_bend" },
+            "frame": 12_000,
+            "at_beats": 0.5,
+            "value": 16383,
+        }])
     );
     let bent = render(&dawkey, 0.0, 2.0).await;
     assert_eq!(bent["silent"], false);
@@ -606,6 +611,137 @@ async fn imports_midi_files() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("MIDI"), "{err}");
+    dawkey.shutdown().await.unwrap();
+}
+
+/// A file's tracks can go onto existing MIDI tracks, which keep their mix
+/// and routing and lose the clips the import covers.
+#[tokio::test]
+async fn imports_midi_into_existing_tracks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("song.mid");
+    write_midi_file(&path);
+    let dawkey = start().await;
+    // A set-up track: a chord clip, a gain, a pan and a bus.
+    let (keys, old_clip) = chord_clip(&dawkey).await;
+    let bus = dawkey
+        .call("add_track", json!({ "name": "Verb", "kind": "bus" }))
+        .await
+        .unwrap()["track"]
+        .as_u64()
+        .unwrap();
+    for (tool, args) in [
+        ("set_track_gain", json!({ "track": keys, "gain_db": -4.0 })),
+        ("set_track_pan", json!({ "track": keys, "pan": 0.25 })),
+        ("set_track_output", json!({ "track": keys, "bus": bus })),
+        ("rename_track", json!({ "track": keys, "name": "Keys" })),
+    ] {
+        dawkey.call(tool, args).await.unwrap();
+    }
+    // A clip well after the import stays.
+    let later = dawkey
+        .call(
+            "add_midi_clip",
+            json!({ "track": keys, "position_s": 10.0, "notes": [{ "pitch": 60, "start_beats": 0, "length_beats": 1 }] }),
+        )
+        .await
+        .unwrap()["clip"]
+        .as_u64()
+        .unwrap();
+    let before = dawkey.call("get_state", json!({})).await.unwrap()["revision"].clone();
+
+    let import = dawkey
+        .call(
+            "import_midi",
+            json!({ "path": path, "targets": [{ "file_track_name": "Lead", "track": keys }] }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(import["tracks"], json!([keys]));
+    assert_eq!(import["removed_clips"], json!([old_clip]));
+    assert_eq!(import["used_file_tempo"], false, "the project has clips");
+    let new_clip = import["clips"][0].as_u64().unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(state["revision"], before.as_u64().unwrap() + 1, "one step");
+    assert_eq!(state["project"]["tracks"].as_array().unwrap().len(), 2);
+    let t = find_track(&state, keys);
+    assert_eq!(t["name"], "Keys");
+    assert_eq!(t["gain_db"], -4.0);
+    assert_eq!(t["pan"], 0.25);
+    assert_eq!(t["output"], bus);
+    let clips: Vec<u64> = t["clips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(clips, [later, new_clip]);
+    assert_eq!(t["clips"][1]["notes"].as_array().unwrap().len(), 3);
+
+    // Beside the clips instead, by file track index.
+    let import = dawkey
+        .call(
+            "import_midi",
+            json!({
+                "path": path,
+                "position_s": 1.0,
+                "replace": false,
+                "targets": [{ "file_track": 0, "track": keys }],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(import.get("removed_clips").is_none());
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(
+        find_track(&state, keys)["clips"].as_array().unwrap().len(),
+        3
+    );
+
+    // One undo each.
+    dawkey.call("undo", json!({})).await.unwrap();
+    dawkey.call("undo", json!({})).await.unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    let t = find_track(&state, keys);
+    assert_eq!(t["clips"][0]["id"], old_clip);
+    assert_eq!(t["clips"].as_array().unwrap().len(), 2);
+
+    // Bad targets are tool errors.
+    let audio = dawkey
+        .call("add_track", json!({ "name": "Audio" }))
+        .await
+        .unwrap()["track"]
+        .as_u64()
+        .unwrap();
+    for (targets, expected) in [
+        (
+            json!([{ "file_track_name": "Nope", "track": keys }]),
+            "no track named",
+        ),
+        (
+            json!([{ "file_track": 7, "track": keys }]),
+            "no file track 7",
+        ),
+        (
+            json!([{ "track": keys }]),
+            "file_track or a file_track_name",
+        ),
+        (
+            json!([{ "file_track": 0, "track": audio }]),
+            "not a MIDI track",
+        ),
+        (json!([{ "file_track": 0, "track": 999 }]), "999"),
+        (
+            json!([{ "file_track": 0, "track": keys }, { "file_track_name": "Lead", "track": keys }]),
+            "more than once",
+        ),
+    ] {
+        let err = dawkey
+            .call_err("import_midi", json!({ "path": path, "targets": targets }))
+            .await
+            .unwrap();
+        assert!(err.contains(expected), "{err}");
+    }
     dawkey.shutdown().await.unwrap();
 }
 
@@ -827,7 +963,7 @@ async fn per_note_controllers_over_mcp() {
     let take = &find_track(&state, keys)["clips"][0];
     assert_eq!(
         take["controls"],
-        json!([{ "controller": bend, "frame": 24_000, "value": 40_000 }]),
+        json!([{ "controller": bend, "frame": 24_000, "at_beats": 1.0, "value": 40_000 }]),
         "{take}"
     );
 
@@ -910,8 +1046,8 @@ async fn per_note_management_over_mcp() {
     assert_eq!(
         take["controls"],
         json!([
-            { "controller": bend, "frame": 24_000, "value": 40_000 },
-            { "controller": bend, "frame": 30_000, "value": 0x8000 },
+            { "controller": bend, "frame": 24_000, "at_beats": 1.0, "value": 40_000 },
+            { "controller": bend, "frame": 30_000, "at_beats": 1.25, "value": 0x8000 },
         ]),
         "{take}"
     );

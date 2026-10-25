@@ -15,7 +15,7 @@ mod recorder;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,7 +25,7 @@ use dawkey_backend_pipewire::{
 };
 use dawkey_core::{
     AddClip, AddMidiClip, AutomationTarget, Command, ControlSpec, Controller, CoreError,
-    MeterChange, MeterMap, NoteSpec, Outcome, PluginId, Project, Session, SetTempoMap,
+    MeterChange, MeterMap, NoteSpec, Outcome, PluginId, Project, RemoveClip, Session, SetTempoMap,
     SetTimeSignatureMap, SourceId, TempoChange, TimeRange, TimeSignature, TrackId, TrackKind,
 };
 use dawkey_engine::{
@@ -267,6 +267,16 @@ pub struct PluginDetails {
     /// (in bytes), if it saved anything.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_bytes: Option<usize>,
+    /// LV2: the properties the plugin declares besides its parameters
+    /// (`patch:writable`/`patch:readable`): a soundfont, a file, a string.
+    /// set_plugin_property sets them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<dawkey_plugins::PropertyInfo>,
+    /// LV2: the keys in the plugin's saved state, with their types and
+    /// values (text and numbers readable). set_plugin_property changes
+    /// them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub state: Vec<dawkey_plugins::StateProperty>,
     /// The process it runs in, if it runs in one of its own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_id: Option<u32>,
@@ -322,12 +332,26 @@ pub struct ParamState {
 /// What an imported MIDI file became.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MidiImport {
-    /// One new track and clip per file track (and channel) with notes.
+    /// The track each clip went on: one per file track (and channel) with
+    /// notes, new unless it was mapped to an existing one.
     pub tracks: Vec<TrackId>,
     pub clips: Vec<dawkey_core::ClipId>,
     pub notes: usize,
     /// The file's tempo map and time signature were adopted.
     pub used_file_tempo: bool,
+    /// Clips of mapped tracks that the imported clips replaced.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed_clips: Vec<dawkey_core::ClipId>,
+}
+
+/// Where a MIDI file's track goes when importing: onto an existing MIDI
+/// track instead of a new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MidiImportTarget {
+    /// Index of the track in the file (as [`MidiFile::tracks`] has them).
+    pub file_track: usize,
+    /// The MIDI track to put its clip on.
+    pub track: TrackId,
 }
 
 /// MIDI the engine sent to a device (virtual backend).
@@ -431,13 +455,36 @@ impl ExportJob {
     /// Renders and writes the file. Returns what was written, and the
     /// plugins to hand back to [`Studio::finish_render`] (whatever happened).
     pub fn run(
-        mut self,
+        self,
         spec: &dawkey_media::ExportSpec,
         path: &Path,
         progress: &dawkey_media::ExportProgress,
     ) -> (Result<Analysis, dawkey_media::MediaError>, RenderLeftovers) {
+        let (result, leftovers) = self.run_segmented(spec, path, progress, &[]);
+        (result.map(|r| r.analysis), leftovers)
+    }
+
+    /// [`run`](Self::run), also analyzing `segments` (`[start, end)` in
+    /// seconds from the export's start) separately.
+    pub fn run_segmented(
+        mut self,
+        spec: &dawkey_media::ExportSpec,
+        path: &Path,
+        progress: &dawkey_media::ExportProgress,
+        segments: &[(f64, f64)],
+    ) -> (
+        Result<dawkey_media::ExportAnalysis, dawkey_media::MediaError>,
+        RenderLeftovers,
+    ) {
         let mut blocks = Blocks(&mut self.render);
-        let result = dawkey_media::export(&mut blocks, self.sample_rate, spec, path, progress);
+        let result = dawkey_media::export_segmented(
+            &mut blocks,
+            self.sample_rate,
+            spec,
+            path,
+            progress,
+            segments,
+        );
         let mut graph = self.render.into_graph();
         let leftovers = RenderLeftovers {
             job: self.job,
@@ -677,6 +724,33 @@ impl Studio {
         let command = self.plugins.resolve(self.session.project(), command)?;
         self.plugins.check(self.session.project(), &command)?;
         let result = self.session.execute(command);
+        self.sync();
+        result
+    }
+
+    /// Runs commands as one undo step until `next` makes none, each made
+    /// from the project as the earlier ones left it and their outcomes; see
+    /// [`Session::execute_batch_with`]. Plugin commands are checked against
+    /// the catalog like single ones. The engine graph is compiled once.
+    pub fn execute_batch_with<F>(
+        &mut self,
+        label: impl Into<String>,
+        mut next: F,
+    ) -> Result<Vec<Outcome>, CoreError>
+    where
+        F: FnMut(&Project, &[Outcome]) -> Result<Option<Command>, CoreError>,
+    {
+        let plugins = &mut self.plugins;
+        let result = self.session.execute_batch_with(label, |project, outcomes| {
+            let Some(command) = next(project, outcomes)? else {
+                return Ok(None);
+            };
+            let name = command.name();
+            let named = |e: CoreError| e.in_context(name);
+            let command = plugins.resolve(project, command).map_err(named)?;
+            plugins.check(project, &command).map_err(named)?;
+            Ok(Some(command))
+        });
         self.sync();
         result
     }
@@ -1158,14 +1232,59 @@ impl Studio {
         file: &MidiFile,
         position_s: f64,
         use_file_tempo: Option<bool>,
+        targets: &[MidiImportTarget],
+        replace: bool,
     ) -> Result<MidiImport, StudioError> {
         if file.tracks.is_empty() {
             return Err(StudioError::Invalid("the MIDI file has no notes".into()));
         }
         let project = self.session.project();
+        for target in targets {
+            if target.file_track >= file.tracks.len() {
+                return Err(StudioError::Invalid(format!(
+                    "the file has {} tracks with notes, so there's no file track {}",
+                    file.tracks.len(),
+                    target.file_track
+                )));
+            }
+            match project.track(target.track) {
+                None => return Err(CoreError::TrackNotFound(target.track).into()),
+                Some(t) if t.kind != TrackKind::Midi => {
+                    return Err(StudioError::Invalid(format!(
+                        "track {} ({}) is not a MIDI track",
+                        target.track, t.name
+                    )));
+                }
+                Some(_) => {}
+            }
+            if targets
+                .iter()
+                .filter(|t| t.file_track == target.file_track)
+                .count()
+                > 1
+            {
+                return Err(StudioError::Invalid(format!(
+                    "file track {} is mapped more than once",
+                    target.file_track
+                )));
+            }
+        }
         let empty = project.tracks.iter().all(|t| t.clips.is_empty());
         let adopt = use_file_tempo.unwrap_or(empty);
-        let mut commands = Vec::new();
+
+        /// A step of the import: a command, or working out which clips of a
+        /// mapped track the clip just added replaces.
+        enum Step {
+            Command(Command),
+            Replace { track: TrackId, added: usize },
+        }
+        let mut steps = VecDeque::new();
+        let mut command_count = 0;
+        let mut push = |steps: &mut VecDeque<Step>, command: Command| {
+            steps.push_back(Step::Command(command));
+            command_count += 1;
+            command_count - 1
+        };
         if adopt {
             // The file's beat 0 lands at `position_s`, at its first tempo.
             let first = file
@@ -1174,18 +1293,21 @@ impl Studio {
                 .filter(|(beat, _)| *beat <= 0.0)
                 .map_or(120.0, |&(_, bpm)| bpm);
             let offset = position_s * first / 60.0;
-            commands.push(Command::from(SetTempoMap {
-                bpm: first,
-                changes: file
-                    .tempo
-                    .iter()
-                    .filter(|(beat, _)| *beat > 0.0)
-                    .map(|&(beat, bpm)| TempoChange::new(beat + offset, bpm))
-                    .collect(),
-            }));
-            commands.push(meter_map_of(file, offset).into());
+            push(
+                &mut steps,
+                Command::from(SetTempoMap {
+                    bpm: first,
+                    changes: file
+                        .tempo
+                        .iter()
+                        .filter(|(beat, _)| *beat > 0.0)
+                        .map(|&(beat, bpm)| TempoChange::new(beat + offset, bpm))
+                        .collect(),
+                }),
+            );
+            push(&mut steps, meter_map_of(file, offset).into());
         }
-        for track in &file.tracks {
+        for (index, track) in file.tracks.iter().enumerate() {
             let notes = track
                 .notes
                 .iter()
@@ -1208,9 +1330,12 @@ impl Studio {
                     })
                 })
                 .collect();
-            commands.push(
+            let target = targets.iter().find(|t| t.file_track == index);
+            let added = push(
+                &mut steps,
                 AddMidiClip {
-                    track_name: Some(track.name.clone()),
+                    track: target.map(|t| t.track),
+                    track_name: target.is_none().then(|| track.name.clone()),
                     position_s,
                     notes,
                     controls,
@@ -1218,11 +1343,48 @@ impl Studio {
                 }
                 .into(),
             );
+            if let Some(target) = target
+                && replace
+            {
+                steps.push_back(Step::Replace {
+                    track: target.track,
+                    added,
+                });
+            }
         }
-        let outcomes = self.session.execute_batch("import_midi", commands)?;
-        self.sync();
+        let mut removed = Vec::new();
+        let outcomes = self.execute_batch_with("import_midi", |project, outcomes| {
+            loop {
+                match steps.pop_front() {
+                    None => return Ok(None),
+                    Some(Step::Command(command)) => return Ok(Some(command)),
+                    Some(Step::Replace { track, added }) => {
+                        // The clips the new one overlaps go, in front of the
+                        // remaining steps.
+                        let new = outcomes[added].clip.expect("add_midi_clip makes a clip");
+                        let Some((_, clip)) = project.clip(new) else {
+                            continue;
+                        };
+                        let (start, end) = (clip.start, clip.end());
+                        let Some(track) = project.track(track) else {
+                            continue;
+                        };
+                        for old in track
+                            .clips
+                            .iter()
+                            .filter(|c| c.id != new && c.start < end && c.end() > start)
+                            .rev()
+                        {
+                            removed.push(old.id);
+                            steps.push_front(Step::Command(RemoveClip { clip: old.id }.into()));
+                        }
+                    }
+                }
+            }
+        })?;
         let mut import = MidiImport {
             used_file_tempo: adopt,
+            removed_clips: removed,
             ..MidiImport::default()
         };
         for outcome in outcomes {
@@ -1369,6 +1531,12 @@ impl Studio {
         Ok(())
     }
 
+    /// How many audio cycles the engine has run. A transport command has
+    /// been applied once this has grown by two.
+    pub fn engine_cycles(&self) -> u64 {
+        self.engine.transport().cycles
+    }
+
     pub fn transport(&self) -> TransportState {
         let t = self.engine.transport();
         TransportState {
@@ -1435,7 +1603,19 @@ impl Studio {
     /// Prepares an offline render of `[start_s, end_s)` of the current
     /// project. Uses the session's mute/solo state; ignores the transport.
     pub fn render_job(&mut self, start_s: f64, end_s: f64) -> Result<RenderJob, StudioError> {
-        let (job, graph, start, frames) = self.offline_graph(start_s, end_s, MAX_RENDER_S)?;
+        self.render_job_solo(start_s, end_s, None)
+    }
+
+    /// [`render_job`](Self::render_job) with `solo` tracks soloed (and no
+    /// others), as if their solo buttons were on: only they are heard,
+    /// through their buses and the master.
+    pub fn render_job_solo(
+        &mut self,
+        start_s: f64,
+        end_s: f64,
+        solo: Option<&[TrackId]>,
+    ) -> Result<RenderJob, StudioError> {
+        let (job, graph, start, frames) = self.offline_graph(start_s, end_s, MAX_RENDER_S, solo)?;
         Ok(RenderJob {
             job,
             graph,
@@ -1448,7 +1628,18 @@ impl Studio {
     /// Prepares an export of `[start_s, end_s)`, like
     /// [`render_job`](Self::render_job) but rendered a block at a time.
     pub fn export_job(&mut self, start_s: f64, end_s: f64) -> Result<ExportJob, StudioError> {
-        let (job, graph, start, frames) = self.offline_graph(start_s, end_s, MAX_EXPORT_S)?;
+        self.export_job_solo(start_s, end_s, None)
+    }
+
+    /// [`export_job`](Self::export_job) with `solo` tracks soloed, like
+    /// [`render_job_solo`](Self::render_job_solo).
+    pub fn export_job_solo(
+        &mut self,
+        start_s: f64,
+        end_s: f64,
+        solo: Option<&[TrackId]>,
+    ) -> Result<ExportJob, StudioError> {
+        let (job, graph, start, frames) = self.offline_graph(start_s, end_s, MAX_EXPORT_S, solo)?;
         let sample_rate = self.session.project().sample_rate;
         Ok(ExportJob {
             job,
@@ -1458,19 +1649,70 @@ impl Studio {
         })
     }
 
+    /// The tracks a stem render covers: `tracks` if given (checked), else
+    /// every audio and MIDI track that isn't muted. Each with its name.
+    pub fn stem_tracks(
+        &self,
+        tracks: Option<&[TrackId]>,
+    ) -> Result<Vec<(TrackId, String)>, StudioError> {
+        let project = self.session.project();
+        match tracks {
+            Some(ids) => {
+                self.check_solo(ids)?;
+                Ok(ids
+                    .iter()
+                    .filter_map(|&id| project.track(id).map(|t| (id, t.name.clone())))
+                    .collect())
+            }
+            None => Ok(project
+                .tracks
+                .iter()
+                .filter(|t| t.kind != TrackKind::Bus && !t.mute)
+                .map(|t| (t.id, t.name.clone()))
+                .collect()),
+        }
+    }
+
+    /// Checks tracks to solo for a render: they exist, and aren't the
+    /// master (which is always heard).
+    fn check_solo(&self, solo: &[TrackId]) -> Result<(), StudioError> {
+        let project = self.session.project();
+        if solo.is_empty() {
+            return Err(StudioError::Invalid(
+                "tracks is empty; leave it out to render everything".into(),
+            ));
+        }
+        for &id in solo {
+            if id == dawkey_core::MASTER {
+                return Err(StudioError::Invalid(
+                    "the master (track 0) is always rendered; give the tracks to hear".into(),
+                ));
+            }
+            if project.track(id).is_none() {
+                return Err(CoreError::TrackNotFound(id).into());
+            }
+        }
+        Ok(())
+    }
+
     /// A graph with fresh plugin instances for rendering `[start_s, end_s)`
-    /// (at most `max_s` long): its job number, start frame and length.
+    /// (at most `max_s` long), with `solo` tracks soloed if given: its job
+    /// number, start frame and length.
     fn offline_graph(
         &mut self,
         start_s: f64,
         end_s: f64,
         max_s: f64,
+        solo: Option<&[TrackId]>,
     ) -> Result<(u64, Graph, u64, usize), StudioError> {
         let project = self.session.project();
         if !(start_s >= 0.0 && end_s > start_s && end_s - start_s <= max_s) {
             return Err(StudioError::Invalid(format!(
                 "need 0 <= start_s < end_s and at most {max_s} s, got {start_s}..{end_s}"
             )));
+        }
+        if let Some(solo) = solo {
+            self.check_solo(solo)?;
         }
         let start = project.seconds_to_frames(start_s);
         let frames = (project.seconds_to_frames(end_s) - start) as usize;
@@ -1480,8 +1722,26 @@ impl Studio {
         let job = self.next_render_job;
         self.next_render_job += 1;
         let mut provider = self.plugins.offline_provider(job, &project.plugin_states);
-        let graph =
-            Graph::compile_with_devices(project, &self.media, &mut provider, &self.device_latency);
+        let graph = match solo {
+            Some(solo) => {
+                let mut soloed = project.clone();
+                for track in &mut soloed.tracks {
+                    track.solo = solo.contains(&track.id);
+                }
+                Graph::compile_with_devices(
+                    &soloed,
+                    &self.media,
+                    &mut provider,
+                    &self.device_latency,
+                )
+            }
+            None => Graph::compile_with_devices(
+                project,
+                &self.media,
+                &mut provider,
+                &self.device_latency,
+            ),
+        };
         Ok((job, graph, start, frames))
     }
 
@@ -1586,6 +1846,56 @@ impl Studio {
         self.synced_revision = None;
         self.sync();
         Ok(())
+    }
+
+    /// Sets a property of an LV2 plugin that isn't a parameter (a
+    /// `patch:writable` property, or any key in its saved state), by
+    /// rewriting what the plugin saved of itself and loading it again with
+    /// that: the plugin starts over with the new value. `kind` is the
+    /// value's type URI (or an `atom:` name like `Path`); without it an
+    /// existing key keeps its type. A null value removes the key. Not an
+    /// undo step (plugin state isn't), but saved with the project.
+    pub fn set_plugin_property(
+        &mut self,
+        plugin: PluginId,
+        key: &str,
+        kind: Option<&str>,
+        value: &serde_json::Value,
+    ) -> Result<(), StudioError> {
+        let (_, slot) = self
+            .session
+            .project()
+            .plugin(plugin)
+            .ok_or_else(|| StudioError::Invalid(format!("plugin {plugin} does not exist")))?;
+        if !slot.plugin.starts_with("lv2:") {
+            return Err(StudioError::Invalid(format!(
+                "plugin {plugin} ({}) is not an LV2 plugin; only LV2 plugins have properties \
+                 (CLAP and VST3 plugins keep theirs inside their state)",
+                slot.plugin
+            )));
+        }
+        if key.trim().is_empty() {
+            return Err(StudioError::Invalid(
+                "the property needs a key (a URI)".into(),
+            ));
+        }
+        // What the plugin has now, if it hasn't been captured yet.
+        if !self.session.project().plugin_states.contains_key(&plugin)
+            && let Some(state) = self.plugins.capture_one(plugin)
+        {
+            self.session.set_plugin_state(plugin, Some(state));
+        }
+        let current = self
+            .session
+            .project()
+            .plugin_states
+            .get(&plugin)
+            .map(|s| s.bytes().to_vec());
+        let bytes = dawkey_plugins::lv2_state_set(current.as_deref(), key, kind, value)
+            .map_err(StudioError::Invalid)?;
+        self.session
+            .set_plugin_state(plugin, Some(dawkey_core::PluginState::new(bytes)));
+        self.reload_plugin(plugin)
     }
 
     /// Looks for plugins on `search` from now on (keeping the cache), and
@@ -1710,6 +2020,17 @@ impl Studio {
                 .plugin_states
                 .get(&id)
                 .map(|s| s.bytes().len()),
+            properties: info
+                .as_ref()
+                .map(|i| i.properties.clone())
+                .unwrap_or_default(),
+            state: self
+                .session
+                .project()
+                .plugin_states
+                .get(&id)
+                .and_then(|s| dawkey_plugins::lv2_state_properties(s.bytes()))
+                .unwrap_or_default(),
             process_id: self.plugins.process_id(id),
             sandboxed: self.plugins.sandboxed(id),
             has_gui: self.plugins.gui(id).0,

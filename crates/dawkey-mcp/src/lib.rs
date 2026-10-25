@@ -12,32 +12,48 @@
 
 #![forbid(unsafe_code)]
 
+mod batch;
 pub mod http;
+mod state;
+mod times;
 mod tools;
 
 use std::fmt::Display;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use base64::Engine as _;
 use dawkey_app::{App, DragFrom, ImportRequest, Platform, WindowInfo};
-use dawkey_core::{AddClip, CommandSpec, CoreError, Handle, Project, Session};
+use dawkey_core::{AddClip, CommandSpec, CoreError, Handle, Project, Session, TrackId};
 use dawkey_studio::{LoadedProject, Studio};
 use dawkey_ui::{Modifiers, Point, Size};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+    ListResourcesResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams,
+    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents,
+    ResourceUpdatedNotificationParam, ServerCapabilities, ServerConfig, SubscribeRequestParams,
+    Tool, UnsubscribeRequestParams,
 };
-use rmcp::service::RequestContext;
+use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::times::SegmentSpec;
 use crate::tools::*;
 
 const INSTRUCTIONS: &str = "\
 Dawkey is a digital audio workstation. These tools edit and play the open
-project. Call get_state first: it returns the whole project, including the
-track, clip and source IDs that other tools take. Every tool call that changes
+project. Call get_state first: it returns the project, including the
+track, clip and source IDs that other tools take (`summary: true`, or
+`notes: false`, leaves the notes out of a big project, and `tracks` picks
+tracks; open_project and new_project return such a summary). Every result
+carries `revision` and `instance` (which changes when Dawkey restarts);
+get_changes lists what changed since a revision (from the window or another
+client too), and a client that subscribes to the `dawkey://project`
+resource is told when the project changes past what it last saw. batch
+applies several commands in one call and one undo step (later ones can use
+what earlier ones made: `$0.track`). Every tool call that changes
 the project is one undo step, so `undo` reverts exactly one call. Changes are
 not written to disk until save_project is called.
 
@@ -50,7 +66,10 @@ send to the next plugin that takes notes; on a track with a MIDI output
 device, what the effects at the start of the chain send goes to the device.
 get_plugin lists a slot's parameters (with their values as the plugin shows
 them); set_plugin_param (which also takes a value as text, e.g. `-6 dB`),
-set_automation, add_automation_point and write_automation change them.
+set_automation, add_automation_point and write_automation change them. An
+LV2 plugin's other settings (a soundfont path, a file, a choice: its
+`properties` and the keys in its saved `state`) are set with
+set_plugin_property, which reloads it with the change.
 Plugins keep what they save of themselves (state beyond parameters, and
 files LV2 plugins keep with it) in the project. A plugin running in its own
 process (`process_id` in get_plugin) that crashes stops alone: its audio
@@ -62,7 +81,9 @@ set_plugin_output sends a multi-out instrument's other outputs (`outputs`) to
 buses.
 
 Mixing: add_track with kind `bus` makes a bus, and set_track_output sends a
-track (or bus) to it instead of the master. The master is track 0 (`master`
+track (or bus) to it instead of the master; set_track_send adds an aux send
+to a bus at its own level (pre or post fader; automation target `send`),
+e.g. one reverb bus with a different amount from each track. The master is track 0 (`master`
 in get_state): it takes plugins, set_track_gain and automation like any bus.
 
 Clips: move_clip moves one, trim_clip moves its start or end edge (what it
@@ -82,9 +103,14 @@ midi_record_latency_ms, from the latency PipeWire reports for it);
 set_record_offset corrects the estimate.
 
 Audio: import_audio puts a file on the timeline. render_range renders any part
-of the project offline and reports levels and loudness, so you can check a mix
-without listening. export_audio writes the mix (the whole song by default) to
-a WAV or FLAC file. get_engine_status says whether this instance plays
+of the project offline and reports levels, loudness and band levels, so you
+can check a mix without listening: `tracks` hears only some tracks (as
+soloing would), `stems: true` renders each track on its own, and
+segment_length_s / segment_bars / segments analyze it over time.
+export_audio writes the mix (the whole song by default) to a WAV, FLAC,
+Ogg Vorbis (`quality`) or Opus (`bitrate_kbps`) file (with `tags`), or
+stems with `stems: true`, or a seamless loop with `loop: true` (the tail
+folded onto the start). get_engine_status says whether this instance plays
 through PipeWire or runs a virtual clock (advanced with advance_clock).
 
 MIDI: MIDI tracks (add_track with kind `midi`) play their clips through a
@@ -92,9 +118,15 @@ built-in synth (set_synth). add_midi_clip creates a clip with notes;
 add_midi_notes, edit_midi_notes, remove_midi_notes and quantize_midi_notes
 edit them, and set_midi_controls sets pitch bend, CCs, pressure, program
 changes and MIDI 2.0 per-note controllers (per-note pitch bend, volume,
-brightness, ...). import_midi reads a .mid file. Note times are in beats (quarter
-notes) from the clip's start; clip positions are in seconds. get_state lists
-notes in frames. set_tempo (with at_beats, and ramp for a gradual change)
+brightness, ...). import_midi reads a .mid file, onto new tracks or
+(`targets`) onto existing ones, keeping their mix and plugins. Note times are in beats (quarter
+notes) from the clip's start; clip positions and ranges are in seconds, or
+in beats from the project's start (`*_beats` instead of `*_s`, e.g.
+start_beats) or bars as the ruler numbers them (`*_bar`, from 1; end_bar 33
+is where 32 bars end; a clip length as length_beats). get_state lists
+notes in frames and in beats from their clip's start (start_beats,
+length_beats), and clips in frames and beats (start_beats, end_beats,
+start_bar). set_tempo (with at_beats, and ramp for a gradual change)
 and set_tempo_map change the tempo along the timeline; MIDI clips and notes
 keep their beat positions. set_time_signature (with at_bar) and
 set_time_signature_map change the meter from a bar on. set_track_midi_input
@@ -116,11 +148,33 @@ arrange/tempo shows the tempo and time signature lanes (tempo/<n> and
 meter/<n> points); track/<id>/takes shows a track's take lanes (take/<clip
 id>).";
 
-/// The MCP server. Cheap to clone; all clones talk to the same studio.
+/// Identifies this Dawkey process to clients, so they can tell when it was
+/// restarted: every result carries it.
+pub static INSTANCE_ID: LazyLock<String> = LazyLock::new(|| {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{}-{:x}", std::process::id(), nanos)
+});
+
+/// How often a connection checks for changes its client hasn't seen.
+const CHANGE_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The resource that is the open project (a summary, as get_state with
+/// `summary: true`). A client that subscribes to it is told
+/// (`notifications/resources/updated`) when the project changes past the
+/// revision it last saw in a result of its own.
+pub const PROJECT_URI: &str = "dawkey://project";
+
+/// The MCP server. Cheap to clone; all clones talk to the same studio. One
+/// is made per connection: `seen` is the revision the client last saw in a
+/// result, and `subscribed` whether it asked to be told of changes.
 #[derive(Debug, Clone)]
 pub struct DawkeyMcp {
     app: Handle<App>,
     tools: Arc<[Tool]>,
+    seen: Arc<AtomicU64>,
+    subscribed: Arc<AtomicBool>,
 }
 
 /// Bad arguments are reported to the caller as a tool error, not a protocol
@@ -149,6 +203,8 @@ impl DawkeyMcp {
         Self {
             app,
             tools: build_tools().into(),
+            seen: Arc::new(AtomicU64::new(u64::MAX)),
+            subscribed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -159,13 +215,71 @@ impl DawkeyMcp {
     /// Runs a tool. `Ok` holds the tool's JSON result; `Err` holds a message
     /// for the caller (bad arguments, failed command). Unknown tools are
     /// protocol errors.
-    async fn dispatch(&self, name: &str, args: Value) -> Result<Result<Value, String>, McpError> {
+    async fn dispatch(
+        &self,
+        name: &str,
+        mut args: Value,
+    ) -> Result<Result<Value, String>, McpError> {
         let studio = &self.app;
+        // Positions in beats or bars become seconds, through the tempo map
+        // as it is now.
+        let stems = self
+            .tools
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| times::position_stems(&Value::Object((*t.input_schema).clone())))
+            .unwrap_or_default();
+        if times::has_beats(&args, &stems) {
+            let maps = tool_try!(
+                run(studio, |s| Ok::<_, String>(times::Maps::of(
+                    s.session().project()
+                )))
+                .await
+            );
+            tool_try!(maps.resolve(&mut args, &stems));
+        }
         let result = match name {
             GET_STATE => {
-                let NoArgs {} = try_args!(parse(args));
-                run(studio, |s| {
-                    Ok::<_, CoreError>(to_json(&s.session().state()))
+                let GetState {
+                    notes,
+                    controls,
+                    automation,
+                    tracks,
+                    summary,
+                } = try_args!(parse(args));
+                let trim = state::Trim {
+                    notes: summary || !notes,
+                    controls: summary || !controls,
+                    automation: summary || !automation,
+                    tracks: tracks.map(|ids| ids.into_iter().map(|id| id.0).collect()),
+                };
+                run(studio, move |s| Ok::<_, CoreError>(state_json(s, trim))).await
+            }
+            BATCH => {
+                let batch::Batch { operations, label } = try_args!(parse(args));
+                let prepared = tool_try!(self.prepare_batch(operations));
+                let label = label.unwrap_or_else(|| "batch".to_owned());
+                run(studio, move |s| {
+                    let outcomes = s.execute_batch_with(label, |project, outcomes| {
+                        prepared
+                            .get(outcomes.len())
+                            .map(|op| op.command(project, outcomes))
+                            .transpose()
+                    })?;
+                    Ok::<_, CoreError>(json!({
+                        "outcomes": outcomes,
+                        "revision": revision(s),
+                        "instance": *INSTANCE_ID,
+                    }))
+                })
+                .await
+            }
+            GET_CHANGES => {
+                let GetChanges { since_revision } = try_args!(parse(args));
+                run(studio, move |s| {
+                    let mut result = to_json(&s.session().changes_since(since_revision));
+                    result["instance"] = json!(*INSTANCE_ID);
+                    Ok::<_, CoreError>(result)
                 })
                 .await
             }
@@ -173,7 +287,11 @@ impl DawkeyMcp {
                 let NoArgs {} = try_args!(parse(args));
                 run(studio, |s| {
                     let undone = s.undo()?;
-                    Ok::<_, CoreError>(json!({ "undone": undone, "revision": revision(s) }))
+                    Ok::<_, CoreError>(json!({
+                        "undone": undone,
+                        "revision": revision(s),
+                        "instance": *INSTANCE_ID,
+                    }))
                 })
                 .await
             }
@@ -181,7 +299,11 @@ impl DawkeyMcp {
                 let NoArgs {} = try_args!(parse(args));
                 run(studio, |s| {
                     let redone = s.redo()?;
-                    Ok::<_, CoreError>(json!({ "redone": redone, "revision": revision(s) }))
+                    Ok::<_, CoreError>(json!({
+                        "redone": redone,
+                        "revision": revision(s),
+                        "instance": *INSTANCE_ID,
+                    }))
                 })
                 .await
             }
@@ -195,7 +317,7 @@ impl DawkeyMcp {
                     let project = Project::new(name.unwrap_or_else(|| "Untitled".into()));
                     s.replace(LoadedProject::new(project))
                         .map_err(|e| e.to_string())?;
-                    Ok::<_, String>(to_json(&s.session().state()))
+                    Ok::<_, String>(state_json(s, state::Trim::summary()))
                 })
                 .await
             }
@@ -216,7 +338,7 @@ impl DawkeyMcp {
                 run(studio, move |s| {
                     refuse_if_dirty(s.session(), discard_changes)?;
                     s.replace(loaded).map_err(|e| e.to_string())?;
-                    Ok::<_, String>(to_json(&s.session().state()))
+                    Ok::<_, String>(state_json(s, state::Trim::summary()))
                 })
                 .await
             }
@@ -224,7 +346,11 @@ impl DawkeyMcp {
                 let SaveProject { path } = try_args!(parse(args));
                 run(studio, move |s| {
                     let saved = s.save(path.as_deref())?;
-                    Ok::<_, CoreError>(json!({ "path": saved, "revision": revision(s) }))
+                    Ok::<_, CoreError>(json!({
+                        "path": saved,
+                        "revision": revision(s),
+                        "instance": *INSTANCE_ID,
+                    }))
                 })
                 .await
             }
@@ -233,11 +359,46 @@ impl DawkeyMcp {
                 let ImportMidi {
                     path,
                     position_s,
+                    targets,
+                    replace,
                     use_file_tempo,
                 } = try_args!(parse(args));
                 let file = tool_try!(blocking(move || dawkey_media::read_midi_file(&path)).await);
+                let targets: Vec<dawkey_studio::MidiImportTarget> = tool_try!(
+                    targets
+                        .iter()
+                        .map(|t| {
+                            let file_track = match (t.file_track, &t.file_track_name) {
+                                (Some(index), None) => index,
+                                (None, Some(name)) => file
+                                    .tracks
+                                    .iter()
+                                    .position(|ft| &ft.name == name)
+                                    .ok_or_else(|| {
+                                        let names: Vec<&str> =
+                                            file.tracks.iter().map(|t| t.name.as_str()).collect();
+                                        format!(
+                                            "the file has no track named {name:?}; its tracks \
+                                             with notes are {names:?}"
+                                        )
+                                    })?,
+                                _ => {
+                                    return Err(
+                                        "give each target a file_track or a file_track_name"
+                                            .to_owned(),
+                                    );
+                                }
+                            };
+                            Ok(dawkey_studio::MidiImportTarget {
+                                file_track,
+                                track: t.track,
+                            })
+                        })
+                        .collect::<Result<_, String>>()
+                );
                 run(studio, move |s| {
-                    let import = s.import_midi(&file, position_s, use_file_tempo)?;
+                    let import =
+                        s.import_midi(&file, position_s, use_file_tempo, &targets, replace)?;
                     let mut result = to_json(&import);
                     result["revision"] = json!(revision(s));
                     Ok::<_, dawkey_studio::StudioError>(result)
@@ -246,24 +407,41 @@ impl DawkeyMcp {
             }
             PLAY => {
                 let NoArgs {} = try_args!(parse(args));
-                run(studio, |s| s.play().map(|()| to_json(&s.transport()))).await
+                let cycles = tool_try!(run(studio, |s| s.play().map(|()| s.engine_cycles())).await);
+                self.transport_after(cycles, |t| t.playing)
+                    .await
+                    .map(|t| to_json(&t))
             }
             STOP => {
                 let NoArgs {} = try_args!(parse(args));
-                run(studio, |s| {
-                    let was_recording = s.transport().recording;
-                    s.stop()?;
-                    let mut result = to_json(&s.transport());
-                    if was_recording {
-                        result["recorded"] = to_json(&s.engine_status().last_recording);
-                    }
-                    Ok::<_, dawkey_studio::StudioError>(result)
-                })
-                .await
+                let (was_recording, cycles) = tool_try!(
+                    run(studio, |s| {
+                        let was_recording = s.transport().recording;
+                        s.stop()?;
+                        Ok::<_, dawkey_studio::StudioError>((was_recording, s.engine_cycles()))
+                    })
+                    .await
+                );
+                let transport = tool_try!(self.transport_after(cycles, |t| !t.playing).await);
+                let mut result = to_json(&transport);
+                if was_recording {
+                    let recorded = tool_try!(
+                        run(studio, |s| Ok::<_, String>(
+                            s.engine_status().last_recording
+                        ))
+                        .await
+                    );
+                    result["recorded"] = to_json(&recorded);
+                }
+                Ok(result)
             }
             RECORD => {
                 let NoArgs {} = try_args!(parse(args));
-                run(studio, |s| s.record().map(|()| to_json(&s.transport()))).await
+                let cycles =
+                    tool_try!(run(studio, |s| s.record().map(|()| s.engine_cycles())).await);
+                self.transport_after(cycles, |t| t.recording)
+                    .await
+                    .map(|t| to_json(&t))
             }
             SET_RECORD_OFFSET => {
                 let SetRecordOffset { ms } = try_args!(parse(args));
@@ -278,14 +456,28 @@ impl DawkeyMcp {
             }
             LOCATE => {
                 let Locate { position_s } = try_args!(parse(args));
-                run(studio, move |s| {
-                    s.locate(position_s).map(|()| to_json(&s.transport()))
-                })
-                .await
+                let (cycles, frame) = tool_try!(
+                    run(studio, move |s| {
+                        s.locate(position_s)?;
+                        let frame = s.session().project().seconds_to_frames(position_s);
+                        Ok::<_, dawkey_studio::StudioError>((s.engine_cycles(), frame))
+                    })
+                    .await
+                );
+                // While playing the playhead moves on from there.
+                self.transport_after(cycles, move |t| t.position_frames >= frame)
+                    .await
+                    .map(|t| to_json(&t))
             }
             GET_ENGINE_STATUS => {
                 let NoArgs {} = try_args!(parse(args));
-                run(studio, |s| Ok::<_, CoreError>(to_json(&s.engine_status()))).await
+                run(studio, |s| {
+                    let mut status = to_json(&s.engine_status());
+                    status["instance"] = json!(*INSTANCE_ID);
+                    status["revision"] = json!(revision(s));
+                    Ok::<_, CoreError>(status)
+                })
+                .await
             }
             GET_METERS => {
                 let NoArgs {} = try_args!(parse(args));
@@ -453,11 +645,16 @@ impl DawkeyMcp {
                     query,
                     kind,
                     params,
+                    detail,
+                    first,
+                    count,
                 } = try_args!(parse(args));
+                let detail = detail || params;
+                let count = count.unwrap_or(100);
                 run(studio, move |s| {
                     let query = query.map(|q| q.to_lowercase());
                     let catalog = s.plugin_catalog();
-                    let plugins: Vec<Value> = catalog
+                    let matching: Vec<_> = catalog
                         .plugins
                         .iter()
                         .filter(|p| match kind {
@@ -473,18 +670,33 @@ impl DawkeyMcp {
                                     .any(|f| f.to_lowercase().contains(q))
                             })
                         })
+                        .collect();
+                    let total = matching.len();
+                    let plugins: Vec<Value> = matching
+                        .into_iter()
+                        .skip(first)
+                        .take(count)
                         .map(|p| {
+                            let kind = match (p.instrument, p.midi_output) {
+                                (true, false) => "instrument",
+                                (true, true) => "midi_effect",
+                                (false, _) => "effect",
+                            };
                             let mut v = json!({
                                 "id": p.id,
                                 "name": p.name,
                                 "vendor": p.vendor,
                                 "format": p.format,
-                                "instrument": p.instrument,
-                                "midi_output": p.midi_output,
-                                "audio_inputs": p.audio_inputs,
-                                "audio_outputs": p.audio_outputs,
-                                "param_count": p.params.len(),
+                                "kind": kind,
                             });
+                            if !detail {
+                                return v;
+                            }
+                            v["instrument"] = json!(p.instrument);
+                            v["midi_output"] = json!(p.midi_output);
+                            v["audio_inputs"] = json!(p.audio_inputs);
+                            v["audio_outputs"] = json!(p.audio_outputs);
+                            v["param_count"] = json!(p.params.len());
                             if p.sidechain {
                                 v["sidechain"] = json!(true);
                             }
@@ -497,10 +709,15 @@ impl DawkeyMcp {
                             v
                         })
                         .collect();
-                    Ok::<_, String>(json!({
+                    let mut result = json!({
                         "plugins": plugins,
+                        "total": total,
                         "scan_failures": catalog.failures.len(),
-                    }))
+                    });
+                    if first + count < total {
+                        result["next"] = json!(first + count);
+                    }
+                    Ok::<_, String>(result)
                 })
                 .await
             }
@@ -528,6 +745,30 @@ impl DawkeyMcp {
                 run(studio, move |s| {
                     s.show_plugin_gui(plugin, show)?;
                     Ok::<_, dawkey_studio::StudioError>(to_json(&s.plugin_details(plugin)))
+                })
+                .await
+            }
+            SET_PLUGIN_PROPERTY => {
+                let SetPluginProperty {
+                    plugin,
+                    key,
+                    value,
+                    kind,
+                } = try_args!(parse(args));
+                run(studio, move |s| {
+                    s.set_plugin_property(plugin, &key, kind.as_deref(), &value)?;
+                    s.plugin_details(plugin)
+                        .map(|d| {
+                            let mut result = to_json(&d);
+                            result["revision"] = json!(revision(s));
+                            result["instance"] = json!(*INSTANCE_ID);
+                            result
+                        })
+                        .ok_or_else(|| {
+                            dawkey_studio::StudioError::Invalid(format!(
+                                "plugin {plugin} does not exist"
+                            ))
+                        })
                 })
                 .await
             }
@@ -573,12 +814,88 @@ impl DawkeyMcp {
                     let outcome = s.execute(command)?;
                     let mut result = to_json(&outcome);
                     result["revision"] = revision(s).into();
+                    result["instance"] = json!(*INSTANCE_ID);
                     Ok::<_, CoreError>(result)
                 })
                 .await
             }
         };
         Ok(result)
+    }
+
+    /// Checks a batch's operations are commands, and finds their specs.
+    fn prepare_batch(
+        &self,
+        operations: Vec<batch::Operation>,
+    ) -> Result<Vec<batch::Prepared>, String> {
+        if operations.is_empty() {
+            return Err("a batch needs at least one operation".to_owned());
+        }
+        operations
+            .into_iter()
+            .enumerate()
+            .map(|(index, op)| {
+                let spec = CommandSpec::find(&op.tool).ok_or_else(|| {
+                    let known = self.tools.iter().any(|t| t.name == op.tool);
+                    if known {
+                        format!(
+                            "operation {index}: {} can't be in a batch; only commands that                              change the project can (add_track, add_plugin, set_track_gain,                              ...)",
+                            op.tool
+                        )
+                    } else {
+                        format!("operation {index}: unknown tool {}", op.tool)
+                    }
+                })?;
+                if !op.args.is_object() && !op.args.is_null() {
+                    return Err(format!(
+                        "operation {index} ({}): args must be an object",
+                        op.tool
+                    ));
+                }
+                let stems = self
+                    .tools
+                    .iter()
+                    .find(|t| t.name == op.tool)
+                    .map(|t| times::position_stems(&Value::Object((*t.input_schema).clone())))
+                    .unwrap_or_default();
+                Ok(batch::Prepared {
+                    spec,
+                    args: if op.args.is_null() {
+                        json!({})
+                    } else {
+                        op.args
+                    },
+                    stems,
+                })
+            })
+            .collect()
+    }
+
+    /// The transport state once the audio thread has applied a command sent
+    /// when the engine had run `cycles` cycles: when `done` says so, or the
+    /// engine has run two more cycles since (so the command was consumed),
+    /// or after a short wait (a stopped audio device). The virtual backend
+    /// applies commands at once, so this returns right away there.
+    async fn transport_after(
+        &self,
+        cycles: u64,
+        done: impl Fn(&dawkey_studio::TransportState) -> bool + Send + Sync + 'static,
+    ) -> Result<dawkey_studio::TransportState, String> {
+        let done = Arc::new(done);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            let done = done.clone();
+            let (transport, settled) = run(&self.app, move |s| {
+                let transport = s.transport();
+                let settled = done(&transport) || s.engine_cycles() >= cycles + 2;
+                Ok::<_, String>((transport, settled))
+            })
+            .await?;
+            if settled || tokio::time::Instant::now() >= deadline {
+                return Ok(transport);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 
     async fn import_audio(&self, args: ImportAudio) -> Result<Value, String> {
@@ -674,59 +991,172 @@ impl DawkeyMcp {
             start_s,
             end_s,
             output_path,
+            tracks,
+            stems,
+            stems_dir,
+            segment_length_s,
+            segment_bars,
+            segments,
         } = args;
-        let job = run(&self.app, move |s| s.render_job(start_s, end_s)).await?;
-        let (result, leftovers) = blocking(move || {
-            let rate = job.sample_rate();
-            let (audio, leftovers) = job.run();
-            let analysis = dawkey_media::analyze(&audio, rate);
-            let written = match output_path {
-                Some(path) => {
-                    let path = std::path::absolute(&path).unwrap_or(path);
-                    dawkey_media::write_wav(&path, &audio, rate).map(|()| Some(path))
-                }
-                None => Ok(None),
-            };
-            let result = written.map(|written| {
-                json!({
-                    "start_s": start_s,
-                    "end_s": end_s,
-                    "sample_rate": rate,
-                    "analysis": analysis,
-                    "output_path": written,
-                })
-            });
-            Ok::<_, String>((result, leftovers))
-        })
-        .await?;
-        // The render's plugin instances are unloaded on the studio's thread.
-        run(&self.app, move |s| {
-            s.finish_render(leftovers);
-            Ok::<_, String>(())
-        })
-        .await?;
-        result.map_err(|e| e.to_string())
-    }
-}
+        // Make the files' folders first, so a bad path fails before the
+        // render, not after it.
+        let output_path = output_path.map(|path| std::path::absolute(&path).unwrap_or(path));
+        if let Some(path) = &output_path {
+            dawkey_media::make_output_folder(path).map_err(|e| e.to_string())?;
+        }
+        let stems_dir = stems_dir.map(|dir| std::path::absolute(&dir).unwrap_or(dir));
+        if let Some(dir) = &stems_dir {
+            if !stems {
+                return Err("stems_dir needs stems: true".to_owned());
+            }
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let wanted = SegmentSpec {
+            length_s: segment_length_s,
+            bars: segment_bars,
+            ranges: segments.map(|r| r.iter().map(|r| (r.start_s, r.end_s)).collect()),
+        };
+        let plan = self
+            .plan_renders(start_s, end_s, tracks, stems, wanted)
+            .await?;
 
-impl DawkeyMcp {
+        let mut rendered = Vec::new();
+        for (solo, track) in &plan.renders {
+            let solo = solo.clone();
+            let job = run(&self.app, move |s| {
+                s.render_job_solo(start_s, end_s, solo.as_deref())
+            })
+            .await?;
+            let path = match track {
+                Some((id, name)) => stems_dir
+                    .as_ref()
+                    .map(|dir| dir.join(format!("{id}-{}.wav", file_safe(name)))),
+                None => output_path.clone(),
+            };
+            let segments = plan.segments.clone();
+            let (result, leftovers) = blocking(move || {
+                let rate = job.sample_rate();
+                let (audio, leftovers) = job.run();
+                let analysis = dawkey_media::analyze(&audio, rate);
+                let frames: Vec<(usize, usize)> = segments
+                    .iter()
+                    .map(|&(from, to)| {
+                        let at =
+                            |s: f64| ((s - start_s) * f64::from(rate)).round().max(0.0) as usize;
+                        (at(from), at(to))
+                    })
+                    .collect();
+                let per_segment = dawkey_media::analyze_segments(&audio, rate, &frames);
+                let written = match path {
+                    Some(path) => dawkey_media::write_wav(&path, &audio, rate).map(|()| Some(path)),
+                    None => Ok(None),
+                };
+                let result = written.map(|written| {
+                    let mut result = json!({ "analysis": analysis });
+                    if let Some(path) = written {
+                        result["output_path"] = json!(path);
+                    }
+                    if !segments.is_empty() {
+                        result["segments"] = segments_json(&segments, per_segment);
+                    }
+                    result
+                });
+                Ok::<_, String>((result, leftovers))
+            })
+            .await?;
+            // The render's plugin instances are unloaded on the studio's
+            // thread.
+            run(&self.app, move |s| {
+                s.finish_render(leftovers);
+                Ok::<_, String>(())
+            })
+            .await?;
+            let mut result = result.map_err(|e| e.to_string())?;
+            if let Some((id, name)) = track {
+                result["track"] = json!(id);
+                result["name"] = json!(name);
+            }
+            rendered.push(result);
+        }
+        let mut result = json!({
+            "start_s": start_s,
+            "end_s": end_s,
+            "sample_rate": plan.sample_rate,
+        });
+        if let Some(tracks) = &plan.tracks {
+            result["tracks"] = json!(tracks);
+        }
+        if stems {
+            result["stems"] = Value::Array(rendered);
+        } else if let Some(Value::Object(fields)) = rendered.pop() {
+            for (key, value) in fields {
+                result[key] = value;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Works out what a render or export does: the segments to analyze
+    /// (absolute seconds), and the renders to run (what to solo in each,
+    /// and the stem's track).
+    async fn plan_renders(
+        &self,
+        start_s: f64,
+        end_s: f64,
+        tracks: Option<Vec<TrackId>>,
+        stems: bool,
+        wanted: SegmentSpec,
+    ) -> Result<RenderPlan, String> {
+        run(&self.app, move |s| {
+            let project = s.session().project();
+            let segments = times::Maps::of(project).segments(start_s, end_s, &wanted)?;
+            let renders = if stems {
+                s.stem_tracks(tracks.as_deref())
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|(id, name)| (Some(vec![id]), Some((id, name))))
+                    .collect()
+            } else {
+                vec![(tracks.clone(), None)]
+            };
+            Ok::<_, String>(RenderPlan {
+                segments,
+                renders,
+                tracks,
+                sample_rate: project.sample_rate,
+            })
+        })
+        .await
+    }
+
     async fn export_audio(&self, args: ExportAudio) -> Result<Value, String> {
         let ExportAudio {
             path,
             format,
             bit_depth,
+            quality,
+            bitrate_kbps,
+            tags,
             sample_rate,
             start_s,
             end_s,
             tail_s,
+            wrap,
+            tracks,
+            stems,
+            segment_length_s,
+            segment_bars,
+            segments,
         } = args;
         let path = std::path::absolute(&path).unwrap_or(path);
         let file = match format {
             Some(ExportFormat::Wav) => dawkey_media::FileFormat::Wav,
             Some(ExportFormat::Flac) => dawkey_media::FileFormat::Flac,
+            Some(ExportFormat::Ogg) => dawkey_media::FileFormat::Ogg,
+            Some(ExportFormat::Opus) => dawkey_media::FileFormat::Opus,
             None => dawkey_media::FileFormat::from_path(&path).ok_or_else(|| {
                 format!(
-                    "{} doesn't end in .wav or .flac; give a format",
+                    "{} doesn't end in .wav, .flac, .ogg or .opus; give a format",
                     path.display()
                 )
             })?,
@@ -742,7 +1172,12 @@ impl DawkeyMcp {
             return Err(format!("tail_s is from 0 to 60 seconds, not {tail_s}"));
         }
         let start_s = start_s.unwrap_or(0.0);
-        let (job, spec, end_s) = run(&self.app, move |s| {
+        // Make the file's folder first, so a bad path fails before the
+        // render, not after it.
+        dawkey_media::make_output_folder(&path).map_err(|e| e.to_string())?;
+        // A loop is the range without the tail; otherwise the tail is part
+        // of the file.
+        let (spec, range_end_s) = run(&self.app, move |s| {
             let project = s.session().project();
             let end_s = match end_s {
                 Some(end_s) => end_s,
@@ -754,49 +1189,244 @@ impl DawkeyMcp {
                     );
                 }
                 None => project.frames_to_seconds(project.end()),
-            } + tail_s;
+            };
+            let tags = match tags {
+                Some(tags) => tags.into_iter().collect(),
+                None => vec![("TITLE".to_owned(), project.name.clone())],
+            };
             let spec = dawkey_media::ExportSpec {
-                file,
-                sample,
-                sample_rate: sample_rate.unwrap_or(project.sample_rate),
+                quality: quality.unwrap_or(dawkey_media::DEFAULT_VORBIS_QUALITY),
+                bitrate_kbps: bitrate_kbps.unwrap_or(dawkey_media::DEFAULT_OPUS_KBPS),
+                tags,
+                ..dawkey_media::ExportSpec::new(
+                    file,
+                    sample,
+                    sample_rate.unwrap_or(project.sample_rate),
+                )
             };
             spec.check()?;
-            let job = s.export_job(start_s, end_s).map_err(|e| e.to_string())?;
-            Ok::<_, String>((job, spec, end_s))
+            Ok::<_, String>((spec, end_s))
         })
         .await?;
-        let (result, leftovers) = blocking(move || {
-            let progress = dawkey_media::ExportProgress::default();
-            let (result, leftovers) = job.run(&spec, &path, &progress);
-            let result = result.map(|analysis| {
-                json!({
-                    "path": path,
-                    "format": spec.file,
-                    "sample_format": spec.sample,
-                    "sample_rate": spec.sample_rate,
-                    "start_s": start_s,
-                    "end_s": end_s,
-                    "analysis": analysis,
+        let end_s = if wrap {
+            range_end_s
+        } else {
+            range_end_s + tail_s
+        };
+        let wanted = SegmentSpec {
+            length_s: segment_length_s,
+            bars: segment_bars,
+            ranges: segments.map(|r| r.iter().map(|r| (r.start_s, r.end_s)).collect()),
+        };
+        let plan = self
+            .plan_renders(start_s, end_s, tracks, stems, wanted)
+            .await?;
+
+        let mut exported = Vec::new();
+        for (solo, track) in &plan.renders {
+            let target = match track {
+                Some((id, name)) => stem_path(&path, *id, name),
+                None => path.clone(),
+            };
+            let segments: Vec<(f64, f64)> = plan
+                .segments
+                .iter()
+                .map(|&(from, to)| (from - start_s, to - start_s))
+                .collect();
+            let absolute = plan.segments.clone();
+            let solo = solo.clone();
+            let spec = spec.clone();
+            let (result, leftovers) = if wrap {
+                // The range and its tail in memory, the tail folded onto
+                // the start.
+                let job = run(&self.app, move |s| {
+                    s.render_job_solo(start_s, end_s + tail_s, solo.as_deref())
                 })
-            });
-            Ok::<_, String>((result, leftovers))
+                .await?;
+                blocking(move || {
+                    let rate = job.sample_rate();
+                    let (mut audio, leftovers) = job.run();
+                    let length = ((end_s - start_s) * f64::from(rate)).round() as usize;
+                    let seam = wrap_tail(&mut audio, length);
+                    let mut source = dawkey_media::MemorySource::new(audio);
+                    let progress = dawkey_media::ExportProgress::default();
+                    let result = dawkey_media::export_segmented(
+                        &mut source,
+                        rate,
+                        &spec,
+                        &target,
+                        &progress,
+                        &segments,
+                    )
+                    .map(|measured| {
+                        let mut result = export_json(&target, &spec, measured, &absolute);
+                        result["loop"] = json!(true);
+                        result["seam"] = seam;
+                        result
+                    });
+                    Ok::<_, String>((result, leftovers))
+                })
+                .await?
+            } else {
+                let job = run(&self.app, move |s| {
+                    s.export_job_solo(start_s, end_s, solo.as_deref())
+                })
+                .await?;
+                blocking(move || {
+                    let progress = dawkey_media::ExportProgress::default();
+                    let (result, leftovers) =
+                        job.run_segmented(&spec, &target, &progress, &segments);
+                    let result =
+                        result.map(|measured| export_json(&target, &spec, measured, &absolute));
+                    Ok::<_, String>((result, leftovers))
+                })
+                .await?
+            };
+            // The render's plugin instances are unloaded on the studio's
+            // thread.
+            run(&self.app, move |s| {
+                s.finish_render(leftovers);
+                Ok::<_, String>(())
+            })
+            .await?;
+            let mut result = result.map_err(|e| e.to_string())?;
+            if let Some((id, name)) = track {
+                result["track"] = json!(id);
+                result["name"] = json!(name);
+            }
+            exported.push(result);
+        }
+        let mut result = json!({ "start_s": start_s, "end_s": end_s, "tail_s": tail_s });
+        if let Some(tracks) = &plan.tracks {
+            result["tracks"] = json!(tracks);
+        }
+        if stems {
+            result["stems"] = Value::Array(exported);
+        } else if let Some(Value::Object(fields)) = exported.pop() {
+            for (key, value) in fields {
+                result[key] = value;
+            }
+        }
+        Ok(result)
+    }
+}
+
+/// One render of a plan: the tracks to solo (none: everything), and for a
+/// stem, its track and name.
+type PlannedRender = (Option<Vec<TrackId>>, Option<(TrackId, String)>);
+
+/// What a render or export is to do beyond the mix.
+struct RenderPlan {
+    /// Ranges to analyze separately, in absolute seconds.
+    segments: Vec<(f64, f64)>,
+    renders: Vec<PlannedRender>,
+    /// The tracks asked for, to echo back.
+    tracks: Option<Vec<TrackId>>,
+    sample_rate: u32,
+}
+
+/// What an export wrote, as reported.
+fn export_json(
+    path: &std::path::Path,
+    spec: &dawkey_media::ExportSpec,
+    measured: dawkey_media::ExportAnalysis,
+    segments: &[(f64, f64)],
+) -> Value {
+    let mut result = json!({
+        "path": path,
+        "format": spec.file,
+        "sample_format": spec.sample,
+        "sample_rate": spec.sample_rate,
+        "analysis": measured.analysis,
+    });
+    if !segments.is_empty() {
+        result["segments"] = segments_json(segments, measured.segments);
+    }
+    result
+}
+
+/// Folds what `audio` has past `length` frames (the tail) onto its start
+/// and cuts it to `length`, so it loops seamlessly. Returns the seam: the
+/// jump from the last sample to the first, per channel, as a linear
+/// difference and in dBFS.
+fn wrap_tail(audio: &mut [Vec<f32>], length: usize) -> Value {
+    let mut jump = Vec::new();
+    for channel in audio.iter_mut() {
+        let length = length.min(channel.len());
+        let tail: Vec<f32> = channel[length..].to_vec();
+        channel.truncate(length);
+        for (sample, extra) in channel.iter_mut().zip(&tail) {
+            *sample += extra;
+        }
+        let (first, last) = (
+            channel.first().copied().unwrap_or(0.0),
+            channel.last().copied().unwrap_or(0.0),
+        );
+        jump.push(f64::from((first - last).abs()));
+    }
+    json!({
+        "jump": jump,
+        "jump_dbfs": jump.iter().map(|&j| dawkey_media::gain_to_db(j)).collect::<Vec<_>>(),
+    })
+}
+
+/// Segments and their analyses, as reported.
+fn segments_json(segments: &[(f64, f64)], analyses: Vec<dawkey_media::Analysis>) -> Value {
+    Value::Array(
+        segments
+            .iter()
+            .zip(analyses)
+            .map(|(&(start_s, end_s), analysis)| {
+                json!({ "start_s": start_s, "end_s": end_s, "analysis": analysis })
+            })
+            .collect(),
+    )
+}
+
+/// `song.wav` → `song-3-Bass.wav` for track 3, "Bass".
+fn stem_path(path: &std::path::Path, track: TrackId, name: &str) -> std::path::PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    path.with_file_name(format!("{stem}-{track}-{}{extension}", file_safe(name)))
+}
+
+/// A track name as part of a file name.
+fn file_safe(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || "-_. ".contains(c) {
+                c
+            } else {
+                '_'
+            }
         })
-        .await?;
-        // The render's plugin instances are unloaded on the studio's thread.
-        run(&self.app, move |s| {
-            s.finish_render(leftovers);
-            Ok::<_, String>(())
-        })
-        .await?;
-        result.map_err(|e| e.to_string())
+        .collect();
+    let safe = safe.trim().to_owned();
+    if safe.is_empty() {
+        "track".to_owned()
+    } else {
+        safe
     }
 }
 
 impl ServerHandler for DawkeyMcp {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("dawkey", env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_resources_subscribe()
+                .build(),
+        )
+        .with_server_info(Implementation::new("dawkey", env!("CARGO_PKG_VERSION")))
+        .with_instructions(INSTRUCTIONS)
     }
 
     async fn list_tools(
@@ -818,10 +1448,111 @@ impl ServerHandler for DawkeyMcp {
             return Ok(self.screenshot(args).await.into());
         }
         let result = match self.dispatch(&request.name, args).await? {
-            Ok(value) => CallToolResult::structured(value),
+            Ok(value) => {
+                if let Some(revision) = value["revision"].as_u64() {
+                    self.seen.store(revision, Ordering::Relaxed);
+                }
+                CallToolResult::structured(value)
+            }
             Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
         };
         Ok(result.into())
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let mut project = Resource::new(PROJECT_URI, "project")
+            .with_title("The open project")
+            .with_description(
+                "The open project as get_state reports it with `summary: true`. Subscribe to \
+                 it to be told when the project changes (from the window or another client): \
+                 then get_changes says what changed since the revision you last saw.",
+            );
+        project.mime_type = Some("application/json".to_owned());
+        Ok(ListResourcesResult::with_all_items(vec![project]))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
+        check_uri(&request.uri)?;
+        let state = run(&self.app, |s| {
+            Ok::<_, String>(state_json(s, state::Trim::summary()))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e, None))?;
+        let contents = ResourceContents::text(state.to_string(), PROJECT_URI);
+        Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+            vec![contents],
+        )))
+    }
+
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        check_uri(&request.uri)?;
+        self.subscribed.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        check_uri(&request.uri)?;
+        self.subscribed.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Once a client is connected, a task watches the project's revision
+    /// for it: when it moves past the one the client last saw in a result,
+    /// and the client subscribed to the project resource, it's told.
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        let app = self.app.clone();
+        let (seen, subscribed) = (self.seen.clone(), self.subscribed.clone());
+        let peer = context.peer;
+        tokio::spawn(async move {
+            while !peer.is_transport_closed() {
+                tokio::time::sleep(CHANGE_POLL).await;
+                if !subscribed.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let Ok(revision) = run(&app, |s| Ok::<_, String>(revision(s))).await else {
+                    return;
+                };
+                let last = seen.load(Ordering::Relaxed);
+                // Until the client has seen a revision, there's nothing to
+                // compare with.
+                if last == u64::MAX || revision == last {
+                    continue;
+                }
+                seen.store(revision, Ordering::Relaxed);
+                let notice = ResourceUpdatedNotificationParam::new(PROJECT_URI);
+                if peer.notify_resource_updated(notice).await.is_err() {
+                    return;
+                }
+            }
+        });
+    }
+}
+
+/// The only resource is the project.
+fn check_uri(uri: &str) -> Result<(), McpError> {
+    if uri == PROJECT_URI {
+        Ok(())
+    } else {
+        Err(McpError::resource_not_found(
+            format!("no resource {uri}; the project is {PROJECT_URI}"),
+            None,
+        ))
     }
 }
 
@@ -954,6 +1685,16 @@ fn parse_key_combo(combo: &str) -> Result<(String, Modifiers), String> {
         }
     }
     Ok((key, modifiers))
+}
+
+/// The session state as get_state returns it: with beats added, and with
+/// what `trim` says left out.
+fn state_json(studio: &Studio, trim: state::Trim) -> Value {
+    let mut state = to_json(&studio.session().state());
+    times::with_beats(studio.session().project(), &mut state);
+    trim.apply(&mut state);
+    state["instance"] = json!(*INSTANCE_ID);
+    state
 }
 
 fn revision(studio: &Studio) -> u64 {

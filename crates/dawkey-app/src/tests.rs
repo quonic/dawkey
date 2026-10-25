@@ -9,7 +9,7 @@ use dawkey_media::{AudioData, DecodedFile};
 use dawkey_studio::{AudioBackend, LoadedProject, Studio};
 use dawkey_ui::{ChromeAction, Modifiers, MouseButton, Point, Role};
 
-use crate::state::{FADER_H, ROW_H};
+use crate::state::{FADER_H, ROW_H, SEND_W};
 use crate::view::format_time;
 use crate::{App, DragFrom, Page, PendingAction, Platform, PlatformRequest, WindowInfo};
 
@@ -2540,6 +2540,31 @@ fn exporting_the_mix() {
     click(&mut app, "export/bits").unwrap();
     // FLAC has no float samples: 24 goes round to 16.
     assert_eq!(app.view_state().export.sample, SampleFormat::Int16);
+    // The lossy formats: the samples row is their quality.
+    click(&mut app, "export/format").unwrap();
+    assert_eq!(
+        value(&mut app, "export/format").as_deref(),
+        Some("Ogg Vorbis")
+    );
+    assert_eq!(value(&mut app, "export/bits").as_deref(), Some("q 5"));
+    click(&mut app, "export/bits").unwrap();
+    assert_eq!(app.view_state().export.quality, 6.0);
+    click(&mut app, "export/format").unwrap();
+    assert_eq!(value(&mut app, "export/format").as_deref(), Some("Opus"));
+    assert_eq!(
+        value(&mut app, "export/bits").as_deref(),
+        Some("128 kbit/s")
+    );
+    click(&mut app, "export/bits").unwrap();
+    assert_eq!(app.view_state().export.bitrate_kbps, 160);
+    assert_eq!(
+        value(&mut app, "export/rate").as_deref(),
+        Some("48 kHz (Opus)")
+    );
+    // Back round to WAV, then FLAC as before.
+    click(&mut app, "export/format").unwrap();
+    click(&mut app, "export/format").unwrap();
+    assert_eq!(value(&mut app, "export/format").as_deref(), Some("FLAC"));
     click(&mut app, "export/rate").unwrap();
     assert_eq!(app.view_state().export.sample_rate, Some(44_100));
     // No loop range: the range stays the song.
@@ -2918,4 +2943,63 @@ fn the_window_keeps_drawing_while_stopped_when_something_moves() {
     assert!(app.animating(), "the project changed");
     app.rebuild();
     assert!(!app.animating());
+}
+
+#[test]
+fn sends_in_the_mixer() {
+    let mut app = app();
+    let track = add_track(&mut app, "Keys");
+    // No bus: nothing to send to, so no button.
+    click(&mut app, "view/mixer").unwrap();
+    assert!(
+        app.access_tree()
+            .find(&format!("track/{track}/add_send"))
+            .is_none()
+    );
+    let bus = app
+        .studio
+        .execute(
+            AddTrack {
+                kind: TrackKind::Bus,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+    click(&mut app, &format!("track/{track}/add_send")).unwrap();
+    let sends = &app.studio.session().project().tracks[0].sends;
+    assert_eq!(sends.len(), 1);
+    assert_eq!((sends[0].bus.0, sends[0].gain_db), (bus, 0.0));
+    // One bus: nothing more to add; the bus can't send to itself.
+    let tree = app.access_tree();
+    assert!(tree.find(&format!("track/{track}/add_send")).is_none());
+    assert!(tree.find(&format!("track/{bus}/add_send")).is_none());
+    let row = format!("track/{track}/send/{bus}");
+    assert_eq!(tree.find(&row).unwrap().value.as_deref(), Some("+0.0 dB"));
+    // Dragging left turns it down, as one undo step.
+    app.drag(
+        DragFrom::Widget(row.clone()),
+        Point::new(-SEND_W * 0.25, 0.0),
+        8,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert!(app.studio.session().project().tracks[0].sends[0].gain_db < -10.0);
+    app.studio.undo().unwrap();
+    assert_eq!(
+        app.studio.session().project().tracks[0].sends[0].gain_db,
+        0.0
+    );
+    app.studio.redo().unwrap();
+    // Ctrl-click removes it, and the button is back.
+    app.click(&row, MouseButton::Left, CTRL).unwrap();
+    assert!(app.studio.session().project().tracks[0].sends.is_empty());
+    assert!(
+        app.access_tree()
+            .find(&format!("track/{track}/add_send"))
+            .is_some()
+    );
 }

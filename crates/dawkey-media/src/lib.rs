@@ -14,9 +14,14 @@ mod peaks;
 
 use std::path::{Path, PathBuf};
 
-pub use analysis::{Analysis, Analyzer, analyze, gain_to_db};
+pub use analysis::{
+    Analysis, Analyzer, Bands, SegmentAnalyzers, analyze, analyze_segments, gain_to_db,
+};
 pub use decode::{DecodedFile, decode_file};
-pub use export::{BlockSource, ExportProgress, ExportSpec, FileFormat, SampleFormat, export};
+pub use export::{
+    BlockSource, DEFAULT_OPUS_KBPS, DEFAULT_VORBIS_QUALITY, ExportAnalysis, ExportProgress,
+    ExportSpec, FileFormat, MemorySource, OPUS_RATE, SampleFormat, export, export_segmented,
+};
 pub use midi_file::{
     MidiFile, MidiFileControl, MidiFileNote, MidiFileTrack, parse_midi_file, read_midi_file,
 };
@@ -83,12 +88,28 @@ impl AudioData {
     }
 }
 
-/// Writes planar audio as a 32-bit float WAV file.
+/// Makes the folder `path` goes in (and its parents), so a file can be
+/// written there.
+pub fn make_output_folder(path: &Path) -> Result<(), MediaError> {
+    match path.parent() {
+        Some(folder) if !folder.as_os_str().is_empty() => {
+            std::fs::create_dir_all(folder).map_err(|source| MediaError::Io {
+                path: folder.to_owned(),
+                source,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Writes planar audio as a 32-bit float WAV file, making its folder if
+/// needed.
 pub fn write_wav(path: &Path, channels: &[Vec<f32>], sample_rate: u32) -> Result<(), MediaError> {
     let wav_err = |source| MediaError::Wav {
         path: path.to_owned(),
         source,
     };
+    make_output_folder(path)?;
     let spec = hound::WavSpec {
         channels: channels.len() as u16,
         sample_rate,

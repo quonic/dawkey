@@ -44,13 +44,61 @@ pub(crate) const RESCAN_PLUGINS: &str = "rescan_plugins";
 pub(crate) const RELOAD_PLUGIN: &str = "reload_plugin";
 pub(crate) const SHOW_PLUGIN_GUI: &str = "show_plugin_gui";
 pub(crate) const GET_PLUGIN: &str = "get_plugin";
+pub(crate) const SET_PLUGIN_PROPERTY: &str = "set_plugin_property";
+pub(crate) const GET_CHANGES: &str = "get_changes";
+pub(crate) const BATCH: &str = "batch";
 
 /// Takes no arguments.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NoArgs {}
 
-/// Start a new, empty project, replacing the open one.
+/// Get the open project (tracks, clips, audio pool) and session status
+/// (path, unsaved changes, undo/redo). The whole project by default, which
+/// can be large: `notes: false`, `controls: false` and `automation: false`
+/// (or `summary: true` for all three) replace notes, controller points and
+/// automation points with their counts, and `tracks` keeps only some
+/// tracks. `summary.left_out` says what was left out.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GetState {
+    /// Include each MIDI clip's notes. Default true; false gives
+    /// `note_count` and `pitch_range` instead.
+    #[serde(default = "yes")]
+    pub(crate) notes: bool,
+    /// Include each MIDI clip's controller points. Default true; false
+    /// gives `control_count` instead.
+    #[serde(default = "yes")]
+    pub(crate) controls: bool,
+    /// Include automation lanes' points. Default true; false gives each
+    /// lane's `point_count` instead.
+    #[serde(default = "yes")]
+    pub(crate) automation: bool,
+    /// Only these tracks (the master always comes along).
+    #[serde(default)]
+    pub(crate) tracks: Option<Vec<TrackId>>,
+    /// A compact state: like `notes`, `controls` and `automation` all false.
+    #[serde(default)]
+    pub(crate) summary: bool,
+}
+
+/// What changed the project since a revision you know (every result that
+/// changes the project carries `revision`): each undo step, undo, redo and
+/// source added since, oldest first, with its name and the tracks, clips,
+/// notes and plugin slots it touched, and `also` for the tempo, meter, loop,
+/// punch, name, plugin chains and automation. Use it to catch up with what
+/// the window or another client did. Every result also carries `instance`,
+/// which changes when Dawkey restarts; a new instance or another project
+/// starts the revisions over (`complete: false`; call get_state then).
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GetChanges {
+    /// The last revision you saw.
+    pub(crate) since_revision: u64,
+}
+
+/// Start a new, empty project, replacing the open one. Returns a summary of
+/// the project, as get_state with `summary: true`.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NewProject {
@@ -62,7 +110,10 @@ pub(crate) struct NewProject {
     pub(crate) discard_changes: bool,
 }
 
-/// Open a project bundle (a `.dawkey` directory), replacing the open project.
+/// Open a project bundle (a `.dawkey` directory), replacing the open
+/// project. Returns a summary of the project, as get_state with `summary:
+/// true` (counts instead of notes, controller and automation points; call
+/// get_state for them).
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OpenProject {
@@ -104,8 +155,11 @@ pub(crate) struct ImportAudio {
 
 /// Import a Standard MIDI File (.mid): each of its tracks (split by MIDI
 /// channel) becomes a new MIDI track with one clip, with its notes and
-/// controllers (pitch bend, CCs, channel pressure). One undo step. Returns
-/// the new track and clip IDs.
+/// controllers (pitch bend, CCs, channel pressure), unless `targets` maps
+/// it onto an existing MIDI track, which keeps its plugins, mix and
+/// routing and gets the clip in place of its clips there (or beside them
+/// with `replace: false`). One undo step. Returns the track and clip IDs
+/// (`tracks`, `clips`), and the clips replaced (`removed_clips`).
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ImportMidi {
@@ -114,6 +168,14 @@ pub(crate) struct ImportMidi {
     /// Timeline position of the file's start, in seconds. Defaults to 0.
     #[serde(default)]
     pub(crate) position_s: f64,
+    /// File tracks to put on existing MIDI tracks. The rest become new
+    /// tracks.
+    #[serde(default)]
+    pub(crate) targets: Vec<ImportMidiTarget>,
+    /// Whether a mapped track's clips that the imported clip overlaps are
+    /// removed (default), or kept beside it.
+    #[serde(default = "yes")]
+    pub(crate) replace: bool,
     /// Take the file's tempo map and time signature, so it plays as
     /// written (MIDI clips already in the project keep their beat
     /// positions). Defaults to true if the project has no clips yet;
@@ -121,6 +183,22 @@ pub(crate) struct ImportMidi {
     /// tempo.
     #[serde(default)]
     pub(crate) use_file_tempo: Option<bool>,
+}
+
+/// A MIDI file track and the project track it goes on.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ImportMidiTarget {
+    /// Index of the track in the file, counting only tracks with notes
+    /// (one per file track and channel), from 0; as a plain import lists
+    /// them in `tracks`.
+    #[serde(default)]
+    pub(crate) file_track: Option<usize>,
+    /// Or the track's name in the file (the first with that name).
+    #[serde(default)]
+    pub(crate) file_track_name: Option<String>,
+    /// The existing MIDI track to put its clip on.
+    pub(crate) track: TrackId,
 }
 
 /// Plugin kinds for list_plugins.
@@ -136,7 +214,10 @@ pub(crate) enum PluginKind {
 }
 
 /// List the installed CLAP, LV2 and VST3 plugins, for add_plugin. The list is
-/// cached; rescan_plugins refreshes it after installing plugins.
+/// cached; rescan_plugins refreshes it after installing plugins. Each entry
+/// is compact (ID, name, vendor, format, kind) unless `detail` or `params`
+/// is set; `total` counts the matches, and `first`/`count` page through
+/// them (`next` is the `first` for the next page, when there is one).
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListPlugins {
@@ -145,15 +226,29 @@ pub(crate) struct ListPlugins {
     pub(crate) query: Option<String>,
     #[serde(default)]
     pub(crate) kind: Option<PluginKind>,
-    /// Include each plugin's parameters (IDs, names, ranges).
+    /// Include each plugin's parameters (IDs, names, ranges). Implies
+    /// `detail`.
     #[serde(default)]
     pub(crate) params: bool,
+    /// Include each plugin's ports, sidechain, outputs and parameter count.
+    #[serde(default)]
+    pub(crate) detail: bool,
+    /// Index of the first match to list. Defaults to 0.
+    #[serde(default)]
+    pub(crate) first: usize,
+    /// How many matches to list. Defaults to 100.
+    #[serde(default)]
+    pub(crate) count: Option<usize>,
 }
 
 /// Get a plugin slot on a track: which plugin, whether it's running, and
 /// its parameters (IDs, names, ranges, current values, whether automated).
 /// Some plugins have thousands of parameters: `param_count` says how many,
-/// and `first`/`count` page through them.
+/// and `first`/`count` page through them. For LV2 plugins, `properties`
+/// lists what the plugin declares besides its parameters (a soundfont
+/// path, a file, a string: `patch:writable`/`patch:readable`), and `state`
+/// the keys in its saved state with their values; set_plugin_property sets
+/// either.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct GetPlugin {
@@ -165,6 +260,31 @@ pub(crate) struct GetPlugin {
     /// How many parameters to list. Defaults to 200.
     #[serde(default)]
     pub(crate) count: Option<usize>,
+}
+
+/// Set a property of an LV2 plugin that isn't a parameter: one of the
+/// `properties` get_plugin lists, or any key in its saved `state` (e.g. a
+/// soundfont path, `urn:calf:soundfont`, for Calf Fluidsynth). The plugin's
+/// saved state is rewritten with the value and the plugin is loaded again
+/// from it, so it starts over with the new value (its other state stays).
+/// Saved with the project; not an undo step (plugin state isn't). Only LV2
+/// plugins have properties a host can see.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetPluginProperty {
+    /// The slot's ID.
+    pub(crate) plugin: dawkey_core::PluginId,
+    /// The property's URI (its key in the state).
+    pub(crate) key: String,
+    /// The value: text (a path or string), a number, or true/false. `null`
+    /// removes the key from the state.
+    pub(crate) value: Value,
+    /// The value's type: an `atom:` name (`Path`, `String`, `URI`, `Int`,
+    /// `Long`, `Float`, `Double`, `Bool`) or a type URI. Defaults to the
+    /// type the key has in the state, else `Path` for text starting with
+    /// `/`, `String` for other text, `Int` or `Float` for numbers, `Bool`.
+    #[serde(default)]
+    pub(crate) kind: Option<String>,
 }
 
 /// Load a plugin slot's plugin again, from its saved state: one that
@@ -382,7 +502,14 @@ pub(crate) struct SetRecordOffset {
 
 /// Render part of the project offline (independent of the transport) and
 /// analyze it: peak and RMS per channel in dBFS, integrated loudness (LUFS),
-/// and a hash for comparing renders. Optionally write it to a WAV file.
+/// levels in three bands (`bands`, a rough brightness), and a hash for
+/// comparing renders. Optionally write it to a WAV file. `tracks` renders
+/// only those tracks (as soloing them would: through their buses and the
+/// master); `stems: true` renders each track separately (one render per
+/// track, `stems` in the result, each with its analysis, and a file each in
+/// `stems_dir`). `segment_length_s` (or `_beats`), `segment_bars` or
+/// `segments` add an analysis per segment, to see how levels and loudness
+/// change over time.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RenderRange {
@@ -394,24 +521,75 @@ pub(crate) struct RenderRange {
     /// stereo WAV file.
     #[serde(default)]
     pub(crate) output_path: Option<PathBuf>,
+    /// Render only these tracks (and the buses and master they go through),
+    /// as if they were soloed. With `stems`, the tracks to render stems of.
+    #[serde(default)]
+    pub(crate) tracks: Option<Vec<TrackId>>,
+    /// Render each track separately, soloed in turn: every audio and MIDI
+    /// track that isn't muted, or `tracks`. The result's `stems` has one
+    /// entry per track with its analysis.
+    #[serde(default)]
+    pub(crate) stems: bool,
+    /// With `stems`, write each stem to this folder as
+    /// `<track id>-<track name>.wav` (32-bit float).
+    #[serde(default)]
+    pub(crate) stems_dir: Option<PathBuf>,
+    /// Analyze the range in segments this long (seconds), from its start.
+    #[serde(default)]
+    pub(crate) segment_length_s: Option<f64>,
+    /// Analyze the range in segments of this many bars, cut at bar lines.
+    #[serde(default)]
+    pub(crate) segment_bars: Option<u32>,
+    /// Analyze these parts of the range separately (absolute seconds).
+    #[serde(default)]
+    pub(crate) segments: Option<Vec<SegmentRange>>,
+}
+
+/// A part of a render to analyze on its own.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SegmentRange {
+    pub(crate) start_s: f64,
+    pub(crate) end_s: f64,
 }
 
 /// Export the mix, or part of it, to an audio file, rendered offline: WAV
-/// (16 or 24-bit, or 32-bit float) or FLAC (16 or 24-bit). By default the
-/// whole song, from the start to where the last clip ends, in 24-bit at the
-/// project's sample rate. Reports the levels and loudness of what was
-/// written. Whole-number samples are dithered.
+/// (16 or 24-bit, or 32-bit float), FLAC (16 or 24-bit), Ogg Vorbis
+/// (`quality`, 0 to 10) or Opus (`bitrate_kbps`; always 48 kHz; games loop
+/// both without a gap). By default the whole song, from the start to where
+/// the last clip ends, in 24-bit at the project's sample rate. Reports the
+/// levels and loudness of what was written (before encoding). Whole-number
+/// samples are dithered. `tracks` exports only those
+/// tracks (as soloing them would); `stems: true` writes a file per track
+/// beside `path` (`<name>-<track id>-<track name>.<ext>`), listed under
+/// `stems`. `segment_length_s` (or `_beats`), `segment_bars` or `segments`
+/// add an analysis per segment. `loop: true` makes a file that loops
+/// seamlessly: the range plus `tail_s` is rendered, the tail is added onto
+/// the start, and exactly the range's length is written.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExportAudio {
-    /// Where to write it. Its extension (.wav or .flac) picks the format
-    /// unless `format` does.
+    /// Where to write it. Its extension (.wav, .flac, .ogg or .opus) picks
+    /// the format unless `format` does.
     pub(crate) path: PathBuf,
     #[serde(default)]
     pub(crate) format: Option<ExportFormat>,
-    /// 16, 24 or 32 (32-bit float, WAV only). Default 24.
+    /// 16, 24 or 32 (32-bit float, WAV only). Default 24. Ignored by the
+    /// lossy formats.
     #[serde(default)]
     pub(crate) bit_depth: Option<u32>,
+    /// Ogg Vorbis quality, 0 to 10 (oggenc's scale; 5 is about 160 kbit/s
+    /// for stereo). Default 5.
+    #[serde(default)]
+    pub(crate) quality: Option<f32>,
+    /// Opus bitrate in kbit/s, 6 to 510. Default 128.
+    #[serde(default)]
+    pub(crate) bitrate_kbps: Option<u32>,
+    /// Tags for Ogg Vorbis and Opus files (Vorbis comments): e.g. `title`,
+    /// `artist`, `album`, `date`, `comment`. Default: the project's name as
+    /// the title.
+    #[serde(default)]
+    pub(crate) tags: Option<std::collections::BTreeMap<String, String>>,
     /// The file's sample rate in Hz; the mix is converted to it. Default:
     /// the project's.
     #[serde(default)]
@@ -423,9 +601,35 @@ pub(crate) struct ExportAudio {
     #[serde(default)]
     pub(crate) end_s: Option<f64>,
     /// Seconds after the end to include, so reverb and delay tails ring
-    /// out. Default 0.
+    /// out (with `loop`, wrapped onto the start instead). Default 0.
     #[serde(default)]
     pub(crate) tail_s: Option<f64>,
+    /// Make a seamless loop of the range (the loop range, or the song):
+    /// what rings out past the end for `tail_s` is added onto the start, so
+    /// the decay carries across the seam when a player loops the file, and
+    /// the file is exactly the range long. The result's `seam` says how big
+    /// the jump from the last sample to the first is, to check for a click.
+    /// The range can be at most 600 s.
+    #[serde(default, rename = "loop")]
+    pub(crate) wrap: bool,
+    /// Export only these tracks (and the buses and master they go through),
+    /// as if they were soloed. With `stems`, the tracks to export stems of.
+    #[serde(default)]
+    pub(crate) tracks: Option<Vec<TrackId>>,
+    /// Export each track to a file of its own, soloed in turn: every audio
+    /// and MIDI track that isn't muted, or `tracks`. The mix itself isn't
+    /// written then.
+    #[serde(default)]
+    pub(crate) stems: bool,
+    /// Analyze the export in segments this long (seconds), from its start.
+    #[serde(default)]
+    pub(crate) segment_length_s: Option<f64>,
+    /// Analyze the export in segments of this many bars, cut at bar lines.
+    #[serde(default)]
+    pub(crate) segment_bars: Option<u32>,
+    /// Analyze these parts of the export separately (absolute seconds).
+    #[serde(default)]
+    pub(crate) segments: Option<Vec<SegmentRange>>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
@@ -433,6 +637,10 @@ pub(crate) struct ExportAudio {
 pub(crate) enum ExportFormat {
     Wav,
     Flac,
+    /// Ogg Vorbis (lossy; `quality`).
+    Ogg,
+    /// Ogg Opus (lossy; `bitrate_kbps`; always 48 kHz).
+    Opus,
 }
 
 /// Mouse button for synthetic clicks.
@@ -634,12 +842,7 @@ pub(crate) fn build_tools() -> Vec<Tool> {
         .destructive(false)
         .open_world(false);
     let mut tools = vec![
-        tool::<NoArgs>(
-            GET_STATE,
-            "Get the open project (tracks, clips, audio pool) and session status \
-             (path, unsaved changes, undo/redo).",
-            read_only.clone(),
-        ),
+        tool::<GetState>(GET_STATE, "", read_only.clone()),
         tool::<NoArgs>(UNDO, "Undo the last change.", mutating.clone()),
         tool::<NoArgs>(REDO, "Redo the last undone change.", mutating.clone()),
         tool::<NewProject>(NEW_PROJECT, "", mutating.clone().destructive(true)),
@@ -704,8 +907,11 @@ pub(crate) fn build_tools() -> Vec<Tool> {
             mutating.clone().idempotent(true),
         ),
         tool::<ReloadPlugin>(RELOAD_PLUGIN, "", mutating.clone().idempotent(true)),
-        tool::<ShowPluginGui>(SHOW_PLUGIN_GUI, "", mutating.idempotent(true)),
-        tool::<GetPlugin>(GET_PLUGIN, "", read_only),
+        tool::<ShowPluginGui>(SHOW_PLUGIN_GUI, "", mutating.clone().idempotent(true)),
+        tool::<GetPlugin>(GET_PLUGIN, "", read_only.clone()),
+        tool::<SetPluginProperty>(SET_PLUGIN_PROPERTY, "", mutating.clone().idempotent(true)),
+        tool::<GetChanges>(GET_CHANGES, "", read_only),
+        tool::<crate::batch::Batch>(BATCH, "", mutating),
     ];
     tools.extend(COMMAND_SPECS.iter().map(command_tool));
     tools
@@ -747,6 +953,7 @@ fn make_tool(
     };
     schema.remove("$schema");
     schema.remove("title");
+    crate::times::augment_schema(&mut schema);
     let doc = schema
         .remove("description")
         .and_then(|d| d.as_str().map(clean_doc));

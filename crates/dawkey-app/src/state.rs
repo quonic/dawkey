@@ -17,6 +17,8 @@ pub(crate) const RULER_H: f32 = 28.0;
 pub(crate) const FADER_H: f32 = 220.0;
 /// Width of a mixer pan slider.
 pub(crate) const PAN_W: f32 = 76.0;
+/// Width of a send row in the mixer: dragging across it spans the fader's range.
+pub(crate) const SEND_W: f32 = 84.0;
 
 /// The top of each track's row in the arrange view (before scrolling),
 /// given how many take lanes and automation lanes each shows, and the
@@ -135,6 +137,13 @@ pub(crate) enum Gesture {
     Pan {
         track: TrackId,
         start_pan: f32,
+        merge_key: String,
+    },
+    /// A send's level in the mixer.
+    Send {
+        track: TrackId,
+        bus: TrackId,
+        start_db: f32,
         merge_key: String,
     },
     /// Dragging along the ruler moves the playhead.
@@ -619,6 +628,10 @@ pub struct ExportSettings {
     pub range: ExportRange,
     /// Seconds after the range to include, for tails to ring out.
     pub tail_s: f64,
+    /// Ogg Vorbis quality, 0 to 10.
+    pub quality: f32,
+    /// Opus bitrate in kbit/s.
+    pub bitrate_kbps: u32,
 }
 
 impl Default for ExportSettings {
@@ -629,6 +642,8 @@ impl Default for ExportSettings {
             sample_rate: None,
             range: ExportRange::Song,
             tail_s: 0.0,
+            quality: dawkey_media::DEFAULT_VORBIS_QUALITY,
+            bitrate_kbps: dawkey_media::DEFAULT_OPUS_KBPS,
         }
     }
 }

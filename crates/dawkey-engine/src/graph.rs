@@ -121,6 +121,10 @@ pub(crate) struct TrackNode {
     /// The track's meter (its index in the project's tracks); `None` on
     /// the master, which has its own.
     pub(crate) meter: Option<usize>,
+    /// Aux sends to later nodes.
+    pub(crate) sends: Vec<SendNode>,
+    /// The signal before the fader, kept while a send is pre-fader.
+    pub(crate) pre: Option<[Box<[f32]>; 2]>,
     /// For plugins that take the track as a sidechain: the block, after
     /// the fader. Two channels of [`MAX_BLOCK`](crate::MAX_BLOCK).
     pub(crate) tap: Option<[Box<[f32]>; 2]>,
@@ -139,6 +143,26 @@ pub(crate) struct SidechainIn {
 }
 
 /// One of a plugin's other outputs on its way to a bus.
+/// An aux send: the track's signal, after or before the fader, to a bus at
+/// its own level.
+#[derive(Debug)]
+pub(crate) struct SendNode {
+    /// Index of the bus in render order (always later).
+    pub(crate) dest: usize,
+    pub(crate) pre_fader: bool,
+    /// Level automation, in dB: (frame, value).
+    pub(crate) lane: Option<Lane>,
+    /// Gain without automation.
+    pub(crate) fixed: f32,
+    /// How late the audio reaching the send is (frames): automation is
+    /// read that much earlier.
+    pub(crate) offset: u32,
+    /// Lines the send up with what else reaches the bus.
+    pub(crate) delay: Option<DelayLine>,
+    /// The send's signal for this block.
+    pub(crate) buffer: [Box<[f32]>; 2],
+}
+
 #[derive(Debug)]
 pub(crate) struct AuxRoute {
     /// The output (an index into [`PluginNode::aux`]).
@@ -451,6 +475,26 @@ impl Graph {
                     .and_then(|d| index.get(&d).copied())
                     .filter(|&d| d > i)
                     .or_else(|| (!track.is_master()).then(|| order.len() - 1));
+                let buffer = || [(); 2].map(|()| vec![0.0; crate::MAX_BLOCK].into_boxed_slice());
+                node.sends = track
+                    .sends
+                    .iter()
+                    .filter_map(|send| {
+                        let dest = index.get(&send.bus).copied().filter(|&d| d > i)?;
+                        Some(SendNode {
+                            dest,
+                            pre_fader: send.pre_fader,
+                            lane: track
+                                .lane(&AutomationTarget::Send { bus: send.bus })
+                                .map(|l| l.points.iter().map(|p| (p.frame, p.value)).collect()),
+                            fixed: db_to_gain(send.gain_db),
+                            offset: 0,
+                            delay: None,
+                            buffer: buffer(),
+                        })
+                    })
+                    .collect();
+                node.pre = node.sends.iter().any(|s| s.pre_fader).then(buffer);
                 node
             })
             .collect();
@@ -659,6 +703,9 @@ fn compensate(tracks: &mut [TrackNode]) -> u32 {
         if let Some(d) = track.dest {
             arriving[d] = arriving[d].max(at);
         }
+        for send in &track.sends {
+            arriving[send.dest] = arriving[send.dest].max(at);
+        }
     }
     let mix = tracks
         .iter()
@@ -679,6 +726,10 @@ fn compensate(tracks: &mut [TrackNode]) -> u32 {
         let due = track.dest.map_or(latency, |d| arriving[d]);
         track.delay = DelayLine::new(due - leaving[i]);
         track.fader.offset = leaving[i];
+        for send in &mut track.sends {
+            send.delay = DelayLine::new(arriving[send.dest] - leaving[i]);
+            send.offset = leaving[i];
+        }
         for plugin in &mut track.plugins {
             let at = plugin.offset + if plugin.bypass { 0 } else { plugin.latency };
             for route in plugin.aux_routes.iter_mut() {
@@ -795,6 +846,8 @@ fn compile_track(
         dest: None,
         sum: None,
         meter: None,
+        sends: Vec::new(),
+        pre: None,
         tap: None,
     }
 }

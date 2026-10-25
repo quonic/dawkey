@@ -289,6 +289,8 @@ async fn choose_export_location(
     let filter = match format {
         dawkey_media::FileFormat::Wav => FileFilter::new("WAV audio").glob("*.wav"),
         dawkey_media::FileFormat::Flac => FileFilter::new("FLAC audio").glob("*.flac"),
+        dawkey_media::FileFormat::Ogg => FileFilter::new("Ogg Vorbis audio").glob("*.ogg"),
+        dawkey_media::FileFormat::Opus => FileFilter::new("Opus audio").glob("*.opus"),
     };
     let selected = SelectedFiles::save_file()
         .title("Export the Mix")

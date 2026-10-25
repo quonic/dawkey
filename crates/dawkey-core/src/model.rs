@@ -127,6 +127,23 @@ pub struct Track {
     /// The bus the track's signal goes to; `None`: the master.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<TrackId>,
+    /// Aux sends: copies of the signal to buses at their own levels,
+    /// besides `output`. At most one per bus.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sends: Vec<Send>,
+}
+
+/// An aux send: a copy of a track's signal to a bus, at its own level,
+/// taken after the fader and pan (or before them with `pre_fader`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Send {
+    /// The bus it goes to.
+    pub bus: TrackId,
+    /// Its level in dB.
+    pub gain_db: f32,
+    /// Taken before the fader and pan, so the fader doesn't change it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pre_fader: bool,
 }
 
 impl Track {
@@ -147,6 +164,7 @@ impl Track {
             midi_input: None,
             midi_input_channel: None,
             midi_output: None,
+            sends: Vec::new(),
             clips: Vec::new(),
             plugins: Vec::new(),
             automation: Vec::new(),
@@ -312,6 +330,8 @@ pub enum AutomationTarget {
     Gain,
     /// The track's pan, -1 to 1.
     Pan,
+    /// The level of the track's send to a bus, in dB.
+    Send { bus: TrackId },
     /// A parameter of one of the track's plugins, in the parameter's range.
     Param { plugin: PluginId, param: String },
 }
@@ -957,7 +977,12 @@ impl Project {
     pub fn feeds(&self, from: TrackId, to: TrackId) -> bool {
         self.reaches(from, to, |t| {
             let outputs = t.plugins.iter().flat_map(|p| p.outputs.values().copied());
-            self.destination(t.id).into_iter().chain(outputs).collect()
+            let sends = t.sends.iter().map(|s| s.bus);
+            self.destination(t.id)
+                .into_iter()
+                .chain(outputs)
+                .chain(sends)
+                .collect()
         })
     }
 
@@ -969,6 +994,7 @@ impl Project {
         // plugins take it as a sidechain.
         self.reaches(on, track, |t| {
             let outputs = t.plugins.iter().flat_map(|p| p.outputs.values().copied());
+            let sends = t.sends.iter().map(|s| s.bus);
             let sidechained = self
                 .all_tracks()
                 .filter(|other| other.plugins.iter().any(|p| p.sidechain == Some(t.id)))
@@ -976,6 +1002,7 @@ impl Project {
             self.destination(t.id)
                 .into_iter()
                 .chain(outputs)
+                .chain(sends)
                 .chain(sidechained)
                 .collect()
         })
@@ -1018,6 +1045,7 @@ impl Project {
                     || t.plugins
                         .iter()
                         .any(|p| p.outputs.values().any(|&b| b == track))
+                    || t.sends.iter().any(|s| s.bus == track)
             })
             .map(|t| t.id)
             .collect();

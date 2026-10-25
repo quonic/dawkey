@@ -8,7 +8,7 @@ use dawkey_ui::{
 };
 
 use super::{TrackView, ViewModel, button, meter, name_editor, track_buttons};
-use crate::state::{FADER_H, PAN_W, TextField, ViewState};
+use crate::state::{FADER_H, PAN_W, SEND_W, TextField, ViewState};
 use crate::theme::*;
 
 const STRIP_W: f32 = 104.0;
@@ -94,6 +94,7 @@ fn strip(track: &TrackView, view: &ViewState, ui: &UiState) -> Node {
         )
         .child(slots(track, ui))
         .child(output(track, ui))
+        .child(sends(track, ui))
         .child(pan_slider(track, ui))
         .child(Node::row().gap(10.0).child(fader(track, ui)).child(meter(
             &format!("track/{id}/meter"),
@@ -138,6 +139,63 @@ fn output(track: &TrackView, ui: &UiState) -> Node {
         s.color = pal().text_dim;
         s.text_align = TextAlign::Start;
     })
+}
+
+/// The track's aux sends, one row each (drag to set the level; ctrl-click
+/// to remove), and "+ Send" when there's a bus to send to.
+fn sends(track: &TrackView, ui: &UiState) -> Node {
+    let mut column = Node::column()
+        .id(format!("track/{}/sends", track.id))
+        .accessible_label("Sends")
+        .gap(3.0);
+    for send in &track.sends {
+        let id = format!("track/{}/send/{}", track.id, send.bus);
+        let active = ui.is_pressed(&id) || ui.is_hovered(&id);
+        let value = format!("{:+.1} dB", send.gain_db);
+        let pre = if send.pre_fader { " (pre)" } else { "" };
+        column = column.child(
+            Node::row()
+                .id(id)
+                .role(Role::Slider)
+                .accessible_label(format!("Send to {}", send.bus_name))
+                .value(value.clone())
+                .draggable()
+                .clickable()
+                .size(SEND_W, 20.0)
+                .padding(Insets::xy(5.0, 0.0))
+                .align(Align::Center)
+                .clip()
+                .style(|s| {
+                    s.background = Some(pal().panel);
+                    s.radius = [3.0; 4];
+                    s.border = Some((1.0, if active { pal().text_dim } else { pal().border }));
+                })
+                .child(
+                    Node::label(format!("↗ {}{pre} {value}", send.bus_name)).style(|s| {
+                        s.font_size = 10.0;
+                        s.color = pal().text_dim;
+                        s.text_align = TextAlign::Start;
+                    }),
+                ),
+        );
+    }
+    if track.can_add_send {
+        column = column.child(
+            button(
+                &format!("track/{}/add_send", track.id),
+                "Add send",
+                ui,
+                None,
+            )
+            .text("+ Send")
+            .size(STRIP_W - 20.0, 20.0)
+            .style(|s| {
+                s.font_size = 10.0;
+                s.color = pal().text_dim;
+            }),
+        );
+    }
+    column
 }
 
 /// The track's plugins, top to bottom in signal order, and "+ FX".

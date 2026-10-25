@@ -217,6 +217,11 @@ async fn save_and_reopen() {
     assert_eq!(opened["project"]["tempo_bpm"], 87.5);
     assert_eq!(track_names(&opened), ["Vox"]);
     assert_eq!(opened["dirty"], false);
+    // A summary: it says what it leaves out.
+    assert_eq!(
+        opened["summary"]["left_out"],
+        json!(["notes", "controls", "automation_points"])
+    );
     dawkey.shutdown().await.unwrap();
 
     // The project can also be opened from the command line.

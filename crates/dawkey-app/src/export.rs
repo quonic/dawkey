@@ -21,6 +21,10 @@ use crate::state::{ExportRange, PlatformRequest};
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 /// Tails the dialog offers, in seconds.
 const TAILS: [f64; 5] = [0.0, 1.0, 2.0, 5.0, 10.0];
+/// Ogg Vorbis qualities the dialog offers.
+const QUALITIES: [f32; 6] = [2.0, 4.0, 5.0, 6.0, 8.0, 10.0];
+/// Opus bitrates the dialog offers, in kbit/s.
+const BITRATES: [u32; 6] = [64, 96, 128, 160, 192, 256];
 
 /// An export running on a worker thread.
 pub(crate) struct RunningExport {
@@ -49,7 +53,9 @@ impl App {
             ["export", "format"] => {
                 settings.format = match settings.format {
                     FileFormat::Wav => FileFormat::Flac,
-                    FileFormat::Flac => FileFormat::Wav,
+                    FileFormat::Flac => FileFormat::Ogg,
+                    FileFormat::Ogg => FileFormat::Opus,
+                    FileFormat::Opus => FileFormat::Wav,
                 };
                 // FLAC holds whole numbers only.
                 if settings.format == FileFormat::Flac && settings.sample == SampleFormat::Float32 {
@@ -57,12 +63,21 @@ impl App {
                 }
                 Ok(())
             }
+            // For the lossy formats this row is the quality instead.
             ["export", "bits"] => {
-                settings.sample = match (settings.sample, settings.format) {
-                    (SampleFormat::Int16, _) => SampleFormat::Int24,
-                    (SampleFormat::Int24, FileFormat::Wav) => SampleFormat::Float32,
-                    _ => SampleFormat::Int16,
-                };
+                match settings.format {
+                    FileFormat::Ogg => settings.quality = next_in(&QUALITIES, settings.quality),
+                    FileFormat::Opus => {
+                        settings.bitrate_kbps = next_in(&BITRATES, settings.bitrate_kbps)
+                    }
+                    _ => {
+                        settings.sample = match (settings.sample, settings.format) {
+                            (SampleFormat::Int16, _) => SampleFormat::Int24,
+                            (SampleFormat::Int24, FileFormat::Wav) => SampleFormat::Float32,
+                            _ => SampleFormat::Int16,
+                        }
+                    }
+                }
                 Ok(())
             }
             ["export", "rate"] => {
@@ -176,11 +191,19 @@ impl App {
         let (start_s, end_s) = self.export_range()?;
         let settings = self.view.export;
         let spec = ExportSpec {
-            file: FileFormat::from_path(path).unwrap_or(settings.format),
-            sample: settings.sample,
-            sample_rate: settings
-                .sample_rate
-                .unwrap_or(self.studio.session().project().sample_rate),
+            quality: settings.quality,
+            bitrate_kbps: settings.bitrate_kbps,
+            tags: vec![(
+                "TITLE".to_owned(),
+                self.studio.session().project().name.clone(),
+            )],
+            ..ExportSpec::new(
+                FileFormat::from_path(path).unwrap_or(settings.format),
+                settings.sample,
+                settings
+                    .sample_rate
+                    .unwrap_or(self.studio.session().project().sample_rate),
+            )
         };
         spec.check()?;
         let job = self
@@ -248,4 +271,14 @@ impl App {
         });
         self.redraw = true;
     }
+}
+
+/// The choice after `current` in `choices` (the first after the last, or
+/// if `current` isn't one of them).
+fn next_in<T: Copy + PartialEq>(choices: &[T], current: T) -> T {
+    choices
+        .iter()
+        .position(|&c| c == current)
+        .and_then(|i| choices.get(i + 1).copied())
+        .unwrap_or(choices[0])
 }

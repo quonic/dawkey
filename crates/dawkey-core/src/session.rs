@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::changes::{Change, ChangeKind, ChangeLog, ChangesSince};
 use crate::command::Command;
 use crate::edit::{self, Edit};
 use crate::error::CoreError;
@@ -87,6 +88,8 @@ pub struct Session {
     /// A plugin state changed since the last save (plugin states aren't
     /// undo steps, so they don't move the revision).
     states_changed: bool,
+    /// What changed, by revision (see [`changes_since`](Self::changes_since)).
+    changes: ChangeLog,
 }
 
 impl Session {
@@ -154,6 +157,12 @@ impl Session {
         self.undo.last().map(|g| g.label.as_str())
     }
 
+    /// What changed after revision `since`: every undo step, undo, redo and
+    /// source added, with what it touched. The log keeps the last thousand.
+    pub fn changes_since(&self, since: u64) -> ChangesSince {
+        self.changes.since(since, self.revision)
+    }
+
     pub fn redo_label(&self) -> Option<&str> {
         self.redo.last().map(|g| g.label.as_str())
     }
@@ -196,6 +205,14 @@ impl Session {
             frames,
         });
         self.revision += 1;
+        self.changes.push(Change::new(
+            self.revision,
+            ChangeKind::Source,
+            "add_source",
+            &self.project,
+            &[],
+            &[],
+        ));
         id
     }
 
@@ -245,14 +262,28 @@ impl Session {
         merge_key: &str,
     ) -> Result<Outcome, CoreError> {
         let label = command.name().to_owned();
-        let (mut outcomes, inverses) = self.apply_commands(vec![command])?;
+        let mut command = Some(command);
+        let (mut outcomes, inverses) = self.apply_commands(|_, _| Ok(command.take()))?;
         if !inverses.is_empty() {
+            self.revision += 1;
+            let change = Change::new(
+                self.revision,
+                ChangeKind::Command,
+                &label,
+                &self.project,
+                &inverses,
+                &outcomes,
+            );
             match self.undo.last_mut() {
                 Some(group) if group.merge_key.as_deref() == Some(merge_key) => {
                     // The new inverses revert first.
                     let mut merged = inverses;
                     merged.append(&mut group.inverses);
                     group.inverses = merged;
+                    match self.changes.last_mut() {
+                        Some(last) if last.label == label => last.merge(change),
+                        _ => self.changes.push(change),
+                    }
                 }
                 _ => {
                     self.end_merge();
@@ -261,10 +292,10 @@ impl Session {
                         inverses,
                         merge_key: Some(merge_key.to_owned()),
                     });
+                    self.changes.push(change);
                 }
             }
             self.redo.clear();
-            self.revision += 1;
         }
         Ok(outcomes.pop().unwrap_or_default())
     }
@@ -283,29 +314,77 @@ impl Session {
         label: impl Into<String>,
         commands: Vec<Command>,
     ) -> Result<Vec<Outcome>, CoreError> {
-        let (outcomes, inverses) = self.apply_commands(commands)?;
+        let mut commands = commands.into_iter();
+        self.execute_batch_with(label, |_, _| Ok(commands.next()))
+    }
+
+    /// Runs commands as a single undo step until `next` returns `None`,
+    /// each made by `next` from the project as the earlier ones left it and
+    /// their outcomes (so a command can use IDs an earlier one created).
+    /// All-or-nothing: if `next` or a command fails, the project is left as
+    /// it was before the batch. Errors name the step when there are several
+    /// (`operation 2 (add_plugin): ...`).
+    pub fn execute_batch_with<F>(
+        &mut self,
+        label: impl Into<String>,
+        next: F,
+    ) -> Result<Vec<Outcome>, CoreError>
+    where
+        F: FnMut(&Project, &[Outcome]) -> Result<Option<Command>, CoreError>,
+    {
+        let (outcomes, inverses) = self.apply_commands(next)?;
         if !inverses.is_empty() {
+            let label = label.into();
             self.end_merge();
+            self.revision += 1;
+            self.changes.push(Change::new(
+                self.revision,
+                ChangeKind::Command,
+                &label,
+                &self.project,
+                &inverses,
+                &outcomes,
+            ));
             self.push_undo(UndoGroup {
-                label: label.into(),
+                label,
                 inverses,
                 merge_key: None,
             });
             self.redo.clear();
-            self.revision += 1;
         }
         Ok(outcomes)
     }
 
-    /// Applies commands all-or-nothing. Returns their outcomes and the
-    /// inverse edits, in the order that reverts them all.
-    fn apply_commands(
-        &mut self,
-        commands: Vec<Command>,
-    ) -> Result<(Vec<Outcome>, Vec<Edit>), CoreError> {
-        let mut outcomes = Vec::with_capacity(commands.len());
+    /// Applies the commands `next` makes, until it makes none,
+    /// all-or-nothing. Returns their outcomes and the inverse edits, in the
+    /// order that reverts them all.
+    fn apply_commands<F>(&mut self, mut next: F) -> Result<(Vec<Outcome>, Vec<Edit>), CoreError>
+    where
+        F: FnMut(&Project, &[Outcome]) -> Result<Option<Command>, CoreError>,
+    {
+        let mut outcomes = Vec::new();
         let mut inverses: Vec<Edit> = Vec::new();
-        for command in commands {
+        // In a batch, an error says which step failed (a single command's
+        // error is its own).
+        let step = |index: usize, name: Option<&str>, err: CoreError| {
+            if index == 0 {
+                return err;
+            }
+            match name {
+                Some(name) => err.in_context(&format!("operation {index} ({name})")),
+                None => err.in_context(&format!("operation {index}")),
+            }
+        };
+        for index in 0.. {
+            let command = match next(&self.project, &outcomes) {
+                Ok(Some(command)) => command,
+                Ok(None) => break,
+                Err(err) => {
+                    edit::rollback(&mut self.project, inverses);
+                    return Err(step(index, None, err));
+                }
+            };
+            let name = command.name();
             let result = command
                 .into_edits(&mut self.project)
                 .and_then(|(edits, outcome)| {
@@ -321,7 +400,7 @@ impl Session {
                 }
                 Err(err) => {
                     edit::rollback(&mut self.project, inverses);
-                    return Err(err);
+                    return Err(step(index, Some(name), err));
                 }
             }
         }
@@ -335,7 +414,7 @@ impl Session {
             return Ok(None);
         };
         let label = group.label.clone();
-        let redo = self.revert(group)?;
+        let redo = self.revert(group, ChangeKind::Undo)?;
         self.redo.push(redo);
         self.end_merge();
         Ok(Some(label))
@@ -348,15 +427,23 @@ impl Session {
             return Ok(None);
         };
         let label = group.label.clone();
-        let undo = self.revert(group)?;
+        let undo = self.revert(group, ChangeKind::Redo)?;
         self.push_undo(undo);
         Ok(Some(label))
     }
 
     /// Applies a group's inverses and returns the group that reverts that.
-    fn revert(&mut self, group: UndoGroup) -> Result<UndoGroup, CoreError> {
+    fn revert(&mut self, group: UndoGroup, kind: ChangeKind) -> Result<UndoGroup, CoreError> {
         let inverses = edit::apply_all(&mut self.project, group.inverses)?;
         self.revision += 1;
+        self.changes.push(Change::new(
+            self.revision,
+            kind,
+            &group.label,
+            &self.project,
+            &inverses,
+            &[],
+        ));
         Ok(UndoGroup {
             label: group.label,
             inverses,
