@@ -844,6 +844,39 @@ mod tests {
     }
 
     #[test]
+    fn saving_over_another_projects_bundle_keeps_its_own_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Song.dawkey");
+        let file = |folder: &str, bytes: &[u8]| {
+            let path = dir.path().join(folder).join("take 1.wav");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        // An earlier project saved here, with its own "take 1" as source 1.
+        let mut old = Session::default();
+        old.add_source("take 1", file("old", b"OLD AUDIO"), 1, 100);
+        old.save(Some(&bundle)).unwrap();
+        let old_copy = old.source_path(SourceId(1)).unwrap();
+
+        // Another project's source 1 of the same name is copied in beside
+        // it, not taken to be the file already there.
+        let mut s = Session::default();
+        let src = s.add_source("take 1", file("new", b"NEW AUDIO"), 1, 100);
+        s.save(Some(&bundle)).unwrap();
+        let saved = s.source_path(src).unwrap();
+        assert_ne!(saved, old_copy);
+        assert_eq!(std::fs::read(&saved).unwrap(), b"NEW AUDIO");
+        assert_eq!(std::fs::read(&old_copy).unwrap(), b"OLD AUDIO");
+
+        // A file there with the same audio is used as it is.
+        let mut again = Session::default();
+        again.add_source("take 1", file("again", b"OLD AUDIO"), 1, 100);
+        again.save(Some(&bundle)).unwrap();
+        assert_eq!(again.source_path(SourceId(1)).unwrap(), old_copy);
+    }
+
+    #[test]
     fn merging_commands_undo_in_one_step() {
         let mut s = Session::default();
         let id = add(&mut s, "A");
