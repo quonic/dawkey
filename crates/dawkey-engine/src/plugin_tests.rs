@@ -1146,3 +1146,62 @@ fn note_offs_reach_instruments_across_graph_swaps() {
     ctl.set_graph(f.graph()).unwrap();
     assert_eq!(process(&mut proc, 256)[100], 0.0, "wrapped");
 }
+
+#[test]
+fn an_instrument_that_stops_playing_the_notes_lets_go_of_them() {
+    // Each edit happens while the instrument holds the note (0..24 000),
+    // then playback goes on past its end.
+    let past_the_note = |proc: &mut crate::EngineProcessor| {
+        for _ in 0..30 {
+            process(proc, 1024);
+        }
+    };
+
+    // The track plays a device instead: the plugin stays in the chain.
+    let mut f = Fixture::new();
+    let track = keys_clip(&mut f, (0.0, 1.0), vec![]);
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 4800)[4000], 1.0, "the note plays");
+    f.set(dawkey_core::SetTrackMidiOutput {
+        track,
+        device: Some("Synth".into()),
+        channel: None,
+        latency_ms: None,
+    });
+    ctl.set_graph(f.graph()).unwrap();
+    past_the_note(&mut proc);
+    assert_eq!(process(&mut proc, 1024)[500], 0.0, "device");
+
+    // Bypassed (the synth plays the notes), and back on after the note.
+    let mut f = Fixture::new();
+    let track = keys_clip(&mut f, (0.0, 1.0), vec![]);
+    let keys = f.session.project().track(track).unwrap().plugins[0].id;
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 4800)[4000], 1.0, "the note plays");
+    for bypass in [true, false] {
+        f.set(SetPluginBypass {
+            plugin: keys,
+            bypass,
+        });
+        ctl.set_graph(f.graph()).unwrap();
+        past_the_note(&mut proc);
+    }
+    assert_eq!(process(&mut proc, 1024)[500], 0.0, "bypassed");
+
+    // Another instrument put before it plays them instead.
+    let mut f = Fixture::new();
+    let track = keys_clip(&mut f, (0.0, 1.0), vec![]);
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 4800)[4000], 1.0, "the note plays");
+    f.set(AddPlugin {
+        track,
+        plugin: "clap:keys".into(),
+        index: Some(0),
+    });
+    ctl.set_graph(f.graph()).unwrap();
+    past_the_note(&mut proc);
+    assert_eq!(process(&mut proc, 1024)[500], 0.0, "moved down the chain");
+}

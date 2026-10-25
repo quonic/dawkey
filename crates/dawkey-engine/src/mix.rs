@@ -619,7 +619,11 @@ fn run_plugin(
 ) {
     let frames = left.len();
     if node.processor.is_none() || node.bypass {
-        node.events.clear();
+        // A bypassed plugin keeps the note-offs for what it held when it
+        // was bypassed, and gets them when it's back on.
+        let kept = node.processor.is_some();
+        node.events
+            .retain(|e| kept && matches!(e.kind, PluginEventKind::NoteOff { .. }));
         // Nothing comes out of its other outputs.
         for buffer in node.aux.iter_mut() {
             buffer
@@ -837,19 +841,31 @@ pub(crate) fn release_clip_notes(graph: &mut Graph) {
 /// voices, plugin processors and the values they were sent, and delay line
 /// contents. Processors left in `old` (removed plugins) are stopped; notes
 /// held on a device the new graph no longer sends to are released through
-/// `out`. Real-time safe.
+/// `out`, and those an instrument plugin no longer plays are released to
+/// it. Real-time safe.
 pub(crate) fn carry_over(old: &mut Graph, new: &mut Graph, out: &mut MidiOutput) {
     for track in &mut new.tracks {
         let previous = old.tracks.iter_mut().find(|t| t.id == track.id);
         let Some(previous) = previous else {
             continue;
         };
+        let same_first =
+            track.plugins.first().map(|n| n.key) == previous.plugins.first().map(|n| n.key);
         if let (Some(instrument), Some(before)) = (&mut track.instrument, &mut previous.instrument)
         {
             match (&mut instrument.voices, &mut before.voices) {
                 (Voices::Synth(now), Voices::Synth(then)) => now.continue_from(then),
                 // Copies into the existing box: no allocation.
-                (Voices::Plugin(now), Voices::Plugin(then)) => **now = (**then).clone(),
+                (Voices::Plugin(now), Voices::Plugin(then)) if same_first => {
+                    **now = (**then).clone()
+                }
+                // Something else plays the notes now: the plugin that did
+                // lets go of them (the events go with its processor).
+                (_, Voices::Plugin(then)) => {
+                    if let Some(first) = previous.plugins.first_mut() {
+                        then.release_where(&mut first.events, 0, |_| true);
+                    }
+                }
                 _ => {}
             }
             let monitor = instrument.monitor;
