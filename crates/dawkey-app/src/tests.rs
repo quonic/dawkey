@@ -1971,6 +1971,54 @@ fn automation_lanes_in_the_arrange_view() {
     assert!(app.access_tree().find(&lane_id).is_none());
 }
 
+/// Automation points are selected by index, and an undo that adds or
+/// removes an earlier point moves the indices: the selection follows the
+/// point, so Delete removes the one that was picked.
+#[test]
+fn the_selected_automation_point_survives_an_undo() {
+    use dawkey_core::{AddAutomationPoint, AutomationTarget};
+    let mut app = app();
+    let (track, _) = add_clip(&mut app, 0.0);
+    let t = TrackId(track);
+    click(&mut app, &format!("track/{track}/automation")).unwrap();
+    for (time_s, value) in [(2.0, -6.0), (4.0, -12.0), (1.0, -3.0)] {
+        app.studio
+            .execute(
+                AddAutomationPoint {
+                    track: t,
+                    target: AutomationTarget::Gain,
+                    time_s,
+                    value,
+                }
+                .into(),
+            )
+            .unwrap();
+    }
+    let times = |app: &App| -> Vec<f64> {
+        let project = app.studio.session().project();
+        let lane = project.track(t).unwrap().lane(&AutomationTarget::Gain);
+        lane.unwrap()
+            .points
+            .iter()
+            .map(|p| project.frames_to_seconds(p.frame))
+            .collect()
+    };
+    // Points at 0, 1, 2 and 4 s: select the one at 2 s, undo the one at
+    // 1 s, and press Delete.
+    click(&mut app, &format!("auto/{track}/0/2")).unwrap();
+    app.key("z", CTRL).unwrap();
+    assert_eq!(app.view_state().selected_point, Some((t, 0, 1)));
+    app.key("delete", Modifiers::default()).unwrap();
+    assert_eq!(times(&app), [0.0, 4.0]);
+    // A selected point that an undo takes away is let go.
+    click(&mut app, &format!("auto/{track}/0/1")).unwrap();
+    app.key("z", CTRL).unwrap();
+    app.key("z", CTRL).unwrap();
+    assert_eq!(app.view_state().selected_point, None);
+    app.key("delete", Modifiers::default()).unwrap();
+    assert_eq!(times(&app), [0.0, 2.0]);
+}
+
 #[test]
 fn tempo_lanes_edit_the_tempo_map() {
     let mut app = app();
@@ -2111,6 +2159,67 @@ fn meter_lane_edits_time_signatures() {
     // Hiding the lanes forgets the selection.
     click(&mut app, "arrange/tempo").unwrap();
     assert!(app.access_tree().find("meter/lane").is_none());
+}
+
+/// Tempo points and time signature changes are selected by index too: the
+/// selection follows the point through an undo, so Delete removes the one
+/// that was picked.
+#[test]
+fn the_selected_tempo_point_survives_an_undo() {
+    use dawkey_core::{SetTempo, SetTimeSignature};
+    let mut app = app();
+    for (beat, bpm) in [(8.0, 100.0), (16.0, 90.0), (4.0, 110.0)] {
+        app.studio
+            .execute(
+                SetTempo {
+                    bpm,
+                    at_beats: Some(beat),
+                    ramp: false,
+                }
+                .into(),
+            )
+            .unwrap();
+    }
+    let beats = |app: &App| -> Vec<f64> {
+        let project = app.studio.session().project();
+        project.tempo_changes.iter().map(|c| c.beat).collect()
+    };
+    click(&mut app, "arrange/tempo").unwrap();
+    // The start, then beats 4, 8 and 16: select beat 8, undo beat 4, and
+    // press Delete.
+    click(&mut app, "tempo/2").unwrap();
+    app.key("z", CTRL).unwrap();
+    assert_eq!(
+        app.view_state().selected_marker,
+        Some(crate::Marker::Tempo(1))
+    );
+    app.key("delete", Modifiers::default()).unwrap();
+    assert_eq!(beats(&app), [16.0]);
+
+    // The same for time signature changes: bars 3 and 5, then 2.
+    for bar in [3, 5, 2] {
+        app.studio
+            .execute(
+                SetTimeSignature {
+                    at_bar: Some(bar),
+                    ..SetTimeSignature::new(3, 4)
+                }
+                .into(),
+            )
+            .unwrap();
+    }
+    click(&mut app, "meter/2").unwrap();
+    app.key("z", CTRL).unwrap();
+    app.key("delete", Modifiers::default()).unwrap();
+    let bars: Vec<u32> = app
+        .studio
+        .session()
+        .project()
+        .meter_changes
+        .iter()
+        .map(|c| c.bar)
+        .collect();
+    assert_eq!(bars, [5]);
 }
 
 #[test]
@@ -2292,6 +2401,71 @@ fn typing_a_time_signature() {
         format!("{message:?}").contains("beat length"),
         "{message:?}"
     );
+}
+
+/// Clicking a field that's being typed in (to put the caret there, say)
+/// keeps what's been typed, rather than starting again from the value.
+#[test]
+fn clicking_a_field_being_typed_in_keeps_the_typing() {
+    let mut app = app();
+    click(&mut app, "arrange/tempo").unwrap();
+    click(&mut app, "tempo/value").unwrap();
+    type_keys(&mut app, &["9", "5"]);
+    click(&mut app, "tempo/value").unwrap();
+    let field = app.access_tree().find("tempo/value").unwrap().clone();
+    assert_eq!(field.value.as_deref(), Some("95"));
+    type_keys(&mut app, &["return"]);
+    assert_eq!(app.studio.session().project().tempo_bpm, 95.0);
+
+    click(&mut app, "meter/numerator/value").unwrap();
+    type_keys(&mut app, &["3"]);
+    click(&mut app, "meter/numerator/value").unwrap();
+    type_keys(&mut app, &["return"]);
+    assert_eq!(app.studio.session().project().time_signature.numerator, 3);
+
+    // The preferences' record offset and MCP port.
+    app.key(",", CTRL).unwrap();
+    click(&mut app, "prefs/record_offset").unwrap();
+    type_keys(&mut app, &["1", "2"]);
+    click(&mut app, "prefs/record_offset").unwrap();
+    type_keys(&mut app, &["return"]);
+    assert_eq!(app.preferences().record_offset_ms, 12.0);
+    click(&mut app, "prefs/mcp_port").unwrap();
+    type_keys(&mut app, &["8", "0", "8", "0"]);
+    click(&mut app, "prefs/mcp_port").unwrap();
+    type_keys(&mut app, &["return"]);
+    assert_eq!(app.preferences().mcp_http_port, 8080);
+}
+
+/// While a name is being typed, Ctrl shortcuts type nothing: Ctrl+Z
+/// doesn't add a "z", nor Ctrl+S an "s" (nor save).
+#[test]
+fn ctrl_shortcuts_type_nothing_into_names() {
+    let mut app = app();
+    let id = add_track(&mut app, "Track");
+    let name = format!("track/{id}/name");
+    app.double_click(&name, Modifiers::default()).unwrap();
+    type_keys(&mut app, &["b", "a", "s", "s"]);
+    app.key("z", CTRL).unwrap();
+    app.key("s", CTRL).unwrap();
+    app.key(
+        "x",
+        Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        },
+    )
+    .unwrap();
+    assert!(app.take_platform_requests().is_empty());
+    type_keys(&mut app, &["return"]);
+    assert_eq!(app.studio.session().project().tracks[0].name, "bass");
+    // Nor into numbers.
+    click(&mut app, "arrange/tempo").unwrap();
+    click(&mut app, "tempo/value").unwrap();
+    type_keys(&mut app, &["9"]);
+    app.key("1", CTRL).unwrap();
+    type_keys(&mut app, &["0", "return"]);
+    assert_eq!(app.studio.session().project().tempo_bpm, 90.0);
 }
 
 #[test]
@@ -2932,6 +3106,28 @@ fn preferences_apply_at_once_and_are_saved() {
     assert!(!app.view_state().prefs_open);
     app.key(",", CTRL).unwrap();
     assert!(app.view_state().prefs_open);
+}
+
+/// The preferences panel is modal: keys don't reach the window behind it
+/// (Delete would remove the selected clip, Space play).
+#[test]
+fn keys_stay_in_the_preferences() {
+    let mut app = app();
+    let (_, clip) = add_clip(&mut app, 0.0);
+    click(&mut app, &format!("clip/{clip}")).unwrap();
+    app.key(",", CTRL).unwrap();
+    assert!(app.view_state().prefs_open);
+    type_keys(&mut app, &["delete", "space", "r"]);
+    app.key("z", CTRL).unwrap();
+    assert!(app.studio.session().project().clip(ClipId(clip)).is_some());
+    assert!(!app.studio.transport().playing);
+    assert!(!app.studio.transport().recording);
+    assert!(app.view_state().prefs_open);
+    // Typing in its fields still works, and Escape closes it.
+    click(&mut app, "prefs/record_offset").unwrap();
+    type_keys(&mut app, &["5", "return", "escape"]);
+    assert_eq!(app.preferences().record_offset_ms, 5.0);
+    assert!(!app.view_state().prefs_open);
 }
 
 #[test]
