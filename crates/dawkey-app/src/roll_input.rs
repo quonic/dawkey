@@ -372,7 +372,16 @@ impl App {
                     .map(|n| n.start)
                     .fold(f64::INFINITY, f64::min);
                 let delta_beats = (target - anchor_beats).max(-earliest.min(anchor_beats));
-                let delta_pitch = self.pitch_at(pos.y) - origin_pitch;
+                // Nor off the top or bottom of the keyboard: the chord keeps
+                // its shape.
+                let (lowest, highest) = notes
+                    .iter()
+                    .filter_map(|id| self.note(*id))
+                    .fold((127, 0), |(lo, hi), n| {
+                        (lo.min(i32::from(n.pitch)), hi.max(i32::from(n.pitch)))
+                    });
+                let delta_pitch =
+                    (self.pitch_at(pos.y) - origin_pitch).clamp(-lowest, 127 - highest);
                 if !end {
                     self.view.gesture = Some(Gesture::MoveNotes {
                         clip,

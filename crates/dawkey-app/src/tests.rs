@@ -1269,6 +1269,56 @@ fn piano_roll_edits_notes() {
 }
 
 #[test]
+fn dragged_chords_stop_at_the_ends_of_the_keyboard() {
+    let mut app = app();
+    let (_, clip) = add_midi(&mut app, 0.0, &[(1, 0.0, 1.0), (3, 0.0, 1.0)]);
+    app.open_piano_roll(ClipId(clip)).unwrap();
+    app.key("a", CTRL).unwrap();
+    let pitches = |app: &App| {
+        let mut p: Vec<u8> = notes_of(app, clip).iter().map(|n| n.0).collect();
+        p.sort();
+        p
+    };
+    // The top note, three rows down: the chord stops at the bottom with its
+    // shape.
+    app.drag(
+        DragFrom::Widget("note/2".into()),
+        Point::new(0.0, 3.0 * ROW_H),
+        6,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert_eq!(pitches(&app), [0, 2]);
+    // And at the top.
+    app.execute(
+        dawkey_core::EditMidiNotes {
+            clip: ClipId(clip),
+            notes: [(1, 124), (2, 126)]
+                .map(|(id, pitch)| dawkey_core::NoteChange {
+                    id: dawkey_core::NoteId(id),
+                    pitch: Some(pitch),
+                    start_beats: None,
+                    length_beats: None,
+                    velocity: None,
+                })
+                .into(),
+        }
+        .into(),
+    )
+    .unwrap();
+    app.open_piano_roll(ClipId(clip)).unwrap();
+    app.key("a", CTRL).unwrap();
+    app.drag(
+        DragFrom::Widget("note/1".into()),
+        Point::new(0.0, -3.0 * ROW_H),
+        6,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert_eq!(pitches(&app), [125, 127]);
+}
+
+#[test]
 fn piano_roll_marquee_selects_notes() {
     let mut app = app();
     let (_, clip) = add_midi(
