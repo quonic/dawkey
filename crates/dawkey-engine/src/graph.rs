@@ -349,6 +349,11 @@ impl DelayLine {
             at: 0,
         })
     }
+
+    /// Fills the line with silence. Real-time safe.
+    pub(crate) fn clear(&mut self) {
+        self.ring.fill(0.0);
+    }
 }
 
 /// Fader and pan, the last stage of a track.

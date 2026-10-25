@@ -523,6 +523,38 @@ fn latency_is_compensated_across_tracks() {
     assert!((out[100] - 2.0 * CENTER).abs() < 1e-6);
 }
 
+#[test]
+fn delay_lines_forget_what_played_before_a_stop() {
+    let mut f = Fixture::new();
+    // A track sounding for the first 0.1 s, to the master and through a
+    // send to a bus. A silent track with a 64-frame plugin goes to the
+    // bus too, so both of the first track's ways out are delayed.
+    let a = f.constant(1.0, 4800);
+    let late = f.constant(0.0, 48_000);
+    f.add(late, "clap:late");
+    let bus = f.bus();
+    f.send(late, Some(bus));
+    f.set(dawkey_core::SetTrackSend {
+        track: a,
+        bus,
+        gain_db: Some(0.0),
+        pre_fader: None,
+    });
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    assert!(process(&mut proc, 1024)[1000] != 0.0);
+    // Stopped a while, then playing where only silence is.
+    ctl.stop().unwrap();
+    for _ in 0..10 {
+        process(&mut proc, 1024);
+    }
+    ctl.locate(30_000).unwrap();
+    ctl.play().unwrap();
+    let out = process(&mut proc, 1024);
+    let loud: Vec<usize> = (0..1024).filter(|&i| out[i] != 0.0).collect();
+    assert!(loud.is_empty(), "old audio after playing again: {loud:?}");
+}
+
 impl Fixture {
     /// A new bus.
     fn bus(&mut self) -> TrackId {

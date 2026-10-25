@@ -7,7 +7,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use serde::Serialize;
 
 use crate::MAX_BLOCK;
-use crate::graph::{Graph, SendNode};
+use crate::graph::{Graph, SendNode, TrackNode};
 use crate::meter::{MeterBank, MeterReading};
 use crate::midi::{MidiEvent, MidiOut};
 use crate::mix::{self, Live, MidiOutput};
@@ -433,7 +433,10 @@ impl EngineProcessor {
                     self.retire(Retired::Graph(old));
                 }
                 Message::Play => {
-                    self.chase |= !self.playing;
+                    if !self.playing {
+                        self.chase = true;
+                        self.clear_skipped_delays();
+                    }
                     self.playing = true;
                 }
                 Message::Stop => {
@@ -464,6 +467,20 @@ impl EngineProcessor {
     fn retire(&mut self, retired: Retired) {
         if let Err(PushError::Full(retired)) = self.garbage.push(retired) {
             self.retired = Some(retired);
+        }
+    }
+
+    /// Empties the delay lines of tracks that were skipped while stopped:
+    /// they still hold what played before the stop.
+    fn clear_skipped_delays(&mut self) {
+        for track in &mut self.graph.tracks {
+            if sounds_while_stopped(track) {
+                continue;
+            }
+            let sends = track.sends.iter_mut().filter_map(|s| s.delay.as_mut());
+            for delay in track.delay.iter_mut().chain(sends) {
+                delay.clear();
+            }
         }
     }
 
@@ -515,11 +532,7 @@ impl EngineProcessor {
                 let [l, r] = armed.pick(input);
                 meters.tracks[m].record(peak(l), peak(r));
             }
-            // While stopped, only instruments, plugins, buses and monitored
-            // input sound (live input, tails).
-            let monitoring = track.input.is_some_and(|i| i.monitor);
-            let quiet = track.instrument.is_none() && track.plugins.is_empty() && !monitoring;
-            if !playing && track.sum.is_none() && quiet {
+            if !playing && !sounds_while_stopped(track) {
                 continue;
             }
             // Rendered even when inaudible, so voices and plugins stay
@@ -633,6 +646,13 @@ impl EngineProcessor {
         }
         meters.master.record(peak(out_l), peak(out_r));
     }
+}
+
+/// While stopped, only instruments, plugins, buses and monitored input
+/// sound (live input, tails); other tracks are skipped.
+fn sounds_while_stopped(track: &TrackNode) -> bool {
+    let monitoring = track.input.is_some_and(|i| i.monitor);
+    track.sum.is_some() || track.instrument.is_some() || !track.plugins.is_empty() || monitoring
 }
 
 fn peak(samples: &[f32]) -> f32 {
