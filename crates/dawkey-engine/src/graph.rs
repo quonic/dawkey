@@ -212,6 +212,31 @@ pub(crate) struct Instrument {
     pub(crate) monitor: bool,
     /// Which live input it plays.
     pub(crate) input: InputFilter,
+    /// Frames the notes and controller changes above are held back by
+    /// (from their clips' frames), so they line up with a late sidechain of
+    /// the plugin that plays them. Live input isn't held back.
+    pub(crate) held_back: u64,
+}
+
+impl Instrument {
+    /// Holds the clips' notes and controller changes back by `frames` (from
+    /// their clips' frames) instead.
+    fn hold_back(&mut self, frames: u64) {
+        let before = self.held_back;
+        let shift = |frame: &mut u64| *frame = *frame + frames - before;
+        for note in self.notes.iter_mut() {
+            shift(&mut note.start);
+            shift(&mut note.end);
+        }
+        for (_, end) in self.ends.iter_mut() {
+            shift(end);
+        }
+        let lanes = self.lanes.iter_mut().flat_map(|l| l.events.iter_mut());
+        for control in self.controls.iter_mut().chain(lanes) {
+            shift(&mut control.frame);
+        }
+        self.held_back = frames;
+    }
 }
 
 /// A controller change at a timeline frame, as a MIDI message (channel 0;
@@ -302,8 +327,8 @@ pub(crate) struct PluginNode {
     /// audio.
     pub(crate) offset: u32,
     /// Holds the track's audio back before the plugin when its sidechain
-    /// comes later (through more latency), so the two line up. Notes the
-    /// plugin gets aren't held back.
+    /// comes later (through more latency), so the two line up. If it plays
+    /// the track's notes, they're held back too ([`Instrument::held_back`]).
     pub(crate) pre_delay: Option<DelayLine>,
     /// `None` until carried over from the previous graph.
     pub(crate) processor: Option<Box<dyn PluginProcessor>>,
@@ -704,6 +729,14 @@ fn compensate(tracks: &mut [TrackNode]) -> u32 {
                 arriving[route.dest] = arriving[route.dest].max(at);
             }
         }
+        // An instrument plugin that waits for its sidechain waits with the
+        // notes it plays, or its output wouldn't be late at all.
+        let waits = track.plugins.first().and_then(|p| p.pre_delay.as_ref());
+        if let Some(instrument) = &mut track.instrument
+            && matches!(instrument.voices, Voices::Plugin(_))
+        {
+            instrument.hold_back(waits.map_or(0, |d| d.frames as u64));
+        }
         leaving[i] = at;
         if let Some(d) = track.dest {
             arriving[d] = arriving[d].max(at);
@@ -720,10 +753,12 @@ fn compensate(tracks: &mut [TrackNode]) -> u32 {
         .max()
         .unwrap_or(0);
     // A device that sounds late counts like a plugin with latency: the
-    // rest of the mix waits for it.
+    // rest of the mix waits for it (and for notes held back on their way
+    // through the chain to it).
+    let held_back = |t: &TrackNode| t.instrument.as_ref().map_or(0, |i| i.held_back as u32);
     let devices = tracks
         .iter()
-        .filter_map(|t| t.device.as_ref().map(|d| d.latency))
+        .filter_map(|t| t.device.as_ref().map(|d| d.latency + held_back(t)))
         .max()
         .unwrap_or(0);
     let latency = mix.max(devices);
@@ -741,8 +776,9 @@ fn compensate(tracks: &mut [TrackNode]) -> u32 {
                 route.delay = DelayLine::new(arriving[route.dest] - at);
             }
         }
+        let held = held_back(track);
         if let Some(device) = &mut track.device {
-            device.delay = latency - device.latency;
+            device.delay = latency - device.latency - held;
         }
     }
     latency
@@ -994,6 +1030,7 @@ fn compile_instrument(track: &Track, sample_rate: u32, voices: Choice) -> Instru
         lanes,
         monitor: track.armed,
         input: InputFilter::new(track.midi_input.as_deref(), track.midi_input_channel),
+        held_back: 0,
     }
 }
 

@@ -152,7 +152,8 @@ impl PluginProcessor for Keys {
     }
 }
 
-/// A MIDI effect: sends each note an octave up, and no audio.
+/// A MIDI effect: sends each note an octave up, and no audio. It takes a
+/// sidechain (and ignores it).
 struct Octave;
 
 impl PluginProcessor for Octave {
@@ -262,7 +263,10 @@ impl PluginProvider for Provider {
             }
         };
         let midi_output = slot.plugin == "clap:octave";
-        let sidechain = slot.plugin == "clap:minus";
+        let sidechain = matches!(
+            slot.plugin.as_str(),
+            "clap:minus" | "clap:vocoder" | "clap:octave"
+        );
         let outputs = u32::from(slot.plugin == "clap:fork");
         let (processor, params, latency, instrument): (Box<dyn PluginProcessor>, _, _, _) =
             match slot.plugin.as_str() {
@@ -282,7 +286,7 @@ impl PluginProvider for Provider {
                     64,
                     false,
                 ),
-                "clap:keys" => (
+                "clap:keys" | "clap:vocoder" => (
                     Box::new(Keys {
                         held: [0.0; 128],
                         bend: 1.0,
@@ -803,6 +807,48 @@ fn a_late_sidechain_holds_its_plugin_back() {
 }
 
 #[test]
+fn a_late_sidechain_holds_its_instruments_notes_back() {
+    let mut f = Fixture::new();
+    // A vocoder (an instrument with a sidechain) plays beat 1 to 2 (frames
+    // 24 000 to 48 000).
+    let voice = f.constant(0.0, 48_000);
+    let midi = f
+        .session
+        .execute(
+            AddMidiClip {
+                notes: vec![NoteSpec {
+                    pitch: 60,
+                    start_beats: 1.0,
+                    length_beats: 1.0,
+                    velocity: 127,
+                }],
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap();
+    let vocoder = f.add(midi, "clap:vocoder");
+    let sounding = |out: &[f32]| {
+        let first = out.iter().position(|&s| s != 0.0);
+        (first, out.iter().rposition(|&s| s != 0.0).map(|i| i + 1))
+    };
+    let out = &f.render(60_000)[0];
+    assert_eq!(sounding(out), (Some(24_000), Some(48_000)));
+    // Its sidechain comes through a 64-frame plugin: the vocoder waits for
+    // it with its notes, and renders still line up.
+    f.add(voice, "clap:late");
+    f.set(dawkey_core::SetPluginSidechain {
+        plugin: vocoder,
+        source: Some(voice),
+    });
+    assert_eq!(f.graph().latency(), 64);
+    let out = &f.render(60_000)[0];
+    assert_eq!(sounding(out), (Some(24_000), Some(48_000)));
+}
+
+#[test]
 fn instrument_plugins_play_the_notes() {
     let mut f = Fixture::new();
     let track = f
@@ -1070,4 +1116,41 @@ fn midi_effects_play_a_device() {
     process(&mut proc, 512);
     let direct: Vec<[u8; 3]> = proc.midi_output().iter().map(|m| m.data).collect();
     assert_eq!(direct, [[0x91, 60, 127]]);
+}
+
+#[test]
+fn a_midi_effect_waiting_for_its_sidechain_plays_a_device_in_time() {
+    let mut f = Fixture::new();
+    // The MIDI effect's sidechain comes through a 64-frame plugin: the
+    // notes wait for it on their way to the device, and the device still
+    // gets them 64 frames late, like the rest of the mix.
+    let voice = f.constant(0.0, 48_000);
+    f.add(voice, "clap:late");
+    let track = note_clip(&mut f);
+    let octave = f.add(track, "clap:octave");
+    f.set(dawkey_core::SetPluginSidechain {
+        plugin: octave,
+        source: Some(voice),
+    });
+    f.set(dawkey_core::SetTrackMidiOutput {
+        track,
+        device: Some("Synth".into()),
+        channel: None,
+        latency_ms: None,
+    });
+    let graph = f.graph();
+    assert_eq!(graph.latency(), 64);
+    let (mut ctl, mut proc) = new_engine(RATE, graph);
+    ctl.play().unwrap();
+    let mut sent = Vec::new();
+    for block in 0..40 {
+        process(&mut proc, 512);
+        sent.extend(
+            proc.midi_output()
+                .iter()
+                .map(|m| (block * 512 + m.offset, m.data)),
+        );
+        proc.clear_midi_output();
+    }
+    assert_eq!(sent, [(12_064, [0x90, 72, 127]), (18_064, [0x80, 72, 0])]);
 }
