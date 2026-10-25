@@ -350,6 +350,29 @@ fn loops_wrap_sample_accurately() {
 }
 
 #[test]
+fn offline_renders_play_straight_through_the_loop() {
+    let mut f = Fixture::new();
+    let src = f.source(vec![ramp(48_000, 0), ramp(48_000, 0)]);
+    f.place(src, 0.0);
+    // Loop 0.25 s .. 0.5 s = frames 12_000 .. 24_000.
+    f.session
+        .execute(
+            SetLoop {
+                start_s: Some(0.25),
+                end_s: Some(0.5),
+                enabled: Some(true),
+            }
+            .into(),
+        )
+        .unwrap();
+    // Across the loop end, a render (or export) goes on with the timeline.
+    let out = &f.render(20_000, 10_000)[0];
+    assert_eq!(out[3_999], 23_999.0);
+    assert_eq!(out[4_000], 24_000.0);
+    assert_eq!(out[9_999], 29_999.0);
+}
+
+#[test]
 fn records_input_with_positions_through_loops_and_punch() {
     let (mut ctl, mut proc) = new_engine(RATE, Graph::empty());
     let punch = TimeRange {
