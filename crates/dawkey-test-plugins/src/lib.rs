@@ -42,7 +42,9 @@
 //!
 //! With `dawkey_TEST_PLUGIN_CRASH` set, loading the CLAP entry (or the VST3
 //! factory) aborts the process, to test that scans survive crashing
-//! plugins.
+//! plugins. With `dawkey_TEST_PLUGIN_CHATTY` set, it prints on stdout, as
+//! many plugins do: a line right away, and one through C's stdio that
+//! comes out when the process exits.
 
 mod clap;
 mod lv2;
@@ -53,6 +55,19 @@ pub use vst3::id as vst3_id;
 
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// Prints on stdout, if `dawkey_TEST_PLUGIN_CHATTY` is set (see above).
+fn chatter() {
+    unsafe extern "C" {
+        fn puts(s: *const std::ffi::c_char) -> std::ffi::c_int;
+    }
+    if std::env::var_os("dawkey_TEST_PLUGIN_CHATTY").is_some() {
+        println!("Dawkey Test Plugins 1.0, chatty build");
+        // SAFETY: a NUL-terminated string; C's stdout buffers it (a pipe
+        // isn't a terminal) until the process exits.
+        unsafe { puts(c"Dawkey Test Plugins: bye".as_ptr()) };
+    }
+}
 
 /// Latency of `dawkey.test.delay`, in frames.
 pub const DELAY_FRAMES: u32 = 64;

@@ -1732,6 +1732,7 @@ extern "C" fn GetPluginFactory() -> *mut IPluginFactory {
     if std::env::var_os("dawkey_TEST_PLUGIN_CRASH").is_some() {
         std::process::abort();
     }
+    crate::chatter();
     ComWrapper::new(Factory)
         .to_com_ptr::<IPluginFactory>()
         .expect("it's a factory")

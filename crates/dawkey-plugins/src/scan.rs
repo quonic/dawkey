@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Finding plugins and describing them.
 
-use std::io::Read;
+use std::io::{Read, Write};
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -176,6 +177,30 @@ pub fn scan_plugin_file(path: &Path) -> Result<Vec<PluginInfo>, PluginError> {
     } else {
         scan_clap_file(path)
     }
+}
+
+/// What `dawkey scan-plugin` does: describes the plugins in a `.clap` file
+/// or a `.vst3` bundle ([`scan_plugin_file`]) and prints them on stdout as
+/// JSON, for [`scan`]. The plugin's code runs with its stdout going to
+/// stderr, so what it prints (a banner, a debug line, C's stdio flushing
+/// at exit) stays out of the JSON.
+pub fn run_plugin_scanner(path: &Path) -> Result<(), PluginError> {
+    let failed = |e: std::io::Error| PluginError::new(format!("writing the scan: {e}"));
+    // A copy of stdout for the JSON, which processes the plugin starts
+    // don't inherit (it's close-on-exec).
+    let json = std::io::stdout()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(failed)?;
+    // SAFETY: both descriptors are this process's own; nothing has been
+    // written to stdout yet, so nothing buffered goes astray.
+    if unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
+        return Err(failed(std::io::Error::last_os_error()));
+    }
+    let plugins = scan_plugin_file(path)?;
+    let mut out = std::io::BufWriter::new(std::fs::File::from(json));
+    serde_json::to_writer(&mut out, &plugins).map_err(|e| failed(e.into()))?;
+    out.flush().map_err(failed)
 }
 
 /// Describes every installed LV2 plugin, without running plugin code.
