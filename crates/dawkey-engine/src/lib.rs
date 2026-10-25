@@ -40,7 +40,8 @@ pub use record::{
 pub const MAX_BLOCK: usize = 4096;
 
 /// Renders `frames` frames of `graph` starting at timeline frame `start`,
-/// independent of any live engine. Returns stereo planar audio.
+/// independent of any live engine (and straight through the loop). Returns
+/// stereo planar audio.
 pub fn render_offline(graph: Graph, sample_rate: u32, start: u64, frames: usize) -> Vec<Vec<f32>> {
     render_offline_keeping(graph, sample_rate, start, frames).0
 }
@@ -66,7 +67,7 @@ pub fn render_offline_keeping(
 
 /// An offline render a block at a time, so long ones (exports) needn't fit
 /// in memory. Plugin latency is compensated: the output lines up with the
-/// timeline.
+/// timeline, which it plays straight through, never wrapping at the loop.
 pub struct OfflineRender {
     processor: EngineProcessor,
     /// Frames still to come out, and the latency still to skip.
@@ -88,8 +89,10 @@ impl std::fmt::Debug for OfflineRender {
 }
 
 impl OfflineRender {
-    pub fn new(graph: Graph, sample_rate: u32, start: u64, frames: usize) -> Self {
+    pub fn new(mut graph: Graph, sample_rate: u32, start: u64, frames: usize) -> Self {
         let latency = graph.latency() as usize;
+        // Renders cover the timeline as it is: the loop is the transport's.
+        graph.loop_range = None;
         let (mut controller, processor) = new_engine(sample_rate, graph);
         controller
             .locate(start)

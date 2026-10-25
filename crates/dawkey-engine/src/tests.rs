@@ -350,6 +350,58 @@ fn loops_wrap_sample_accurately() {
 }
 
 #[test]
+fn a_loop_shorter_than_a_block_is_entered_and_wraps() {
+    let mut f = Fixture::new();
+    let src = f.source(vec![ramp(48_000, 0), ramp(48_000, 0)]);
+    f.place(src, 0.0);
+    // Loop 0.025 s .. 0.05 s = frames 1200 .. 2400.
+    f.session
+        .execute(
+            SetLoop {
+                start_s: Some(0.025),
+                end_s: Some(0.05),
+                enabled: Some(true),
+            }
+            .into(),
+        )
+        .unwrap();
+    let (mut ctl, mut proc) = new_engine(RATE, f.graph());
+    ctl.locate(1_000).unwrap();
+    ctl.play().unwrap();
+    // One buffer from 200 frames before the loop: into it, through it,
+    // and back to its start.
+    let out = process(&mut proc, 2_048, &[]);
+    assert_eq!(out[199], 1_199.0);
+    assert_eq!(out[1_399], 2_399.0);
+    assert_eq!(out[1_400], 1_200.0);
+    assert_eq!(out[2_047], 1_847.0);
+    assert_eq!(ctl.transport().position, 1_848);
+}
+
+#[test]
+fn offline_renders_play_straight_through_the_loop() {
+    let mut f = Fixture::new();
+    let src = f.source(vec![ramp(48_000, 0), ramp(48_000, 0)]);
+    f.place(src, 0.0);
+    // Loop 0.25 s .. 0.5 s = frames 12_000 .. 24_000.
+    f.session
+        .execute(
+            SetLoop {
+                start_s: Some(0.25),
+                end_s: Some(0.5),
+                enabled: Some(true),
+            }
+            .into(),
+        )
+        .unwrap();
+    // Across the loop end, a render (or export) goes on with the timeline.
+    let out = &f.render(20_000, 10_000)[0];
+    assert_eq!(out[3_999], 23_999.0);
+    assert_eq!(out[4_000], 24_000.0);
+    assert_eq!(out[9_999], 29_999.0);
+}
+
+#[test]
 fn records_input_with_positions_through_loops_and_punch() {
     let (mut ctl, mut proc) = new_engine(RATE, Graph::empty());
     let punch = TimeRange {
@@ -635,6 +687,75 @@ fn armed_audio_tracks_meter_and_monitor_their_input() {
         .unwrap();
     ctl.set_graph(f.graph()).unwrap();
     assert!(run(&mut proc).0.iter().all(|&s| s == 0.0));
+}
+
+#[test]
+fn automated_sends_follow_their_lane_while_stopped() {
+    use dawkey_core::{AutomationTarget, PointSpec, SetAutomation, SetTrackSend, TrackKind};
+    let mut f = Fixture::new();
+    let add = |f: &mut Fixture, kind: TrackKind| {
+        f.session
+            .execute(
+                dawkey_core::AddTrack {
+                    kind,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap()
+    };
+    let track = add(&mut f, TrackKind::Audio);
+    let bus = add(&mut f, TrackKind::Bus);
+    // A monitored track heard only through its pre-fader send, at 0 dB
+    // but automated to -6 dB.
+    let commands: [dawkey_core::Command; 5] = [
+        SetTrackArm { track, armed: true }.into(),
+        dawkey_core::SetTrackMonitor {
+            track,
+            monitor: true,
+        }
+        .into(),
+        SetTrackGain {
+            track,
+            gain_db: -144.0,
+        }
+        .into(),
+        SetTrackSend {
+            track,
+            bus,
+            gain_db: Some(0.0),
+            pre_fader: Some(true),
+        }
+        .into(),
+        SetAutomation {
+            track,
+            target: AutomationTarget::Send { bus },
+            points: vec![PointSpec {
+                time_s: 0.0,
+                value: -6.0,
+            }],
+        }
+        .into(),
+    ];
+    for command in commands {
+        f.session.execute(command).unwrap();
+    }
+    let input = ones(256);
+    let run = |proc: &mut crate::EngineProcessor| {
+        let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+        proc.process_with_input([&input, &input], &[], &mut l, &mut r);
+        l
+    };
+    let gain = 10f32.powf(-6.0 / 20.0);
+    // Stopped, at the lane's level, as when playing.
+    let (mut ctl, mut proc) = new_engine(RATE, f.graph());
+    let stopped = run(&mut proc);
+    assert!(close(stopped[100], gain), "{}", stopped[100]);
+    ctl.play().unwrap();
+    let playing = run(&mut proc);
+    assert!(close(playing[100], gain), "{}", playing[100]);
 }
 
 #[test]
