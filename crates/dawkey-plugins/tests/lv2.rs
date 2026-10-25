@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! What the scan makes of LV2 descriptions the test plugins don't have
 //! themselves (`urn:dawkey:test:gain`'s library described by a TTL file of
-//! the test's own).
+//! the test's own), and LV2 state as Dawkey keeps it.
 
 use std::time::Duration;
 
 use dawkey_engine::{
     MAX_PLUGIN_EVENTS, MidiSink, PluginEvent, PluginProcessor, ProcessContext, Transport,
 };
-use dawkey_plugins::{Host, Loaded, SearchPath, scan};
+use dawkey_plugins::{Host, Loaded, SearchPath, StateValue, scan};
 
 #[global_allocator]
 static ALLOCATOR: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
@@ -142,4 +142,65 @@ fn declared_lv2_bounds_hold_the_default() {
         .expect("scanned")
         .params[0];
     assert_eq!((p.min, p.max, p.default), (0.0, 1.0, 0.0), "{p:?}");
+}
+
+/// Saved LV2 state as Dawkey encodes it: magic, count, then each
+/// property's key, type, flags and value, each with its length.
+fn lv2_state(properties: &[(&str, &str, &[u8])]) -> Vec<u8> {
+    let mut out = b"DKLV2ST1".to_vec();
+    out.extend_from_slice(&(properties.len() as u32).to_le_bytes());
+    let put = |out: &mut Vec<u8>, bytes: &[u8]| {
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(bytes);
+    };
+    for (key, kind, value) in properties {
+        put(&mut out, key.as_bytes());
+        put(&mut out, kind.as_bytes());
+        put(&mut out, &3u32.to_le_bytes());
+        put(&mut out, value);
+    }
+    out
+}
+
+/// The value of the only property in Dawkey-encoded state.
+fn only_value(state: &[u8]) -> Vec<u8> {
+    let mut at = 12;
+    let mut field = || {
+        let len = u32::from_le_bytes(state[at..at + 4].try_into().unwrap()) as usize;
+        let bytes = state[at + 4..at + 4 + len].to_vec();
+        at += 4 + len;
+        bytes
+    };
+    let (_key, _kind, _flags) = (field(), field(), field());
+    field()
+}
+
+/// An `atom:Literal`'s body is `LV2_Atom_Literal_Body` (datatype and lang
+/// URIDs, 8 bytes) and then the string: it's read without them, and
+/// written with them (0: no datatype or language).
+#[test]
+fn lv2_literals_are_read_and_written_with_their_header() {
+    const LITERAL: &str = "http://lv2plug.in/ns/ext/atom#Literal";
+    let mut body = vec![0u8; 8];
+    body.extend_from_slice(b"hello\0");
+    let state = lv2_state(&[("urn:x#name", LITERAL, &body)]);
+    let shown = dawkey_plugins::lv2_state_properties(&state).unwrap();
+    assert_eq!(shown[0].value, StateValue::Text("hello".into()));
+    let written = dawkey_plugins::lv2_state_set(
+        None,
+        "urn:x#name",
+        Some("Literal"),
+        &serde_json::json!("hello"),
+    )
+    .unwrap();
+    assert_eq!(only_value(&written), body);
+    // A string is still just its text.
+    let written = dawkey_plugins::lv2_state_set(
+        None,
+        "urn:x#name",
+        Some("String"),
+        &serde_json::json!("hello"),
+    )
+    .unwrap();
+    assert_eq!(only_value(&written), b"hello\0");
 }

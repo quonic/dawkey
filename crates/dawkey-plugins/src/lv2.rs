@@ -516,6 +516,10 @@ pub struct StateProperty {
     pub value: StateValue,
 }
 
+/// The size of an `atom:Literal`'s datatype and language URIDs
+/// (`LV2_Atom_Literal_Body`), which come before its text.
+const LITERAL_HEADER: usize = 8;
+
 /// A saved property's value, as far as its type is known.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(untagged)]
@@ -536,16 +540,20 @@ pub enum StateValue {
 /// isn't such state).
 pub fn lv2_state_properties(state: &[u8]) -> Option<Vec<StateProperty>> {
     let properties = decode_state(state)?;
+    let text = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes.strip_suffix(b"\0").unwrap_or(bytes)).into_owned()
+    };
     Some(
         properties
             .iter()
             .map(|p| {
                 let kind = p.kind.to_string_lossy().into_owned();
                 let value = match kind.strip_prefix(ATOM) {
-                    Some("String" | "Path" | "URI" | "Literal") => StateValue::Text(
-                        String::from_utf8_lossy(p.value.strip_suffix(b"\0").unwrap_or(&p.value))
-                            .into_owned(),
-                    ),
+                    Some("String" | "Path" | "URI") => StateValue::Text(text(&p.value)),
+                    // After its datatype and language (`LV2_Atom_Literal_Body`).
+                    Some("Literal") if p.value.len() >= LITERAL_HEADER => {
+                        StateValue::Text(text(&p.value[LITERAL_HEADER..]))
+                    }
                     Some("Int") if p.value.len() == 4 => StateValue::Int(i64::from(
                         i32::from_le_bytes(p.value[..4].try_into().expect("4 bytes")),
                     )),
@@ -618,12 +626,17 @@ pub fn lv2_state_set(
         },
     };
     let bytes: Vec<u8> = match kind.strip_prefix(ATOM) {
-        Some("String" | "Path" | "URI" | "Literal") => {
-            let text = match value {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
+        Some(text @ ("String" | "Path" | "URI" | "Literal")) => {
+            // A literal has no datatype or language (both 0) before its text.
+            let mut bytes = if text == "Literal" {
+                vec![0; LITERAL_HEADER]
+            } else {
+                Vec::new()
             };
-            let mut bytes = text.into_bytes();
+            match value {
+                serde_json::Value::String(s) => bytes.extend_from_slice(s.as_bytes()),
+                other => bytes.extend_from_slice(other.to_string().as_bytes()),
+            }
             bytes.push(0);
             bytes
         }
