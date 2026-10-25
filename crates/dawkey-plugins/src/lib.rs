@@ -42,8 +42,8 @@ use serde::{Deserialize, Serialize};
 pub use bridge::{BridgeProgram, Sandbox, run_plugin_host};
 pub use lv2::{StateProperty, StateValue, lv2_state_properties, lv2_state_set};
 pub use scan::{
-    Catalog, ScanFailure, SearchPath, clap_files, scan, scan_clap_file, scan_lv2, scan_plugin_file,
-    scan_vst3_bundle, vst3_binary, vst3_bundles,
+    Catalog, ScanFailure, SearchPath, clap_files, run_plugin_scanner, scan, scan_clap_file,
+    scan_lv2, scan_plugin_file, scan_vst3_bundle, vst3_binary, vst3_bundles,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

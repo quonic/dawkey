@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Finding plugins and describing them.
 
-use std::io::Read;
+use std::io::{Read, Write};
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -177,6 +179,30 @@ pub fn scan_plugin_file(path: &Path) -> Result<Vec<PluginInfo>, PluginError> {
     }
 }
 
+/// What `dawkey scan-plugin` does: describes the plugins in a `.clap` file
+/// or a `.vst3` bundle ([`scan_plugin_file`]) and prints them on stdout as
+/// JSON, for [`scan`]. The plugin's code runs with its stdout going to
+/// stderr, so what it prints (a banner, a debug line, C's stdio flushing
+/// at exit) stays out of the JSON.
+pub fn run_plugin_scanner(path: &Path) -> Result<(), PluginError> {
+    let failed = |e: std::io::Error| PluginError::new(format!("writing the scan: {e}"));
+    // A copy of stdout for the JSON, which processes the plugin starts
+    // don't inherit (it's close-on-exec).
+    let json = std::io::stdout()
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(failed)?;
+    // SAFETY: both descriptors are this process's own; nothing has been
+    // written to stdout yet, so nothing buffered goes astray.
+    if unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
+        return Err(failed(std::io::Error::last_os_error()));
+    }
+    let plugins = scan_plugin_file(path)?;
+    let mut out = std::io::BufWriter::new(std::fs::File::from(json));
+    serde_json::to_writer(&mut out, &plugins).map_err(|e| failed(e.into()))?;
+    out.flush().map_err(failed)
+}
+
 /// Describes every installed LV2 plugin, without running plugin code.
 pub fn scan_lv2(search: &SearchPath) -> (Vec<PluginInfo>, Vec<ScanFailure>) {
     let (plugins, failures) = lv2::scan(search.lv2.as_deref());
@@ -220,6 +246,12 @@ pub fn scan(search: &SearchPath, scanner: Option<(&Path, &[&str])>, timeout: Dur
     catalog
 }
 
+/// How long the scanner's output is read for after it exits. All of it is
+/// in the pipe by then; only a process the plugin started (wine's
+/// wineserver for yabridge's plugins, a licence daemon) that holds the
+/// pipe open keeps it from ending.
+const OUTPUT_GRACE: Duration = Duration::from_millis(500);
+
 fn scan_in_subprocess(
     program: &Path,
     args: &[&str],
@@ -234,12 +266,20 @@ fn scan_in_subprocess(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("starting the scanner: {e}"))?;
-    // Read on a thread, so a chatty plugin can't fill the pipe and stall.
+    // Read on a thread, so a chatty plugin can't fill the pipe and stall;
+    // what it reads comes over a channel, so waiting for it has a limit.
     let mut stdout = child.stdout.take().expect("piped");
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let _ = stdout.read_to_end(&mut out);
-        out
+    let (chunks, read) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0; 8192];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) if chunks.send(buf[..n].to_vec()).is_ok() => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                _ => break,
+            }
+        }
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -254,7 +294,13 @@ fn scan_in_subprocess(
             Err(e) => return Err(e.to_string()),
         }
     };
-    let out = reader.join().unwrap_or_default();
+    // Until the pipe ends, or for a moment: a process the plugin left
+    // running may hold it open (and the reader, until it goes).
+    let until = Instant::now() + OUTPUT_GRACE;
+    let mut out = Vec::new();
+    while let Ok(chunk) = read.recv_timeout(until.saturating_duration_since(Instant::now())) {
+        out.extend(chunk);
+    }
     if !status.success() {
         return Err(match status.code() {
             Some(code) => format!("the scanner failed (exit status {code})"),
