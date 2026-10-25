@@ -690,6 +690,75 @@ fn armed_audio_tracks_meter_and_monitor_their_input() {
 }
 
 #[test]
+fn automated_sends_follow_their_lane_while_stopped() {
+    use dawkey_core::{AutomationTarget, PointSpec, SetAutomation, SetTrackSend, TrackKind};
+    let mut f = Fixture::new();
+    let add = |f: &mut Fixture, kind: TrackKind| {
+        f.session
+            .execute(
+                dawkey_core::AddTrack {
+                    kind,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap()
+    };
+    let track = add(&mut f, TrackKind::Audio);
+    let bus = add(&mut f, TrackKind::Bus);
+    // A monitored track heard only through its pre-fader send, at 0 dB
+    // but automated to -6 dB.
+    let commands: [dawkey_core::Command; 5] = [
+        SetTrackArm { track, armed: true }.into(),
+        dawkey_core::SetTrackMonitor {
+            track,
+            monitor: true,
+        }
+        .into(),
+        SetTrackGain {
+            track,
+            gain_db: -144.0,
+        }
+        .into(),
+        SetTrackSend {
+            track,
+            bus,
+            gain_db: Some(0.0),
+            pre_fader: Some(true),
+        }
+        .into(),
+        SetAutomation {
+            track,
+            target: AutomationTarget::Send { bus },
+            points: vec![PointSpec {
+                time_s: 0.0,
+                value: -6.0,
+            }],
+        }
+        .into(),
+    ];
+    for command in commands {
+        f.session.execute(command).unwrap();
+    }
+    let input = ones(256);
+    let run = |proc: &mut crate::EngineProcessor| {
+        let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+        proc.process_with_input([&input, &input], &[], &mut l, &mut r);
+        l
+    };
+    let gain = 10f32.powf(-6.0 / 20.0);
+    // Stopped, at the lane's level, as when playing.
+    let (mut ctl, mut proc) = new_engine(RATE, f.graph());
+    let stopped = run(&mut proc);
+    assert!(close(stopped[100], gain), "{}", stopped[100]);
+    ctl.play().unwrap();
+    let playing = run(&mut proc);
+    assert!(close(playing[100], gain), "{}", playing[100]);
+}
+
+#[test]
 fn stopping_releases_clip_notes() {
     let mut f = Fixture::new();
     f.midi(0.0, &[(60, 0.0, 8.0)]);

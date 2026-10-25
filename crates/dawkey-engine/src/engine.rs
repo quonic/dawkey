@@ -595,21 +595,24 @@ impl EngineProcessor {
                         r.copy_from_slice(lane_r);
                     }
                 }
+                // While stopped, the level at the playhead (like faders).
                 let at = position.saturating_sub(u64::from(*offset));
-                match lane {
-                    Some(lane) if playing => {
-                        for (k, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
-                            let g = crate::graph::lane_value(lane, at + k as u64)
-                                .map_or(*fixed, |v| crate::graph::db_to_gain(v as f32));
-                            *a *= g;
-                            *b *= g;
-                        }
+                let gain_at = |frame: u64| {
+                    lane.as_deref()
+                        .and_then(|lane| crate::graph::lane_value(lane, frame))
+                        .map_or(*fixed, |v| crate::graph::db_to_gain(v as f32))
+                };
+                if playing && lane.is_some() {
+                    for (k, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
+                        let g = gain_at(at + k as u64);
+                        *a *= g;
+                        *b *= g;
                     }
-                    _ => {
-                        for (a, b) in l.iter_mut().zip(r.iter_mut()) {
-                            *a *= *fixed;
-                            *b *= *fixed;
-                        }
+                } else {
+                    let g = gain_at(at);
+                    for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+                        *a *= g;
+                        *b *= g;
                     }
                 }
                 if let Some(delay) = delay {
