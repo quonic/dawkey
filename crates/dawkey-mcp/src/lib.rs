@@ -223,14 +223,16 @@ impl DawkeyMcp {
     ) -> Result<Result<Value, String>, McpError> {
         let studio = &self.app;
         // Positions in beats or bars become seconds, through the tempo map
-        // as it is now.
+        // as it is now (import_midi's once it knows whether it takes the
+        // file's).
         let stems = self
             .tools
             .iter()
             .find(|t| t.name == name)
             .map(|t| times::position_stems(&Value::Object((*t.input_schema).clone())))
             .unwrap_or_default();
-        if times::has_beats(&args, &stems) {
+        if name != IMPORT_MIDI && times::has_beats(&args, &stems) {
+            let stems = stems.clone();
             args = tool_try!(
                 run(studio, move |s| {
                     times::resolve(s.session().project(), &mut args, &stems).map(|()| args)
@@ -350,6 +352,19 @@ impl DawkeyMcp {
             }
             IMPORT_AUDIO => self.import_audio(try_args!(parse(args))).await,
             IMPORT_MIDI => {
+                // The position, kept apart to resolve beats and bars in the
+                // tempo and meter the import puts it in.
+                let mut position = json!({});
+                if let Value::Object(fields) = &mut args {
+                    for key in ["position_beats", "position_bar"] {
+                        if let Some(value) = fields.remove(key) {
+                            position[key] = value;
+                        }
+                    }
+                    if let Some(value) = fields.get("position_s") {
+                        position["position_s"] = value.clone();
+                    }
+                }
                 let ImportMidi {
                     path,
                     position_s,
@@ -391,6 +406,11 @@ impl DawkeyMcp {
                         .collect::<Result<_, String>>()
                 );
                 run(studio, move |s| {
+                    let (tempo, meter) = s.midi_import_maps(&file, use_file_tempo);
+                    times::Maps { tempo, meter }
+                        .resolve(&mut position, &stems, None)
+                        .map_err(dawkey_studio::StudioError::Invalid)?;
+                    let position_s = position["position_s"].as_f64().unwrap_or(position_s);
                     let import =
                         s.import_midi(&file, position_s, use_file_tempo, &targets, replace)?;
                     let mut result = to_json(&import);
