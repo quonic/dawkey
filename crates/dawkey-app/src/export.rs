@@ -143,6 +143,9 @@ impl App {
     /// The dialog's "Export…": closes it and asks where to.
     fn choose_export_location(&mut self) -> Result<(), String> {
         self.export_range()?;
+        // Settings the format can't take (FLAC at the project's 192 kHz)
+        // are refused before asking where to.
+        self.export_spec(self.view.export.format).check()?;
         if self.export.is_some() {
             return Err("an export is already running".into());
         }
@@ -182,6 +185,22 @@ impl App {
         ))
     }
 
+    /// What the export settings ask for, as a `file`.
+    fn export_spec(&self, file: FileFormat) -> ExportSpec {
+        let settings = self.view.export;
+        let project = self.studio.session().project();
+        ExportSpec {
+            quality: settings.quality,
+            bitrate_kbps: settings.bitrate_kbps,
+            tags: vec![("TITLE".to_owned(), project.name.clone())],
+            ..ExportSpec::new(
+                file,
+                settings.sample,
+                settings.sample_rate.unwrap_or(project.sample_rate),
+            )
+        }
+    }
+
     /// Exports the mix to `path` as the export settings say, on a worker
     /// thread; [`tick`](Self::tick) finishes it.
     pub fn start_export(&mut self, path: &Path) -> Result<(), String> {
@@ -189,22 +208,7 @@ impl App {
             return Err("an export is already running".into());
         }
         let (start_s, end_s) = self.export_range()?;
-        let settings = self.view.export;
-        let spec = ExportSpec {
-            quality: settings.quality,
-            bitrate_kbps: settings.bitrate_kbps,
-            tags: vec![(
-                "TITLE".to_owned(),
-                self.studio.session().project().name.clone(),
-            )],
-            ..ExportSpec::new(
-                FileFormat::from_path(path).unwrap_or(settings.format),
-                settings.sample,
-                settings
-                    .sample_rate
-                    .unwrap_or(self.studio.session().project().sample_rate),
-            )
-        };
+        let spec = self.export_spec(FileFormat::from_path(path).unwrap_or(self.view.export.format));
         spec.check()?;
         let job = self
             .studio

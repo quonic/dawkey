@@ -98,6 +98,11 @@ fn decode_native(path: &Path) -> Result<(Vec<Vec<f32>>, u32), MediaError> {
             Ok(None) => break,
             // A new logical stream (chained Ogg) starts; treat it as the end.
             Err(SymphoniaError::ResetRequired) => break,
+            // The file ends before its header says (a copy that didn't
+            // finish, a recording cut short): keep what's there, as players do.
+            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                break;
+            }
             Err(e) => return Err(decode_err(e.to_string())),
         };
         if packet.track_id != track_id {
@@ -141,7 +146,11 @@ fn resample(channels: &[Vec<f32>], from: u32, to: u32) -> Result<Vec<Vec<f32>>, 
     let output = resampler
         .process_all(&input, frames, None)
         .map_err(|e| e.to_string())?;
-    let interleaved = output.take_data();
+    let mut interleaved = output.take_data();
+    // rubato rounds the length up from a float ratio, which can come out a
+    // frame long (48000 / 44100 * 44100 is a hair over 48000).
+    let exact = (frames as u64 * u64::from(to)).div_ceil(u64::from(from)) as usize;
+    interleaved.truncate(exact * count);
     let mut planar = vec![Vec::with_capacity(interleaved.len() / count); count];
     for frame in interleaved.chunks_exact(count) {
         for (channel, sample) in planar.iter_mut().zip(frame) {
@@ -183,14 +192,37 @@ mod tests {
 
         let decoded = decode_file(&path, 48_000).unwrap();
         assert_eq!(decoded.source_rate, 44_100);
-        let frames = decoded.audio.frames();
-        assert!((47_990..=48_010).contains(&frames), "{frames} frames");
+        // Exactly a second: the length is rounded in whole numbers.
+        assert_eq!(decoded.audio.frames(), 48_000);
         let peak = decoded
             .audio
             .channel(0)
             .iter()
             .fold(0.0f32, |m, s| m.max(s.abs()));
         assert!((peak - 0.5).abs() < 0.02, "peak {peak}");
+    }
+
+    #[test]
+    fn decodes_files_that_were_cut_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("cut.wav");
+        write_wav(&wav, &[sine(48_000, 48_000, 440.0)], 48_000).unwrap();
+        let flac = dir.path().join("cut.flac");
+        crate::export(
+            &mut crate::MemorySource::new(vec![sine(48_000, 48_000, 440.0)]),
+            48_000,
+            &crate::ExportSpec::new(crate::FileFormat::Flac, crate::SampleFormat::Int24, 48_000),
+            &flac,
+            &crate::ExportProgress::default(),
+        )
+        .unwrap();
+        // Their headers say a second; the files hold about half of it.
+        for path in [wav, flac] {
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, &bytes[..bytes.len() / 2 + 1]).unwrap();
+            let frames = decode_file(&path, 48_000).unwrap().audio.frames();
+            assert!((20_000..48_000).contains(&frames), "{path:?}: {frames}");
+        }
     }
 
     #[test]

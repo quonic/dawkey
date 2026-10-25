@@ -2,10 +2,10 @@
 //! Exporting a mix to a file: stereo audio pulled a block at a time from a
 //! [`BlockSource`] (an offline render), converted to the file's sample rate,
 //! analyzed, dithered to whole-number samples (TPDF) and written as WAV
-//! (16 or 24-bit, or 32-bit float) or FLAC (16 or 24-bit). Nothing has to
-//! fit in memory but a FLAC file's compressed frames. The file is written
-//! beside its target and renamed at the end, so a failed or cancelled
-//! export leaves what was there.
+//! (16 or 24-bit, or 32-bit float; RF64 past 4 GiB) or FLAC (16 or 24-bit).
+//! Nothing has to fit in memory but a FLAC file's compressed frames. The
+//! file is written beside its target and renamed at the end, so a failed or
+//! cancelled export leaves what was there.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -138,6 +138,13 @@ impl ExportSpec {
         }
         if self.file == FileFormat::Ogg && self.sample_rate > 192_000 {
             return Err("Ogg Vorbis stores up to 192000 Hz".into());
+        }
+        // The format goes higher, but flacenc doesn't.
+        if self.file == FileFormat::Flac && self.sample_rate > 96_000 {
+            return Err(format!(
+                "FLAC exports go up to 96000 Hz, not {} (WAV goes higher)",
+                self.sample_rate
+            ));
         }
         if !(0.0..=10.0).contains(&self.quality) {
             return Err(format!("quality is 0 to 10, not {}", self.quality));
@@ -275,13 +282,13 @@ pub fn export_segmented(
     result
 }
 
-/// Where a file is written before it's complete: `.name.partial` beside it.
+/// Where a file is written before it's complete: beside it, under a short
+/// name of its own (a name made from the target's could be too long when
+/// the target's is close to the limit), unique to this process and export.
 fn partial_path(path: &Path) -> PathBuf {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    path.with_file_name(format!(".{name}.partial"))
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(".dawkey-export-{}-{n}.partial", std::process::id()))
 }
 
 /// The source at the file's rate: resampled, analyzed and handed out a
@@ -392,6 +399,9 @@ struct StreamResampler {
     out: Vec<Vec<f32>>,
     /// Output frames still to drop: the resampler's delay.
     trim: usize,
+    /// The rates, for working out how long the output is.
+    from: u32,
+    to: u32,
     frames_in: u64,
     frames_out: u64,
 }
@@ -412,6 +422,8 @@ impl StreamResampler {
             resampler,
             pending: vec![Vec::new(), Vec::new()],
             out: vec![vec![0.0; out_max], vec![0.0; out_max]],
+            from,
+            to,
             frames_in: 0,
             frames_out: 0,
         })
@@ -441,7 +453,8 @@ impl StreamResampler {
     /// The rest: what's pending, then silence until all of the input has
     /// come out.
     fn finish(&mut self, emit: &mut dyn FnMut(&[f32], &[f32])) -> Result<(), String> {
-        let expected = (self.resampler.resample_ratio() * self.frames_in as f64).ceil() as u64;
+        // In whole numbers: the float ratio can round a frame too many.
+        let expected = (self.frames_in * u64::from(self.to)).div_ceil(u64::from(self.from));
         let need = self.resampler.input_frames_next();
         let real = self.pending[0].len();
         self.pending.iter_mut().for_each(|p| p.resize(need, 0.0));
@@ -534,46 +547,120 @@ fn write_wav(
     spec: &ExportSpec,
     path: &Path,
 ) -> Result<ExportAnalysis, MediaError> {
-    let wav_err = |source| MediaError::Wav {
-        path: pipeline.path.clone(),
+    use std::io::{Seek, Write};
+
+    let target = pipeline.path.clone();
+    let io_err = |source| MediaError::Io {
+        path: target.clone(),
         source,
     };
-    let bits = spec.sample.bits();
-    let wav_spec = hound::WavSpec {
-        channels: 2,
-        sample_rate: spec.sample_rate,
-        bits_per_sample: bits as u16,
-        sample_format: match spec.sample {
-            SampleFormat::Float32 => hound::SampleFormat::Float,
-            _ => hound::SampleFormat::Int,
-        },
-    };
-    let mut writer = hound::WavWriter::create(path, wav_spec).map_err(wav_err)?;
-    let mut quantizer = Quantizer::new(bits.min(24));
+    let file = std::fs::File::create(path).map_err(io_err)?;
+    let mut writer = std::io::BufWriter::new(file);
+    let mut header = wav_header(spec.sample, spec.sample_rate);
+    writer.write_all(&header).map_err(io_err)?;
+    let mut quantizer = Quantizer::new(spec.sample.bits().min(24));
     let (mut left, mut right) = (Vec::new(), Vec::new());
+    let mut bytes = Vec::new();
+    let mut frames = 0u64;
     loop {
         pipeline.pull(BLOCK, &mut left, &mut right)?;
         if left.is_empty() {
             break;
         }
+        bytes.clear();
         for (&l, &r) in left.iter().zip(&right) {
             for x in [l, r] {
                 match spec.sample {
-                    SampleFormat::Float32 => writer.write_sample(x),
-                    _ => writer.write_sample(quantizer.sample(x)),
+                    SampleFormat::Float32 => bytes.extend_from_slice(&x.to_le_bytes()),
+                    SampleFormat::Int16 => {
+                        bytes.extend_from_slice(&(quantizer.sample(x) as i16).to_le_bytes());
+                    }
+                    SampleFormat::Int24 => {
+                        bytes.extend_from_slice(&quantizer.sample(x).to_le_bytes()[..3]);
+                    }
                 }
-                .map_err(|source| MediaError::Wav {
-                    path: pipeline.path.clone(),
-                    source,
-                })?;
             }
         }
+        writer.write_all(&bytes).map_err(io_err)?;
+        frames += left.len() as u64;
     }
-    writer.finalize().map_err(|source| MediaError::Wav {
-        path: pipeline.path.clone(),
-        source,
-    })?;
+    set_wav_length(&mut header, spec.sample, frames);
+    writer.seek(std::io::SeekFrom::Start(0)).map_err(io_err)?;
+    writer.write_all(&header).map_err(io_err)?;
+    writer.flush().map_err(io_err)?;
     Ok(pipeline.finish())
+}
+
+/// Where the `JUNK` chunk that makes room for RF64's `ds64` starts, and how
+/// long its body is: the RIFF and data sizes and the frame count (64 bits
+/// each), then an empty table's length.
+const WAV_DS64_AT: usize = 12;
+const WAV_DS64_LEN: usize = 28;
+
+/// A stereo WAV header for `sample`s at `rate`, its lengths still to be set
+/// ([`set_wav_length`]). Like hound's: PCM for 16-bit, extensible for more.
+/// After `WAVE` comes a `JUNK` chunk (which readers skip), room for the
+/// `ds64` chunk a file past 4 GiB needs (RF64, EBU Tech 3306).
+fn wav_header(sample: SampleFormat, rate: u32) -> Vec<u8> {
+    let bytes = (sample.bits() / 8) as u16;
+    let extensible = sample != SampleFormat::Int16;
+    let mut h = Vec::with_capacity(84);
+    h.extend_from_slice(b"RIFF\0\0\0\0WAVE");
+    h.extend_from_slice(b"JUNK");
+    h.extend_from_slice(&(WAV_DS64_LEN as u32).to_le_bytes());
+    h.resize(h.len() + WAV_DS64_LEN, 0);
+    h.extend_from_slice(b"fmt ");
+    h.extend_from_slice(&(if extensible { 40u32 } else { 16 }).to_le_bytes());
+    h.extend_from_slice(&(if extensible { 0xfffe_u16 } else { 1 }).to_le_bytes());
+    h.extend_from_slice(&2u16.to_le_bytes());
+    h.extend_from_slice(&rate.to_le_bytes());
+    h.extend_from_slice(&(rate * u32::from(bytes) * 2).to_le_bytes());
+    h.extend_from_slice(&(bytes * 2).to_le_bytes());
+    h.extend_from_slice(&(bytes * 8).to_le_bytes());
+    if extensible {
+        // cbSize, the valid bits, the channel mask (front left and right),
+        // then the subformat's GUID: PCM (1) or IEEE float (3).
+        h.extend_from_slice(&22u16.to_le_bytes());
+        h.extend_from_slice(&(bytes * 8).to_le_bytes());
+        h.extend_from_slice(&3u32.to_le_bytes());
+        let format = if sample == SampleFormat::Float32 {
+            3
+        } else {
+            1
+        };
+        h.extend_from_slice(&[
+            format, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71,
+        ]);
+    }
+    h.extend_from_slice(b"data\0\0\0\0");
+    h
+}
+
+/// Sets a [`wav_header`]'s lengths for `frames` frames. Past 4 GiB the
+/// 32-bit sizes can't hold them, so the file becomes RF64: its `JUNK` chunk
+/// turns into the `ds64` chunk with the real sizes, and the 32-bit ones are
+/// all ones.
+fn set_wav_length(header: &mut [u8], sample: SampleFormat, frames: u64) {
+    let data = frames * 2 * u64::from(sample.bits() / 8);
+    let riff = (header.len() - 8) as u64 + data;
+    let at = header.len() - 4;
+    match (u32::try_from(riff), u32::try_from(data)) {
+        (Ok(riff), Ok(data)) => {
+            header[4..8].copy_from_slice(&riff.to_le_bytes());
+            header[at..].copy_from_slice(&data.to_le_bytes());
+        }
+        _ => {
+            header[..4].copy_from_slice(b"RF64");
+            header[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+            header[WAV_DS64_AT..WAV_DS64_AT + 4].copy_from_slice(b"ds64");
+            let ds64 = &mut header[WAV_DS64_AT + 8..WAV_DS64_AT + 8 + WAV_DS64_LEN];
+            ds64[..8].copy_from_slice(&riff.to_le_bytes());
+            ds64[8..16].copy_from_slice(&data.to_le_bytes());
+            ds64[16..24].copy_from_slice(&frames.to_le_bytes());
+            ds64[24..].fill(0);
+            header[at..].copy_from_slice(&u32::MAX.to_le_bytes());
+        }
+    }
 }
 
 /// The pipeline as flacenc reads it.
@@ -629,13 +716,14 @@ fn write_flac(
 ) -> Result<ExportAnalysis, MediaError> {
     use flacenc::component::BitRepr;
     use flacenc::error::Verify;
-    let encode_err = |path: &Path, reason: String| MediaError::Encode {
-        path: path.to_owned(),
+    let target = pipeline.path.clone();
+    let encode_err = |reason: String| MediaError::Encode {
+        path: target.clone(),
         reason,
     };
     let config = flacenc::config::Encoder::default()
         .into_verified()
-        .map_err(|(_, e)| encode_err(path, format!("{e:?}")))?;
+        .map_err(|(_, e)| encode_err(format!("{e:?}")))?;
     let mut source = FlacSource {
         pipeline: &mut pipeline,
         quantizer: Quantizer::new(spec.sample.bits()),
@@ -648,15 +736,15 @@ fn write_flac(
     if let Some(error) = source.error.take() {
         return Err(error);
     }
-    let stream = stream.map_err(|e| encode_err(path, e.to_string()))?;
+    let stream = stream.map_err(|e| encode_err(e.to_string()))?;
     let mut sink = flacenc::bitsink::ByteSink::new();
     stream
         .write(&mut sink)
-        .map_err(|e| encode_err(path, format!("{e:?}")))?;
+        .map_err(|e| encode_err(format!("{e:?}")))?;
     let mut bytes = sink.as_slice().to_vec();
     fix_min_block_size(&mut bytes);
     std::fs::write(path, &bytes).map_err(|source| MediaError::Io {
-        path: path.to_owned(),
+        path: target.clone(),
         source,
     })?;
     Ok(pipeline.finish())
@@ -686,14 +774,16 @@ fn write_vorbis(
 
     use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
 
+    let target = pipeline.path.clone();
     let encode_err = |e: vorbis_rs::VorbisError| MediaError::Encode {
-        path: path.to_owned(),
+        path: target.clone(),
         reason: e.to_string(),
     };
-    let file = std::fs::File::create(path).map_err(|source| MediaError::Io {
-        path: path.to_owned(),
+    let io_err = |source| MediaError::Io {
+        path: target.clone(),
         source,
-    })?;
+    };
+    let file = std::fs::File::create(path).map_err(io_err)?;
     let rate = NonZeroU32::new(spec.sample_rate).expect("checked");
     let channels = NonZeroU8::new(2).expect("two");
     let mut builder = VorbisEncoderBuilder::new(rate, channels, std::io::BufWriter::new(file))
@@ -719,10 +809,7 @@ fn write_vorbis(
             .map_err(encode_err)?;
     }
     let mut out = encoder.finish().map_err(encode_err)?;
-    std::io::Write::flush(&mut out).map_err(|source| MediaError::Io {
-        path: path.to_owned(),
-        source,
-    })?;
+    std::io::Write::flush(&mut out).map_err(io_err)?;
     Ok(pipeline.finish())
 }
 
@@ -741,12 +828,13 @@ fn write_opus(
     /// Frames per packet: 20 ms at 48 kHz.
     const FRAME: usize = 960;
 
+    let target = pipeline.path.clone();
     let encode_err = |e: opus_pure::Error| MediaError::Encode {
-        path: path.to_owned(),
+        path: target.clone(),
         reason: e.to_string(),
     };
     let io_err = |source| MediaError::Io {
-        path: path.to_owned(),
+        path: target.clone(),
         source,
     };
     let mut encoder =
@@ -993,6 +1081,130 @@ mod tests {
             (decoded.source_rate, decoded.audio.frames()),
             (44_100, 44_100)
         );
+    }
+
+    #[test]
+    fn flac_goes_up_to_96k() {
+        let dir = tempfile::tempdir().unwrap();
+        for rate in [8_000, 12_345, 65_536, 96_000] {
+            let path = dir.path().join(format!("{rate}.flac"));
+            let mut sine = Sine {
+                at: 0,
+                frames: 12_000,
+            };
+            let spec = spec(FileFormat::Flac, SampleFormat::Int24, rate);
+            export(&mut sine, rate, &spec, &path, &ExportProgress::default()).unwrap();
+            let decoded = decode_file(&path, rate).unwrap();
+            assert_eq!(
+                (decoded.source_rate, decoded.audio.frames()),
+                (rate, 12_000)
+            );
+        }
+        // Past that the encoder can't, so it's refused before rendering.
+        let path = dir.path().join("hi.flac");
+        let spec = spec(FileFormat::Flac, SampleFormat::Int24, 176_400);
+        let mut sine = Sine {
+            at: 0,
+            frames: 12_000,
+        };
+        let progress = ExportProgress::default();
+        let err = export(&mut sine, 48_000, &spec, &path, &progress).unwrap_err();
+        assert!(
+            matches!(&err, MediaError::Unsupported { path: p, reason }
+                if p == &path && reason.contains("96000")),
+            "{err}"
+        );
+        assert_eq!(progress.frames.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn exports_to_a_long_file_name() {
+        // 250 bytes is a valid name, but not with ".partial" and more added.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{}.wav", "a".repeat(246)));
+        let mut sine = Sine {
+            at: 0,
+            frames: 1000,
+        };
+        let spec = spec(FileFormat::Wav, SampleFormat::Int16, 48_000);
+        export(&mut sine, 48_000, &spec, &path, &ExportProgress::default()).unwrap();
+        assert_eq!(decode_file(&path, 48_000).unwrap().audio.frames(), 1000);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_second_at_44k1_is_a_second_at_48k() {
+        // 48000 / 44100 * 44100 is a hair over 48000 in floats.
+        let dir = tempfile::tempdir().unwrap();
+        for (name, file) in [("a.wav", FileFormat::Wav), ("a.opus", FileFormat::Opus)] {
+            let path = dir.path().join(name);
+            let mut sine = Sine {
+                at: 0,
+                frames: 44_100,
+            };
+            let spec = spec(file, SampleFormat::Float32, 48_000);
+            let analysis =
+                export(&mut sine, 44_100, &spec, &path, &ExportProgress::default()).unwrap();
+            assert_eq!(analysis.frames, 48_000, "{name}");
+        }
+    }
+
+    #[test]
+    fn wav_headers_and_rf64() {
+        // An export reads back with hound too (Symphonia reads them above),
+        // the JUNK chunk skipped.
+        let dir = tempfile::tempdir().unwrap();
+        for sample in [
+            SampleFormat::Int16,
+            SampleFormat::Int24,
+            SampleFormat::Float32,
+        ] {
+            let path = dir.path().join("a.wav");
+            let mut sine = Sine {
+                at: 0,
+                frames: 1001,
+            };
+            let spec = spec(FileFormat::Wav, sample, 44_100);
+            export(&mut sine, 44_100, &spec, &path, &ExportProgress::default()).unwrap();
+            let reader = hound::WavReader::open(&path).unwrap();
+            let got = reader.spec();
+            assert_eq!(
+                (
+                    got.channels,
+                    got.sample_rate,
+                    u32::from(got.bits_per_sample)
+                ),
+                (2, 44_100, sample.bits())
+            );
+            assert_eq!(reader.duration(), 1001);
+            let len = std::fs::metadata(&path).unwrap().len();
+            let riff = u32::from_le_bytes(std::fs::read(&path).unwrap()[4..8].try_into().unwrap());
+            assert_eq!(u64::from(riff), len - 8);
+        }
+
+        // Six hours of 24-bit stereo at 48 kHz is past what a WAV's 32-bit
+        // sizes hold: it becomes RF64, the real sizes in its ds64 chunk.
+        let mut header = wav_header(SampleFormat::Int24, 48_000);
+        let frames = 6 * 3600 * 48_000u64;
+        set_wav_length(&mut header, SampleFormat::Int24, frames);
+        let u32_at = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
+        let u64_at = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().unwrap());
+        assert_eq!(&header[..4], b"RF64");
+        assert_eq!(u32_at(4), u32::MAX);
+        assert_eq!(&header[12..16], b"ds64");
+        assert_eq!(u32_at(16), 28);
+        let data = frames * 6;
+        assert_eq!(u64_at(20), header.len() as u64 - 8 + data);
+        assert_eq!(u64_at(28), data);
+        assert_eq!(u64_at(36), frames);
+        assert_eq!(&header[header.len() - 8..header.len() - 4], b"data");
+        assert_eq!(u32_at(header.len() - 4), u32::MAX);
+        // Just under the limit, it stays a WAV.
+        let mut header = wav_header(SampleFormat::Float32, 48_000);
+        let frames = (u64::from(u32::MAX) - header.len() as u64 + 8) / 8;
+        set_wav_length(&mut header, SampleFormat::Float32, frames);
+        assert_eq!(&header[..4], b"RIFF");
+        assert_eq!(&header[12..16], b"JUNK");
     }
 
     #[test]
