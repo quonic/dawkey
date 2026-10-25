@@ -860,8 +860,16 @@ impl App {
         }
     }
 
-    /// Queues files dropped at `pos` for import: the first onto the audio
-    /// track under the pointer (or a new track), the rest onto new tracks.
+    /// Files dropped on the window from the desktop, at `pos` in the
+    /// platform's logical pixels (like `handle_input`'s events).
+    pub fn handle_drop(&mut self, paths: Vec<std::path::PathBuf>, pos: Point) {
+        let z = self.ui_scale;
+        self.drop_files(paths, Point::new(pos.x / z, pos.y / z));
+    }
+
+    /// Queues files dropped at `pos` (in the app's units, like `click_at`)
+    /// for import: the first onto the audio track under the pointer (or a
+    /// new track), the rest onto new tracks.
     pub fn drop_files(&mut self, paths: Vec<std::path::PathBuf>, pos: Point) {
         let lanes = self.lanes_rect();
         let in_timeline = self.view.page == Page::Arrange && lanes.contains(pos);

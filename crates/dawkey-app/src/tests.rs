@@ -952,6 +952,27 @@ fn zoom_scroll_ruler_and_drops() {
 }
 
 #[test]
+fn drops_from_the_desktop_follow_the_ui_scale() {
+    let mut app = app();
+    let (track, _) = add_clip(&mut app, 4.0);
+    app.set_ui_scale(1.5);
+    // 40 units into the track's lane, before its clip...
+    let lane = app
+        .access_tree()
+        .find(&format!("track/{track}/lane"))
+        .unwrap()
+        .bounds;
+    let pos = Point::new(lane.x + 40.0, lane.y + lane.h / 2.0);
+    let expected = app.view_state().scroll_s + 40.0 / f64::from(app.view_state().px_per_s);
+    // ...is here in the platform's logical pixels.
+    app.handle_drop(vec!["/a.wav".into()], Point::new(pos.x * 1.5, pos.y * 1.5));
+    let imports = app.take_imports();
+    assert_eq!(imports[0].track, Some(TrackId(track)));
+    let snapped = crate::input::snap(app.studio.session().project(), expected);
+    assert!((imports[0].position_s - snapped).abs() < 1e-9);
+}
+
+#[test]
 fn arm_record_with_keys_and_clicks() {
     let mut app = app();
     let (track, _) = add_clip(&mut app, 4.0);
