@@ -350,6 +350,35 @@ fn loops_wrap_sample_accurately() {
 }
 
 #[test]
+fn a_loop_shorter_than_a_block_is_entered_and_wraps() {
+    let mut f = Fixture::new();
+    let src = f.source(vec![ramp(48_000, 0), ramp(48_000, 0)]);
+    f.place(src, 0.0);
+    // Loop 0.025 s .. 0.05 s = frames 1200 .. 2400.
+    f.session
+        .execute(
+            SetLoop {
+                start_s: Some(0.025),
+                end_s: Some(0.05),
+                enabled: Some(true),
+            }
+            .into(),
+        )
+        .unwrap();
+    let (mut ctl, mut proc) = new_engine(RATE, f.graph());
+    ctl.locate(1_000).unwrap();
+    ctl.play().unwrap();
+    // One buffer from 200 frames before the loop: into it, through it,
+    // and back to its start.
+    let out = process(&mut proc, 2_048, &[]);
+    assert_eq!(out[199], 1_199.0);
+    assert_eq!(out[1_399], 2_399.0);
+    assert_eq!(out[1_400], 1_200.0);
+    assert_eq!(out[2_047], 1_847.0);
+    assert_eq!(ctl.transport().position, 1_848);
+}
+
+#[test]
 fn offline_renders_play_straight_through_the_loop() {
     let mut f = Fixture::new();
     let src = f.source(vec![ramp(48_000, 0), ramp(48_000, 0)]);

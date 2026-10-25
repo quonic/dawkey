@@ -328,14 +328,19 @@ impl EngineProcessor {
         // While stopped, instruments still play live input and release
         // tails; the transport doesn't move.
         while done < total {
-            // Split at block size and at the loop end.
+            // Split at block size and at the loop's start and end, so a loop
+            // shorter than a block is entered and wraps.
             let mut len = (total - done).min(MAX_BLOCK);
             let looping = self
                 .graph
                 .loop_range
                 .filter(|r| self.playing && self.position >= r.start && self.position < r.end);
-            if let Some(r) = looping {
-                len = len.min((r.end - self.position) as usize);
+            match self.graph.loop_range {
+                Some(r) if looping.is_some() => len = len.min((r.end - self.position) as usize),
+                Some(r) if self.playing && self.position < r.start => {
+                    len = len.min((r.start - self.position) as usize)
+                }
+                _ => {}
             }
             let range = done..done + len;
             let from = midi.partition_point(|e| (e.offset as usize) < range.start);
