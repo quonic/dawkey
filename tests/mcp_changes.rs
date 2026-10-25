@@ -102,12 +102,31 @@ async fn instance_and_changes() {
         .call("new_project", json!({ "discard_changes": true }))
         .await
         .unwrap();
+    // Another project carries the revisions on, so the old project's
+    // revisions aren't covered, however many changes the new one makes.
     let fresh = dawkey
         .call("get_changes", json!({ "since_revision": 5 }))
         .await
         .unwrap();
-    assert_eq!(fresh["revision"], 0);
+    assert_eq!(fresh["revision"], 6);
     assert_eq!(fresh["complete"], false);
+    for n in 0..5 {
+        dawkey
+            .call("add_track", json!({ "name": format!("New {n}") }))
+            .await
+            .unwrap();
+    }
+    let since_old = dawkey
+        .call("get_changes", json!({ "since_revision": 5 }))
+        .await
+        .unwrap();
+    assert_eq!(since_old["changes"].as_array().unwrap().len(), 5);
+    assert_eq!(since_old["complete"], false, "{since_old}");
+    let since_new = dawkey
+        .call("get_changes", json!({ "since_revision": 6 }))
+        .await
+        .unwrap();
+    assert_eq!(since_new["complete"], true);
     dawkey.shutdown().await.unwrap();
 }
 

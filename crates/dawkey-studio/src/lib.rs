@@ -709,7 +709,11 @@ impl Studio {
                 tracing::warn!("resetting the transport: {e}");
             }
         }
-        self.session = loaded.session;
+        // Revisions carry on, so a client's old revision isn't taken for one
+        // of the new project.
+        let mut session = loaded.session;
+        session.continue_revisions(self.session.revision());
+        self.session = session;
         self.media = loaded.media;
         self.peaks = loaded.peaks;
         self.missing = loaded.missing;

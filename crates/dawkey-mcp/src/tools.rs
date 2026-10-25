@@ -88,8 +88,9 @@ pub(crate) struct GetState {
 /// notes and plugin slots it touched, and `also` for the tempo, meter, loop,
 /// punch, name, plugin chains and automation. Use it to catch up with what
 /// the window or another client did. Every result also carries `instance`,
-/// which changes when Dawkey restarts; a new instance or another project
-/// starts the revisions over (`complete: false`; call get_state then).
+/// which changes when Dawkey restarts; a new instance starts the revisions
+/// over, and another project carries them on, so an earlier revision isn't
+/// covered (`complete: false`; call get_state then).
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct GetChanges {

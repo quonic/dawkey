@@ -149,6 +149,18 @@ impl Session {
         self.revision
     }
 
+    /// Numbers this session's revisions on from `previous`, the revision of
+    /// the session it replaces (a new or opened project), so that a revision
+    /// a client saw of the old project never stands for one of this. The
+    /// replacement counts as a revision of its own that isn't in the log:
+    /// changes since an old project's revision are incomplete.
+    pub fn continue_revisions(&mut self, previous: u64) {
+        let offset = previous + 1;
+        self.revision += offset;
+        self.saved_revision += offset;
+        self.changes.shift(offset);
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision || self.states_changed
     }
@@ -889,6 +901,52 @@ mod tests {
         .unwrap();
         s.undo().unwrap();
         assert_eq!(s.project().tracks[0].gain_db, -4.0);
+    }
+
+    #[test]
+    fn changes_of_a_merged_gesture_are_complete() {
+        // The first step is a fader drag: one change for revisions 1 to 3.
+        let mut s = Session::default();
+        for gain in [-1.0, -2.0, -3.0] {
+            s.execute_merging(
+                SetTrackGain {
+                    track: crate::model::MASTER,
+                    gain_db: gain,
+                }
+                .into(),
+                "fader",
+            )
+            .unwrap();
+        }
+        s.end_merge();
+        let changes = s.changes_since(0);
+        assert_eq!(changes.changes.len(), 1);
+        assert_eq!(changes.changes[0].revision, 3);
+        assert!(changes.complete, "{changes:?}");
+        assert!(s.changes_since(2).complete);
+    }
+
+    #[test]
+    fn revisions_carry_on_into_another_project() {
+        let mut old = Session::default();
+        for name in ["A", "B", "C"] {
+            add(&mut old, name);
+        }
+        let mut s = Session::default();
+        s.continue_revisions(old.revision());
+        assert_eq!(s.revision(), 4);
+        assert!(!s.is_dirty());
+        // A client that saw the old project hasn't seen the replacement.
+        assert!(!s.changes_since(3).complete);
+        assert!(s.changes_since(4).complete);
+        for name in ["D", "E", "F", "G", "H"] {
+            add(&mut s, name);
+        }
+        let since_old = s.changes_since(3);
+        assert_eq!(since_old.changes.len(), 5);
+        assert!(!since_old.complete, "{since_old:?}");
+        assert!(s.changes_since(4).complete);
+        assert!(s.is_dirty());
     }
 
     #[test]
