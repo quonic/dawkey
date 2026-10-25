@@ -346,3 +346,81 @@ fn autosaves_recover_a_bundles_unsaved_changes() {
     Studio::discard_recovery(&recovery);
     assert!(open().bundle_recovery().is_none());
 }
+
+/// A MIDI file with two tracks of one note each.
+fn two_track_file() -> dawkey_media::MidiFile {
+    use dawkey_media::{MidiFileNote, MidiFileTrack};
+    let track = |name: &str, pitch| MidiFileTrack {
+        name: name.into(),
+        notes: vec![MidiFileNote {
+            pitch,
+            velocity: 100,
+            start_beats: 0.0,
+            length_beats: 4.0,
+        }],
+        ..Default::default()
+    };
+    dawkey_media::MidiFile {
+        tempo: vec![],
+        meters: vec![],
+        tracks: vec![track("A", 60), track("B", 64)],
+    }
+}
+
+/// A studio with `file` imported onto new tracks, and those tracks.
+fn studio_with_imported(file: &dawkey_media::MidiFile) -> (Studio, Vec<dawkey_core::TrackId>) {
+    let mut studio = Studio::new(
+        LoadedProject::new(Project::default()),
+        AudioBackend::Virtual,
+    )
+    .unwrap();
+    let first = studio.import_midi(file, 0.0, None, &[], false).unwrap();
+    (studio, first.tracks)
+}
+
+#[test]
+fn reimport_onto_one_target_replaces_its_clip() {
+    let file = two_track_file();
+    let (mut studio, tracks) = studio_with_imported(&file);
+    let targets = [crate::MidiImportTarget {
+        file_track: 0,
+        track: tracks[0],
+    }];
+    let again = studio
+        .import_midi(&file, 0.0, None, &targets, true)
+        .unwrap();
+    assert_eq!(again.removed_clips.len(), 1);
+}
+
+#[test]
+fn reimport_onto_several_targets_replaces_each_clip() {
+    let file = two_track_file();
+    let (mut studio, tracks) = studio_with_imported(&file);
+    let targets = [
+        crate::MidiImportTarget {
+            file_track: 0,
+            track: tracks[0],
+        },
+        crate::MidiImportTarget {
+            file_track: 1,
+            track: tracks[1],
+        },
+    ];
+    let again = studio
+        .import_midi(&file, 0.0, None, &targets, true)
+        .unwrap();
+    assert_eq!(again.removed_clips.len(), 2);
+    assert_eq!(again.clips.len(), 2);
+    // Each mapped track is left with only its new clip.
+    let project = studio.session().project();
+    for (&track, &clip) in tracks.iter().zip(&again.clips) {
+        let clips: Vec<_> = project
+            .track(track)
+            .unwrap()
+            .clips
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(clips, [clip]);
+    }
+}
