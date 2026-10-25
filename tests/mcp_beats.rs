@@ -229,3 +229,60 @@ async fn smaller_states() {
     assert_eq!(opened["project"]["tracks"][0]["clips"][0]["note_count"], 2);
     dawkey.shutdown().await.unwrap();
 }
+
+/// set_clip_length's `length_beats` is at the tempo where the clip starts,
+/// not at the project's start, also in a batch.
+#[tokio::test]
+async fn clip_length_in_beats_at_the_clips_tempo() {
+    const RATE: u64 = 48_000;
+    let dawkey = start().await;
+    // 120 bpm, then 60 bpm from beat 8 (4 s).
+    dawkey
+        .call("set_tempo", json!({ "bpm": 120 }))
+        .await
+        .unwrap();
+    dawkey
+        .call("set_tempo", json!({ "bpm": 60, "at_beats": 8 }))
+        .await
+        .unwrap();
+    let added = dawkey
+        .call(
+            "add_midi_clip",
+            json!({
+                "position_beats": 8,
+                "length_beats": 4,
+                "notes": [{ "pitch": 60, "start_beats": 0, "length_beats": 1 }],
+            }),
+        )
+        .await
+        .unwrap();
+    let clip = added["clip"].as_u64().unwrap();
+    let length =
+        |state: &serde_json::Value| state["project"]["tracks"][0]["clips"][0]["length"].clone();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(length(&state), 4 * RATE);
+
+    // 2 beats at 60 bpm are 2 s.
+    dawkey
+        .call(
+            "set_clip_length",
+            json!({ "clip": clip, "length_beats": 2 }),
+        )
+        .await
+        .unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(length(&state), 2 * RATE, "{state}");
+
+    dawkey
+        .call(
+            "batch",
+            json!({ "operations": [
+                { "tool": "set_clip_length", "args": { "clip": clip, "length_beats": 3 } },
+            ] }),
+        )
+        .await
+        .unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(length(&state), 3 * RATE, "{state}");
+    dawkey.shutdown().await.unwrap();
+}

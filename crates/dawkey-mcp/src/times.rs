@@ -7,7 +7,7 @@
 //! and meter maps before the tool sees them. [`with_beats`] adds beats to
 //! the state tools' results the same way.
 
-use dawkey_core::{MeterMap, Project, TempoMap};
+use dawkey_core::{ClipId, MeterMap, Project, TempoMap};
 use serde_json::{Map, Value, json};
 
 /// Arguments in seconds that aren't timeline positions, so beats and bars
@@ -107,6 +107,19 @@ fn stem_of(key: &str) -> Option<&str> {
         .or_else(|| key.strip_suffix("_bar"))
 }
 
+/// Replaces the positions in beats and bars among `args` with seconds,
+/// through `project`'s tempo and meter maps (see [`Maps::resolve`]). A
+/// length in beats for the clip `args` name, where they give no position
+/// (set_clip_length), is at the tempo where that clip starts.
+pub(crate) fn resolve(project: &Project, args: &mut Value, stems: &[String]) -> Result<(), String> {
+    let clip_start_s = args
+        .get("clip")
+        .and_then(Value::as_u64)
+        .and_then(|id| project.clip(ClipId(id)))
+        .map(|(_, clip)| project.frames_to_seconds(clip.start));
+    Maps::of(project).resolve(args, stems, clip_start_s)
+}
+
 /// The project's tempo and meter maps, for resolving positions.
 #[derive(Debug, Clone)]
 pub(crate) struct Maps {
@@ -138,8 +151,15 @@ impl Maps {
     }
 
     /// Replaces every `*_beats` and `*_bar` in `args` whose stem is one of
-    /// `stems` with its `*_s`.
-    pub(crate) fn resolve(&self, args: &mut Value, stems: &[String]) -> Result<(), String> {
+    /// `stems` with its `*_s`. A length in beats is measured from the
+    /// position `args` give (`position_s` or `start_s`), else from
+    /// `clip_start_s`, else from the project's start.
+    pub(crate) fn resolve(
+        &self,
+        args: &mut Value,
+        stems: &[String],
+        clip_start_s: Option<f64>,
+    ) -> Result<(), String> {
         let Value::Object(args) = args else {
             return Ok(());
         };
@@ -183,6 +203,7 @@ impl Maps {
                 .get("position_s")
                 .or_else(|| args.get("start_s"))
                 .and_then(Value::as_f64)
+                .or(clip_start_s)
                 .unwrap_or(0.0);
             let from_beat = self.tempo.beat_at_seconds(from_s);
             let seconds = self.seconds_at_beat(from_beat + value) - from_s;
@@ -402,24 +423,24 @@ mod tests {
             .map(str::to_owned)
             .into();
         let mut args = json!({ "start_beats": 4, "end_bar": 3.5, "length_beats": 2 });
-        maps.resolve(&mut args, &stems).unwrap();
+        maps.resolve(&mut args, &stems, None).unwrap();
         assert_eq!(
             args,
             json!({ "start_s": 2.0, "end_s": 5.0, "length_s": 1.0 })
         );
 
         let mut args = json!({ "position_s": 1.0, "position_beats": 2 });
-        let err = maps.resolve(&mut args, &stems).unwrap_err();
+        let err = maps.resolve(&mut args, &stems, None).unwrap_err();
         assert!(err.contains("not both"), "{err}");
         let mut args = json!({ "position_bar": 0 });
-        let err = maps.resolve(&mut args, &stems).unwrap_err();
+        let err = maps.resolve(&mut args, &stems, None).unwrap_err();
         assert!(err.contains("at least 1"), "{err}");
         let mut args = json!({ "position_s": 1.0, "position_beats": null });
-        maps.resolve(&mut args, &stems).unwrap();
+        maps.resolve(&mut args, &stems, None).unwrap();
         assert_eq!(args, json!({ "position_s": 1.0 }));
         // A tool's own `*_beats` (set_tempo's at_beats) is left alone.
         let mut args = json!({ "at_beats": 2 });
-        maps.resolve(&mut args, &stems).unwrap();
+        maps.resolve(&mut args, &stems, None).unwrap();
         assert_eq!(args, json!({ "at_beats": 2 }));
     }
 

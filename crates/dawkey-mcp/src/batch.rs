@@ -59,9 +59,7 @@ impl Prepared {
             .map(|o| serde_json::to_value(o).expect("outcomes serialize"))
             .collect();
         substitute(&mut args, &outcomes).map_err(fail)?;
-        crate::times::Maps::of(project)
-            .resolve(&mut args, &self.stems)
-            .map_err(fail)?;
+        crate::times::resolve(project, &mut args, &self.stems).map_err(fail)?;
         (self.spec.parse)(args).map_err(|e| fail(format!("invalid arguments: {e}")))
     }
 }

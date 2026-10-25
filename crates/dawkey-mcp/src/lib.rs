@@ -230,13 +230,12 @@ impl DawkeyMcp {
             .map(|t| times::position_stems(&Value::Object((*t.input_schema).clone())))
             .unwrap_or_default();
         if times::has_beats(&args, &stems) {
-            let maps = tool_try!(
-                run(studio, |s| Ok::<_, String>(times::Maps::of(
-                    s.session().project()
-                )))
+            args = tool_try!(
+                run(studio, move |s| {
+                    times::resolve(s.session().project(), &mut args, &stems).map(|()| args)
+                })
                 .await
             );
-            tool_try!(maps.resolve(&mut args, &stems));
         }
         let result = match name {
             GET_STATE => {
