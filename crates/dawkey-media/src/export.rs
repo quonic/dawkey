@@ -282,13 +282,13 @@ pub fn export_segmented(
     result
 }
 
-/// Where a file is written before it's complete: `.name.partial` beside it.
+/// Where a file is written before it's complete: beside it, under a short
+/// name of its own (a name made from the target's could be too long when
+/// the target's is close to the limit), unique to this process and export.
 fn partial_path(path: &Path) -> PathBuf {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    path.with_file_name(format!(".{name}.partial"))
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(".dawkey-export-{}-{n}.partial", std::process::id()))
 }
 
 /// The source at the file's rate: resampled, analyzed and handed out a
@@ -1115,6 +1115,21 @@ mod tests {
             "{err}"
         );
         assert_eq!(progress.frames.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn exports_to_a_long_file_name() {
+        // 250 bytes is a valid name, but not with ".partial" and more added.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{}.wav", "a".repeat(246)));
+        let mut sine = Sine {
+            at: 0,
+            frames: 1000,
+        };
+        let spec = spec(FileFormat::Wav, SampleFormat::Int16, 48_000);
+        export(&mut sine, 48_000, &spec, &path, &ExportProgress::default()).unwrap();
+        assert_eq!(decode_file(&path, 48_000).unwrap().audio.frames(), 1000);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
