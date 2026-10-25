@@ -129,7 +129,9 @@ pub(crate) fn enter(sandbox: &Sandbox) -> Result<Entered, String> {
             "the plugin process has {threads} threads; it must have one to enter its sandbox"
         ));
     }
-    let landlock = landlock(&writable(&sandbox.writable)).map_err(|e| format!("Landlock: {e}"))?;
+    let writable = writable(&sandbox.writable);
+    make_folders(&writable);
+    let landlock = landlock(&writable).map_err(|e| format!("Landlock: {e}"))?;
     let seccomp = match seccomp() {
         Ok(()) => true,
         Err(e) if landlock == Enforced::Not => {
@@ -141,6 +143,17 @@ pub(crate) fn enter(sandbox: &Sandbox) -> Result<Entered, String> {
         }
     };
     Ok(Entered { landlock, seccomp })
+}
+
+/// Makes the folders a sandboxed plugin may write in that aren't there yet:
+/// Landlock gives no rule to a path it can't open, so one made later (as a
+/// user's first preset makes `~/.lv2`) couldn't be written in.
+fn make_folders(writable: &[PathBuf]) {
+    for path in writable {
+        if let Err(e) = std::fs::create_dir_all(path) {
+            tracing::warn!("sandboxed plugins can't write in {}: {e}", path.display());
+        }
+    }
 }
 
 fn landlock(writable: &[PathBuf]) -> Result<Enforced, landlock::RulesetError> {
@@ -408,6 +421,35 @@ mod tests {
             assert!(!elsewhere.path().join("file").exists());
             assert_eq!(std::fs::read(allowed.path().join("preset")).unwrap(), b"1");
         }
+    }
+
+    /// LV2 and VST3 user presets go in `~/.lv2` and `~/.vst3/presets`
+    /// (see the test below), which a user's first preset makes: folders
+    /// plugins may write in are writable before they're there too.
+    #[test]
+    fn folders_that_arent_there_yet_are_writable() {
+        let here = std::env::current_dir().unwrap();
+        let home = tempfile::tempdir_in(&here).unwrap();
+        let home_path = home.path().to_owned();
+        let sandbox = Sandbox {
+            writable: vec![home_path.join(".lv2"), home_path.join(".vst3/presets")],
+        };
+        in_sandbox(&sandbox, move |entered| {
+            if entered.landlock != Enforced::Fully {
+                // Nothing to check where writing isn't limited.
+                return Ok(());
+            }
+            for dir in [".vst3/presets/Vendor/Plugin", ".lv2/My_Preset.lv2"] {
+                std::fs::create_dir_all(home_path.join(dir))
+                    .map_err(|e| format!("~/{dir}: {e}"))?;
+            }
+            // Only those: not the rest of the home folder.
+            let denied = std::fs::create_dir(home_path.join(".vst3/elsewhere"));
+            if !denied.is_err_and(|e| e.kind() == ErrorKind::PermissionDenied) {
+                return Err("writing elsewhere in the home folder".to_owned());
+            }
+            Ok(())
+        });
     }
 
     #[test]

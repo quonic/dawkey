@@ -13,13 +13,14 @@
 //! what the host process made of the previous one, and hands it this one.
 //! The output comes out of a FIFO that starts with a block of silence, so
 //! the plugin is late by exactly that much (reported as latency, which
-//! delay compensation lines up). A block longer than that grows the delay
-//! once. If the host process isn't done in time, the block is silence; if
-//! it dies, the track's audio passes through. Offline renders wait for each
-//! block instead, so they add no latency.
+//! delay compensation lines up), and so is the MIDI it sends. A block
+//! longer than that grows the delay once. If the host process isn't done
+//! in time, the block is silence (its events go with the next block it
+//! gets); if it dies, the track's audio passes through. Offline renders
+//! wait for each block instead, so they add no latency.
 
-use std::collections::HashMap;
-use std::io;
+use std::collections::{HashMap, VecDeque};
+use std::io::{self, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -28,15 +29,18 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::time::{Duration, Instant};
 
-use dawkey_engine::{MAX_BLOCK, MidiSink, PluginEvent, PluginProcessor, ProcessContext};
+use dawkey_engine::{
+    MAX_BLOCK, MidiSink, PluginEvent, PluginEventKind, PluginProcessor, ProcessContext,
+};
 
 use super::proto::{Envelope, FromHost, ToHost, read_frame, write_frame};
 use super::sandbox::{Enforced, Entered, Sandbox};
 use super::shm::{MAX_AUX, MAX_EVENTS, Shm, WireEvent, WireTransport, futex_wait, send_fd, signal};
 use crate::{ParamChange, PluginError, PluginInfo, SearchPath, StatePaths};
 
-/// How long a plugin may take to load (and a process to enter its
-/// sandbox): one that takes longer is taken to hang, and its process goes.
+/// How long a plugin may take to load (and a process to enter its sandbox,
+/// or to take in what's written to it): one that takes longer is taken to
+/// hang, and its process goes.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long Dawkey waits for an answer to a question, to save a state (a
 /// big one takes a while) and to show a GUI. One that takes longer is
@@ -190,7 +194,25 @@ impl Process {
             request,
             message,
         };
-        write_frame(&mut &*lock(&self.socket), &envelope, blob)
+        self.write(LOAD_TIMEOUT, |socket| write_frame(socket, &envelope, blob))
+    }
+
+    /// Writes to its socket, for up to `timeout`: a frame bigger than the
+    /// socket's buffer (a big state) waits for the process to read it, and
+    /// a GUI's dialog can hold that up. A write that doesn't finish in time
+    /// means the process hangs, and one that fails leaves the stream broken
+    /// (half a frame, perhaps): either way it goes, with every instance in
+    /// it.
+    fn write(
+        &self,
+        timeout: Duration,
+        write: impl FnOnce(&mut Until<'_>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let written = write(&mut Until::new(&lock(&self.socket), timeout));
+        if written.is_err() {
+            self.kill();
+        }
+        written
     }
 
     /// Sends `load` for `instance`, then its shared memory.
@@ -202,14 +224,15 @@ impl Process {
         state: &[u8],
         shm: &Shm,
     ) -> io::Result<()> {
-        let socket = lock(&self.socket);
         let envelope = Envelope {
             instance,
             request,
             message: load,
         };
-        write_frame(&mut &*socket, &envelope, state)?;
-        send_fd(&socket, shm.fd())
+        self.write(LOAD_TIMEOUT, |socket| {
+            write_frame(socket, &envelope, state)?;
+            send_fd(socket.socket()?, shm.fd())
+        })
     }
 
     /// Whether it exited (then its instances are gone).
@@ -249,6 +272,42 @@ impl Drop for Process {
     }
 }
 
+/// A socket that's written to until a deadline, however many writes that
+/// takes (a socket's write timeout is for each write).
+struct Until<'a> {
+    socket: &'a UnixStream,
+    until: Instant,
+}
+
+impl<'a> Until<'a> {
+    fn new(socket: &'a UnixStream, timeout: Duration) -> Self {
+        Self {
+            socket,
+            until: Instant::now() + timeout,
+        }
+    }
+
+    /// The socket, its write timeout set to the time left.
+    fn socket(&self) -> io::Result<&'a UnixStream> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.socket.set_write_timeout(Some(left))?;
+        Ok(self.socket)
+    }
+}
+
+impl Write for Until<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.socket()?.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Has a new process enter `sandbox`, before anything else.
 fn enter_sandbox(socket: &UnixStream, sandbox: &Sandbox) -> Result<Entered, String> {
     let message = Envelope {
@@ -256,7 +315,7 @@ fn enter_sandbox(socket: &UnixStream, sandbox: &Sandbox) -> Result<Entered, Stri
         request: 0,
         message: ToHost::Sandbox(sandbox.clone()),
     };
-    write_frame(&mut &*socket, &message, &[]).map_err(|e| e.to_string())?;
+    write_frame(&mut Until::new(socket, LOAD_TIMEOUT), &message, &[]).map_err(|e| e.to_string())?;
     socket
         .set_read_timeout(Some(LOAD_TIMEOUT))
         .map_err(|e| e.to_string())?;
@@ -728,16 +787,22 @@ pub(crate) struct BridgedProcessor {
     shm: Arc<Shm>,
     status: Arc<Status>,
     offline: bool,
-    /// The block with the host process (its length and other outputs), if
-    /// one is.
-    pending: Option<(usize, usize)>,
+    /// The block with the host process (its length, other outputs, and the
+    /// frame the MIDI it sends is due from), if one is.
+    pending: Option<(usize, usize, u64)>,
     /// Requests sent so far.
     sent: u32,
     delay: usize,
+    /// Frames processed so far: the clock MIDI is due by.
+    clock: u64,
     main: [Fifo; 2],
     aux: Box<[[Fifo; 2]]>,
-    /// MIDI the plugin sent in the last block it did, to pass on now.
-    midi: Vec<PluginEvent>,
+    /// MIDI the plugin sent, and the frame each is due to pass on (as late
+    /// as its audio, `delay` frames after the frame it was sent for).
+    midi: VecDeque<(u64, PluginEventKind)>,
+    /// What still matters of the events of blocks the host process missed
+    /// (it was busy), to go with the next block it gets.
+    held: Vec<PluginEvent>,
     /// Blocks the host process wasn't done with in time.
     late: u64,
 }
@@ -760,9 +825,12 @@ impl BridgedProcessor {
             pending: None,
             sent: 0,
             delay,
+            clock: 0,
             main: [Fifo::new(), Fifo::new()],
             aux: (0..aux).map(|_| [Fifo::new(), Fifo::new()]).collect(),
-            midi: Vec::with_capacity(MAX_EVENTS),
+            // Room for the MIDI of a few blocks in flight.
+            midi: VecDeque::with_capacity(4 * MAX_EVENTS),
+            held: Vec::with_capacity(MAX_EVENTS),
             late: 0,
         };
         for fifo in processor.fifos() {
@@ -794,15 +862,42 @@ impl BridgedProcessor {
         let aux = context.aux.len().min(MAX_AUX);
         block.aux_count = aux as u32;
         block.transport = WireTransport::from_transport(&context.transport);
-        let n = events.len().min(MAX_EVENTS);
-        for (wire, event) in block.events.iter_mut().zip(&events[..n]) {
+        // What it missed first (at its start), then this block's events.
+        let n = (self.held.len() + events.len()).min(MAX_EVENTS);
+        for (wire, event) in block.events.iter_mut().zip(self.held.iter().chain(events)) {
             *wire = WireEvent::from_event(event);
         }
         block.events_in = n as u32;
         block.events_out = 0;
+        self.held.clear();
         self.sent = self.sent.wrapping_add(1);
         signal(self.shm.request(), self.sent);
-        self.pending = Some((frames, aux));
+        self.pending = Some((frames, aux, self.clock + self.delay as u64));
+    }
+
+    /// Keeps what matters of the events of a block the host process misses,
+    /// for the next block it gets: each parameter's last value, note-offs
+    /// and other MIDI. Note-ons are dropped (too late to play).
+    fn hold(&mut self, events: &[PluginEvent]) {
+        for event in events {
+            let kind = event.kind;
+            match kind {
+                PluginEventKind::NoteOn { .. } => continue,
+                PluginEventKind::Param { index, .. } => {
+                    let earlier = self.held.iter_mut().find(
+                        |e| matches!(e.kind, PluginEventKind::Param { index: i, .. } if i == index),
+                    );
+                    if let Some(earlier) = earlier {
+                        earlier.kind = kind;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            if self.held.len() < self.held.capacity() {
+                self.held.push(PluginEvent { offset: 0, kind });
+            }
+        }
     }
 
     /// Whether the host process is done with the block sent.
@@ -811,8 +906,8 @@ impl BridgedProcessor {
     }
 
     /// Takes the block the host process did: its audio into the FIFOs, its
-    /// MIDI to pass on.
-    fn collect(&mut self, frames: usize, aux: usize) {
+    /// MIDI to pass on from frame `due`.
+    fn collect(&mut self, frames: usize, aux: usize, due: u64) {
         // SAFETY: the host process is done with it: the memory is ours.
         let block = unsafe { self.shm.block() };
         for (fifo, data) in self.main.iter_mut().zip(&block.audio) {
@@ -827,10 +922,13 @@ impl BridgedProcessor {
                 }
             }
         }
-        self.midi.clear();
         let n = (block.events_out as usize).min(MAX_EVENTS);
-        self.midi
-            .extend(block.midi_out[..n].iter().filter_map(|e| e.to_event()));
+        for event in block.midi_out[..n].iter().filter_map(|e| e.to_event()) {
+            if self.midi.len() < self.midi.capacity() {
+                self.midi
+                    .push_back((due + u64::from(event.offset), event.kind));
+            }
+        }
         self.pending = None;
     }
 
@@ -895,9 +993,9 @@ impl PluginProcessor for BridgedProcessor {
             return self.process_waiting(audio, context, events, midi_out);
         }
         // The block it did since the last call, if it's done.
-        if let Some((done_frames, aux)) = self.pending {
+        if let Some((done_frames, aux, due)) = self.pending {
             if self.done() {
-                self.collect(done_frames, aux);
+                self.collect(done_frames, aux, due);
             } else {
                 self.late += 1;
             }
@@ -912,9 +1010,11 @@ impl PluginProcessor for BridgedProcessor {
             self.status.delay.store(frames as u32, Ordering::Relaxed);
         }
         // This block goes to it, unless it's still busy (then the plugin
-        // misses it).
+        // misses it, but not what its events change).
         if self.pending.is_none() {
             self.send(&audio, &context, events);
+        } else {
+            self.hold(events);
         }
         let [left, right] = audio;
         self.main[0].pop(left);
@@ -924,15 +1024,56 @@ impl PluginProcessor for BridgedProcessor {
                 fifo.pop(&mut channel[..frames]);
             }
         }
-        let last = (frames as u32).saturating_sub(1);
-        for event in self.midi.drain(..) {
-            midi_out.push(event.offset.min(last), event.kind);
+        // The MIDI due in this block (or before: from a late block).
+        let end = self.clock + frames as u64;
+        while let Some(&(due, kind)) = self.midi.front()
+            && due < end
+        {
+            self.midi.pop_front();
+            midi_out.push(due.saturating_sub(self.clock) as u32, kind);
         }
+        self.clock = end;
     }
 
     fn stop(&mut self) {}
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_process_that_takes_in_nothing_is_not_waited_for_forever() {
+        // A process that never reads (as a GUI's dialog holds up a plugin
+        // process's main thread).
+        let program = BridgeProgram {
+            program: PathBuf::from("sleep"),
+            args: vec!["60".to_owned()],
+            share: false,
+            sandbox: None,
+        };
+        let process = Process::start(&program).unwrap();
+        // A frame bigger than the socket's buffer (a big state) doesn't
+        // hang Dawkey: writing it gives up in time (LOAD_TIMEOUT, shortened
+        // here), however many writes it took...
+        let envelope = Envelope {
+            instance: 1,
+            request: 1,
+            message: ToHost::Unload,
+        };
+        let timeout = Duration::from_millis(300);
+        let started = Instant::now();
+        let written = process.write(timeout, |socket| {
+            write_frame(socket, &envelope, &vec![0; 8 << 20])
+        });
+        let took = started.elapsed();
+        assert!(written.is_err());
+        assert!(took < 2 * timeout, "{took:?}");
+        // ... and the process is taken to hang: it goes.
+        assert!(process.is_dead());
     }
 }
