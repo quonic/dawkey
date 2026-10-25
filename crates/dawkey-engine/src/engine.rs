@@ -558,10 +558,11 @@ impl EngineProcessor {
                 l[..frames].copy_from_slice(lane_l);
                 r[..frames].copy_from_slice(lane_r);
             }
-            if let Some(delay) = &mut track.delay {
-                delay.process(lane_l, lane_r);
-            }
             if !track.audible {
+                // Kept current all the same.
+                if let Some(delay) = &mut track.delay {
+                    delay.process(lane_l, lane_r);
+                }
                 continue;
             }
             // Plugins' other outputs, to their buses.
@@ -577,9 +578,6 @@ impl EngineProcessor {
                         add_into(&mut to_r[..frames], r);
                     }
                 }
-            }
-            if let (None, Some(m)) = (metered, track.meter) {
-                meters.tracks[m].record(peak(lane_l), peak(lane_r));
             }
             // Aux sends: the signal after the fader (before lining up), or
             // before it, at the send's level, to their buses.
@@ -633,6 +631,13 @@ impl EngineProcessor {
                 }
                 add_into(&mut to_l[..frames], l);
                 add_into(&mut to_r[..frames], r);
+            }
+            // Lined up with the rest of what reaches its destination.
+            if let Some(delay) = &mut track.delay {
+                delay.process(lane_l, lane_r);
+            }
+            if let (None, Some(m)) = (metered, track.meter) {
+                meters.tracks[m].record(peak(lane_l), peak(lane_r));
             }
             let (to_l, to_r) = match track.dest {
                 Some(d) => match &mut later[d - i - 1].sum {

@@ -682,7 +682,7 @@ fn latency_is_compensated_through_buses() {
     // and a third track goes straight to the master.
     let late = impulse(&mut f);
     let direct = impulse(&mut f);
-    impulse(&mut f);
+    let third = impulse(&mut f);
     let bus = f.bus();
     f.send(late, Some(bus));
     f.send(direct, Some(bus));
@@ -690,15 +690,38 @@ fn latency_is_compensated_through_buses() {
     f.add(bus, "clap:late");
     let graph = f.graph();
     assert_eq!(graph.latency(), 128);
+    let hits = |out: &[f32]| -> Vec<usize> {
+        out.iter()
+            .enumerate()
+            .filter(|(_, s)| s.abs() > 1e-6)
+            .map(|(i, _)| i)
+            .collect()
+    };
     let out = &render_offline(graph, RATE, 0, 400)[0];
-    let hits: Vec<usize> = out
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.abs() > 1e-6)
-        .map(|(i, _)| i)
-        .collect();
-    assert_eq!(hits, [100], "every impulse at frame 100: {hits:?}");
+    assert_eq!(
+        hits(out),
+        [100],
+        "every impulse at frame 100: {:?}",
+        hits(out)
+    );
     assert!((out[100] - 3.0 * CENTER).abs() < 1e-6);
+
+    // An aux send from the third track lines up too: it leaves before the
+    // track's own way out is delayed.
+    f.set(dawkey_core::SetTrackSend {
+        track: third,
+        bus,
+        gain_db: Some(0.0),
+        pre_fader: None,
+    });
+    let out = &render_offline(f.fresh_graph(), RATE, 0, 400)[0];
+    assert_eq!(
+        hits(out),
+        [100],
+        "every impulse at frame 100: {:?}",
+        hits(out)
+    );
+    assert!((out[100] - 4.0 * CENTER).abs() < 1e-6);
 }
 
 #[test]
