@@ -1039,3 +1039,169 @@ fn midi_effects_play_a_device() {
     let direct: Vec<[u8; 3]> = proc.midi_output().iter().map(|m| m.data).collect();
     assert_eq!(direct, [[0x91, 60, 127]]);
 }
+
+/// Plays `frames` from the start twice, with fresh processors: straight
+/// through, and with the same project recompiled and swapped in half way
+/// (as any edit during playback does). Returns the frames that differ.
+fn swap_differences(f: &mut Fixture, frames: usize) -> Vec<(usize, f32, f32)> {
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    let whole = process(&mut proc, frames);
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    let mut split = process(&mut proc, frames / 2);
+    ctl.set_graph(f.graph()).unwrap();
+    split.extend(process(&mut proc, frames - frames / 2));
+    (0..frames)
+        .filter(|&i| whole[i] != split[i])
+        .map(|i| (i, whole[i], split[i]))
+        .collect()
+}
+
+#[test]
+fn delay_lines_survive_graph_swaps() {
+    // A sends to a bus that also gets C through a 64-frame plugin, so A's
+    // send is delayed 64 frames to line up.
+    let mut f = Fixture::new();
+    let a = f.constant(1.0, 48_000);
+    let c = f.constant(0.0, 48_000);
+    f.add(c, "clap:late");
+    let bus = f.bus();
+    f.send(c, Some(bus));
+    f.set(dawkey_core::SetTrackSend {
+        track: a,
+        bus,
+        gain_db: Some(0.0),
+        pre_fader: None,
+    });
+    let differs = swap_differences(&mut f, 2048);
+    assert!(differs.is_empty(), "send: {:?}", &differs[..1]);
+
+    // A fork's other output to a bus, delayed to line up with a late
+    // track going there too.
+    let mut f = Fixture::new();
+    let a = f.constant(0.5, 48_000);
+    let c = f.constant(0.0, 48_000);
+    let fork = f.add(a, "clap:fork");
+    f.add(c, "clap:late");
+    let bus = f.bus();
+    f.send(c, Some(bus));
+    f.set(dawkey_core::SetPluginOutput {
+        plugin: fork,
+        output: 0,
+        bus: Some(bus),
+    });
+    let differs = swap_differences(&mut f, 2048);
+    assert!(differs.is_empty(), "other output: {:?}", &differs[..1]);
+
+    // A sidechain from a track that's earlier than the plugin it feeds,
+    // which comes after a late one.
+    let mut f = Fixture::new();
+    let kick = f.constant(0.25, 48_000);
+    let bass = f.constant(1.0, 48_000);
+    f.add(bass, "clap:late");
+    let minus = f.add(bass, "clap:minus");
+    f.set(dawkey_core::SetPluginSidechain {
+        plugin: minus,
+        source: Some(kick),
+    });
+    let differs = swap_differences(&mut f, 2048);
+    assert!(differs.is_empty(), "sidechain: {:?}", &differs[..1]);
+}
+
+#[test]
+fn note_offs_reach_instruments_across_graph_swaps() {
+    // Stopping, locating and looping release the notes an instrument
+    // plugin holds. When the graph is replaced before the audio thread
+    // runs again (Studio::stop does it to place takes), the note-offs
+    // must still get there.
+    let mut f = Fixture::new();
+    // A note over 36 000..72 000.
+    keys_clip(&mut f, (1.5, 3.0), vec![]);
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.locate(40_000).unwrap();
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 1.0, "the note plays");
+    ctl.stop().unwrap();
+    ctl.set_graph(f.graph()).unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 0.0, "stopped");
+
+    ctl.locate(40_000).unwrap();
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 1.0, "the note plays");
+    ctl.locate(0).unwrap();
+    ctl.set_graph(f.graph()).unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 0.0, "located");
+
+    // Wrapping at the end of a buffer, from inside the note to before it.
+    f.set(SetLoop {
+        start_s: Some(0.5),
+        end_s: Some(1.0),
+        enabled: Some(true),
+    });
+    ctl.set_graph(f.graph()).unwrap();
+    ctl.locate(40_000).unwrap();
+    let out = process(&mut proc, 8000);
+    assert_eq!(out[7999], 1.0, "the note plays");
+    ctl.set_graph(f.graph()).unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 0.0, "wrapped");
+}
+
+#[test]
+fn an_instrument_that_stops_playing_the_notes_lets_go_of_them() {
+    // Each edit happens while the instrument holds the note (0..24 000),
+    // then playback goes on past its end.
+    let past_the_note = |proc: &mut crate::EngineProcessor| {
+        for _ in 0..30 {
+            process(proc, 1024);
+        }
+    };
+
+    // The track plays a device instead: the plugin stays in the chain.
+    let mut f = Fixture::new();
+    let track = keys_clip(&mut f, (0.0, 1.0), vec![]);
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 4800)[4000], 1.0, "the note plays");
+    f.set(dawkey_core::SetTrackMidiOutput {
+        track,
+        device: Some("Synth".into()),
+        channel: None,
+        latency_ms: None,
+    });
+    ctl.set_graph(f.graph()).unwrap();
+    past_the_note(&mut proc);
+    assert_eq!(process(&mut proc, 1024)[500], 0.0, "device");
+
+    // Bypassed (the synth plays the notes), and back on after the note.
+    let mut f = Fixture::new();
+    let track = keys_clip(&mut f, (0.0, 1.0), vec![]);
+    let keys = f.session.project().track(track).unwrap().plugins[0].id;
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 4800)[4000], 1.0, "the note plays");
+    for bypass in [true, false] {
+        f.set(SetPluginBypass {
+            plugin: keys,
+            bypass,
+        });
+        ctl.set_graph(f.graph()).unwrap();
+        past_the_note(&mut proc);
+    }
+    assert_eq!(process(&mut proc, 1024)[500], 0.0, "bypassed");
+
+    // Another instrument put before it plays them instead.
+    let mut f = Fixture::new();
+    let track = keys_clip(&mut f, (0.0, 1.0), vec![]);
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 4800)[4000], 1.0, "the note plays");
+    f.set(AddPlugin {
+        track,
+        plugin: "clap:keys".into(),
+        index: Some(0),
+    });
+    ctl.set_graph(f.graph()).unwrap();
+    past_the_note(&mut proc);
+    assert_eq!(process(&mut proc, 1024)[500], 0.0, "moved down the chain");
+}
