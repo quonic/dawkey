@@ -506,7 +506,8 @@ pub(crate) struct SetRecordOffset {
 /// Render part of the project offline (independent of the transport) and
 /// analyze it: peak and RMS per channel in dBFS, integrated loudness (LUFS),
 /// levels in three bands (`bands`, a rough brightness), and a hash for
-/// comparing renders. Optionally write it to a WAV file. `tracks` renders
+/// comparing renders (`non_finite` counts NaN and infinite samples, which a
+/// broken plugin can make; they're measured as silence). Optionally write it to a WAV file. `tracks` renders
 /// only those tracks (as soloing them would: through their buses and the
 /// master); `stems: true` renders each track separately (one render per
 /// track, `stems` in the result, each with its analysis, and a file each in
@@ -557,7 +558,8 @@ pub(crate) struct SegmentRange {
 }
 
 /// Export the mix, or part of it, to an audio file, rendered offline: WAV
-/// (16 or 24-bit, or 32-bit float), FLAC (16 or 24-bit), Ogg Vorbis
+/// (16 or 24-bit, or 32-bit float; RF64 past 4 GiB), FLAC (16 or 24-bit, up
+/// to 96 kHz), Ogg Vorbis
 /// (`quality`, 0 to 10) or Opus (`bitrate_kbps`; always 48 kHz; games loop
 /// both without a gap). By default the whole song, from the start to where
 /// the last clip ends, in 24-bit at the project's sample rate. Reports the
@@ -594,7 +596,7 @@ pub(crate) struct ExportAudio {
     #[serde(default)]
     pub(crate) tags: Option<std::collections::BTreeMap<String, String>>,
     /// The file's sample rate in Hz; the mix is converted to it. Default:
-    /// the project's.
+    /// the project's. FLAC goes up to 96000.
     #[serde(default)]
     pub(crate) sample_rate: Option<u32>,
     /// Start in seconds. Default 0.
