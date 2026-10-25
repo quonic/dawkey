@@ -742,6 +742,17 @@ impl DelayLine {
     }
 }
 
+/// Carries what `then` holds into `now` if they're as long, so a delayed
+/// signal goes on across a graph swap rather than starting from silence.
+fn continue_delay(now: &mut Option<DelayLine>, then: &Option<DelayLine>) {
+    if let (Some(now), Some(then)) = (now, then)
+        && now.frames == then.frames
+    {
+        now.ring.copy_from_slice(&then.ring);
+        now.at = then.at;
+    }
+}
+
 fn apply_fader(fader: &Fader, position: u64, playing: bool, left: &mut [f32], right: &mut [f32]) {
     // The audio here played `offset` frames ago (plugin latency).
     let position = position.saturating_sub(u64::from(fader.offset));
@@ -880,30 +891,57 @@ pub(crate) fn carry_over(old: &mut Graph, new: &mut Graph, out: &mut MidiOutput)
                 now.tracker.retarget(retarget);
             }
         }
-        if let (Some(delay), Some(before)) = (&mut track.delay, &previous.delay)
-            && delay.frames == before.frames
-        {
-            delay.ring.copy_from_slice(&before.ring);
-            delay.at = before.at;
+        continue_delay(&mut track.delay, &previous.delay);
+    }
+    // Sends, by the bus they go to.
+    for i in 0..new.tracks.len() {
+        let id = new.tracks[i].id;
+        let Some(previous) = old.tracks.iter().find(|t| t.id == id) else {
+            continue;
+        };
+        for j in 0..new.tracks[i].sends.len() {
+            let bus = new.tracks[new.tracks[i].sends[j].dest].id;
+            let then = previous.sends.iter().find(|s| old.tracks[s.dest].id == bus);
+            if let Some(then) = then {
+                continue_delay(&mut new.tracks[i].sends[j].delay, &then.delay);
+            }
         }
     }
-    for track in &mut new.tracks {
-        for node in track.plugins.iter_mut().filter(|n| n.processor.is_none()) {
-            let found = old
-                .tracks
-                .iter_mut()
-                .flat_map(|t| t.plugins.iter_mut())
-                .find(|n| n.key == node.key && n.processor.is_some());
-            if let Some(before) = found {
-                node.processor = before.processor.take();
-                if node.sent.len() == before.sent.len() {
-                    node.sent.copy_from_slice(&before.sent);
-                }
-                if let (Some(delay), Some(then)) = (&mut node.pre_delay, &before.pre_delay)
-                    && delay.frames == then.frames
-                {
-                    delay.ring.copy_from_slice(&then.ring);
-                    delay.at = then.at;
+    for t in 0..new.tracks.len() {
+        // Sidechains come from earlier tracks.
+        let (earlier, rest) = new.tracks.split_at_mut(t);
+        for node in rest[0].plugins.iter_mut().filter(|n| n.processor.is_none()) {
+            let found = old.tracks.iter().enumerate().find_map(|(i, track)| {
+                let at = track
+                    .plugins
+                    .iter()
+                    .position(|n| n.key == node.key && n.processor.is_some());
+                at.map(|j| (i, j))
+            });
+            let Some((i, j)) = found else {
+                continue;
+            };
+            let source = old.tracks[i].plugins[j]
+                .sidechain
+                .as_ref()
+                .map(|s| old.tracks[s.source].id);
+            let before = &mut old.tracks[i].plugins[j];
+            node.processor = before.processor.take();
+            if node.sent.len() == before.sent.len() {
+                node.sent.copy_from_slice(&before.sent);
+            }
+            continue_delay(&mut node.pre_delay, &before.pre_delay);
+            // Its sidechain's, if it still comes from the same track.
+            if let (Some(now), Some(then)) = (&mut node.sidechain, &before.sidechain)
+                && source == Some(earlier[now.source].id)
+            {
+                continue_delay(&mut now.delay, &then.delay);
+            }
+            // Its other outputs', by output.
+            for route in node.aux_routes.iter_mut() {
+                let then = before.aux_routes.iter().find(|r| r.output == route.output);
+                if let Some(then) = then {
+                    continue_delay(&mut route.delay, &then.delay);
                 }
             }
         }
