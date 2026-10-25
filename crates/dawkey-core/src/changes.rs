@@ -2,12 +2,12 @@
 //! A log of what changed the project, so a client can ask what happened
 //! since a revision it knows (`get_changes` over MCP).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use serde::Serialize;
 
 use crate::edit::{ClipProp, Edit, TrackProp};
-use crate::model::{ClipId, NoteId, PluginId, Project, TrackId};
+use crate::model::{ClipId, Note, NoteId, PluginId, Project, TrackId};
 use crate::session::Outcome;
 
 /// How many changes are remembered.
@@ -135,12 +135,17 @@ impl Change {
                 if let ClipProp::Notes(before) = prop
                     && let Some((_, clip)) = project.clip(*id)
                 {
-                    // The notes that differ between before and after.
+                    // The notes that differ between before and after, by
+                    // ID (a clip can hold many thousands).
                     let after = clip.notes();
-                    for note in before.iter().filter(|n| !after.contains(n)) {
+                    let by_id = |notes: &[Note]| -> HashMap<NoteId, Note> {
+                        notes.iter().map(|n| (n.id, *n)).collect()
+                    };
+                    let (was, is) = (by_id(before), by_id(after));
+                    for note in before.iter().filter(|n| is.get(&n.id) != Some(n)) {
                         self.notes.push(note.id);
                     }
-                    for note in after.iter().filter(|n| !before.contains(n)) {
+                    for note in after.iter().filter(|n| was.get(&n.id) != Some(n)) {
                         self.notes.push(note.id);
                     }
                 }

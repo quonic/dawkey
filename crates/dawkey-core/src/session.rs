@@ -1099,6 +1099,55 @@ mod tests {
     }
 
     #[test]
+    fn editing_a_note_in_a_big_clip_is_fast() {
+        use crate::command::{AddMidiClip, EditMidiNotes, NoteChange, NoteSpec};
+
+        // The change log compared the notes before and after each edit
+        // pairwise, which took seconds for a clip this big.
+        let mut s = Session::default();
+        let notes = (0..20_000)
+            .map(|i| NoteSpec {
+                pitch: (i % 128) as u8,
+                start_beats: f64::from(i / 128) * 0.25,
+                length_beats: 0.25,
+                velocity: 100,
+            })
+            .collect();
+        let out = s
+            .execute(
+                AddMidiClip {
+                    notes,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap();
+        let (clip, first) = (out.clip.unwrap(), out.notes[0]);
+        let revision = s.revision();
+        let started = std::time::Instant::now();
+        s.execute(
+            EditMidiNotes {
+                clip,
+                notes: vec![NoteChange {
+                    id: first,
+                    pitch: None,
+                    start_beats: None,
+                    length_beats: None,
+                    velocity: Some(1),
+                }],
+            }
+            .into(),
+        )
+        .unwrap();
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_millis(500),
+            "one velocity change took {took:?}"
+        );
+        assert_eq!(s.changes_since(revision).changes[0].notes, [first]);
+    }
+
+    #[test]
     fn trim_and_split_audio_clips() {
         use crate::command::{SplitClip, TrimClip};
 
