@@ -346,6 +346,12 @@ impl SetTrackSend {
     fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
         require_not_master(project, self.track, "sent elsewhere")?;
         let bus = self.bus;
+        if bus == MASTER {
+            return Err(CoreError::invalid(
+                "a send can't go to the master, which every track reaches already; \
+                 send to a bus (add_track with kind \"bus\" makes one)",
+            ));
+        }
         let target = project.track(bus).ok_or(CoreError::TrackNotFound(bus))?;
         if target.kind != TrackKind::Bus {
             return Err(CoreError::invalid(format!(

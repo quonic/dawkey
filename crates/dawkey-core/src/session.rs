@@ -2711,6 +2711,81 @@ mod tests {
     }
 
     #[test]
+    fn sends_to_the_master_and_bad_sends_in_files_are_refused() {
+        use crate::command::{SetTrackOutput, SetTrackSend};
+        use crate::model::{MASTER, Send};
+        let mut s = Session::default();
+        let bus = |s: &mut Session| {
+            s.execute(
+                AddTrack {
+                    kind: TrackKind::Bus,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap()
+        };
+        let (a, b) = (bus(&mut s), bus(&mut s));
+        let audio = add(&mut s, "Vox");
+        // Every track reaches the master already.
+        let err = s
+            .execute(
+                SetTrackSend {
+                    track: audio,
+                    bus: MASTER,
+                    gain_db: None,
+                    pre_fader: None,
+                }
+                .into(),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("master"), "{err}");
+        s.execute(
+            SetTrackOutput {
+                track: b,
+                bus: Some(a),
+            }
+            .into(),
+        )
+        .unwrap();
+
+        // A damaged file: bus a sends to bus b (which goes to a), the audio
+        // track to a track that doesn't exist, to itself and to a twice, and
+        // the master to a.
+        let dir = tempfile::tempdir().unwrap();
+        let path = s.save(Some(&dir.path().join("Sends"))).unwrap();
+        let document = path.join(project_file::DOCUMENT_NAME);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&document).unwrap()).unwrap();
+        let send = |bus: TrackId| serde_json::json!({ "bus": bus.0, "gain_db": -1.0 });
+        for t in json["project"]["tracks"].as_array_mut().unwrap() {
+            if t["id"] == a.0 {
+                t["sends"] = serde_json::json!([send(b)]);
+            }
+            if t["id"] == audio.0 {
+                t["sends"] = serde_json::json!([a, TrackId(99), audio, a].map(send));
+            }
+        }
+        json["project"]["master"]["sends"] = serde_json::json!([send(a)]);
+        std::fs::write(&document, serde_json::to_vec(&json).unwrap()).unwrap();
+        let loaded = Session::open(&path).unwrap();
+        let p = loaded.project();
+        // The output that was there stays; the sends that can't be go.
+        assert_eq!(p.track(b).unwrap().output, Some(a));
+        assert!(p.track(a).unwrap().sends.is_empty());
+        assert!(p.master.sends.is_empty());
+        let kept = Send {
+            bus: a,
+            gain_db: -1.0,
+            pre_fader: false,
+        };
+        assert_eq!(p.track(audio).unwrap().sends, [kept]);
+    }
+
+    #[test]
     fn writing_automation_replaces_a_stretch() {
         use crate::command::{PointSpec, SetAutomation, WriteAutomation};
         use crate::model::AutomationTarget;
