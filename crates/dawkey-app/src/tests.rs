@@ -2936,6 +2936,28 @@ fn preferences_apply_at_once_and_are_saved() {
     assert!(app.view_state().prefs_open);
 }
 
+/// The preferences panel is modal: keys don't reach the window behind it
+/// (Delete would remove the selected clip, Space play).
+#[test]
+fn keys_stay_in_the_preferences() {
+    let mut app = app();
+    let (_, clip) = add_clip(&mut app, 0.0);
+    click(&mut app, &format!("clip/{clip}")).unwrap();
+    app.key(",", CTRL).unwrap();
+    assert!(app.view_state().prefs_open);
+    type_keys(&mut app, &["delete", "space", "r"]);
+    app.key("z", CTRL).unwrap();
+    assert!(app.studio.session().project().clip(ClipId(clip)).is_some());
+    assert!(!app.studio.transport().playing);
+    assert!(!app.studio.transport().recording);
+    assert!(app.view_state().prefs_open);
+    // Typing in its fields still works, and Escape closes it.
+    click(&mut app, "prefs/record_offset").unwrap();
+    type_keys(&mut app, &["5", "return", "escape"]);
+    assert_eq!(app.preferences().record_offset_ms, 5.0);
+    assert!(!app.view_state().prefs_open);
+}
+
 #[test]
 fn the_preferences_serve_mcp_over_http() {
     use std::cell::RefCell;
