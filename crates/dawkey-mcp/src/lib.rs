@@ -163,12 +163,13 @@ const CHANGE_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 /// The resource that is the open project (a summary, as get_state with
 /// `summary: true`). A client that subscribes to it is told
 /// (`notifications/resources/updated`) when the project changes past the
-/// revision it last saw in a result of its own.
+/// revision it last saw in a result of its own or in the resource (or, if
+/// it hasn't seen one, the revision it subscribed at).
 pub const PROJECT_URI: &str = "dawkey://project";
 
 /// The MCP server. Cheap to clone; all clones talk to the same studio. One
 /// is made per connection: `seen` is the revision the client last saw in a
-/// result, and `subscribed` whether it asked to be told of changes.
+/// result or the project resource, and `subscribed` whether it asked to be told of changes.
 #[derive(Debug, Clone)]
 pub struct DawkeyMcp {
     app: Handle<App>,
@@ -1485,6 +1486,10 @@ impl ServerHandler for DawkeyMcp {
         })
         .await
         .map_err(|e| McpError::internal_error(e, None))?;
+        // The client has seen this revision, as in a tool's result.
+        if let Some(revision) = state["revision"].as_u64() {
+            self.seen.store(revision, Ordering::Relaxed);
+        }
         let contents = ResourceContents::text(state.to_string(), PROJECT_URI);
         Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
             vec![contents],
@@ -1497,6 +1502,19 @@ impl ServerHandler for DawkeyMcp {
         _context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
         check_uri(&request.uri)?;
+        // A client that hasn't seen a revision yet is told of changes from
+        // the one it subscribed at.
+        if self.seen.load(Ordering::Relaxed) == u64::MAX {
+            let revision = run(&self.app, |s| Ok::<_, String>(revision(s)))
+                .await
+                .map_err(|e| McpError::internal_error(e, None))?;
+            let _ = self.seen.compare_exchange(
+                u64::MAX,
+                revision,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
         self.subscribed.store(true, Ordering::Relaxed);
         Ok(())
     }
@@ -1512,8 +1530,8 @@ impl ServerHandler for DawkeyMcp {
     }
 
     /// Once a client is connected, a task watches the project's revision
-    /// for it: when it moves past the one the client last saw in a result,
-    /// and the client subscribed to the project resource, it's told.
+    /// for it: when it moves past the one the client last saw (in a result
+    /// or the resource), and the client subscribed to the project resource, it's told.
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
         let app = self.app.clone();
         let (seen, subscribed) = (self.seen.clone(), self.subscribed.clone());
