@@ -267,6 +267,38 @@ fn notes_go_in_and_midi_comes_out_a_block_late() {
     unload(loaded);
 }
 
+/// The MIDI a bridged plugin sends is as late as its audio (the latency it
+/// reports), also in blocks shorter than its delay (the engine splits
+/// blocks at the loop end, and the delay starts at 1024 frames before
+/// PipeWire says its quantum).
+#[test]
+fn midi_is_as_late_as_the_latency_reported_in_shorter_blocks() {
+    let mut host = host(64);
+    let mut loaded = host.load(plugin("clap:dawkey.test.octave")).unwrap();
+    assert_eq!(loaded.latency, 64);
+    let note = |offset| PluginEvent {
+        offset,
+        kind: PluginEventKind::NoteOn {
+            channel: 0,
+            key: 60,
+            velocity: 1.0,
+        },
+    };
+    // Blocks of 32 frames; notes at frames 0 and 37.
+    let mut at = Vec::new();
+    for block in 0..8u32 {
+        let events = match block {
+            0 => vec![note(0)],
+            1 => vec![note(5)],
+            _ => Vec::new(),
+        };
+        let (_, sent) = run_and_wait(&mut loaded.processor, &[0.0; 32], &events);
+        at.extend(sent.iter().map(|e| block * 32 + e.offset));
+    }
+    assert_eq!(at, [64, 37 + 64]);
+    unload(loaded);
+}
+
 #[test]
 fn state_goes_through_the_bridge() {
     let mut host = host(64);
