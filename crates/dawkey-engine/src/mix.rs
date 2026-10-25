@@ -927,6 +927,11 @@ pub(crate) fn carry_over(old: &mut Graph, new: &mut Graph, out: &mut MidiOutput)
                 .map(|s| old.tracks[s.source].id);
             let before = &mut old.tracks[i].plugins[j];
             node.processor = before.processor.take();
+            // Events it hasn't had yet, like the note-offs of a stop just
+            // before the swap.
+            for event in before.events.drain(..) {
+                push_event(&mut node.events, event.offset, event.kind);
+            }
             if node.sent.len() == before.sent.len() {
                 node.sent.copy_from_slice(&before.sent);
             }

@@ -1108,3 +1108,41 @@ fn delay_lines_survive_graph_swaps() {
     let differs = swap_differences(&mut f, 2048);
     assert!(differs.is_empty(), "sidechain: {:?}", &differs[..1]);
 }
+
+#[test]
+fn note_offs_reach_instruments_across_graph_swaps() {
+    // Stopping, locating and looping release the notes an instrument
+    // plugin holds. When the graph is replaced before the audio thread
+    // runs again (Studio::stop does it to place takes), the note-offs
+    // must still get there.
+    let mut f = Fixture::new();
+    // A note over 36 000..72 000.
+    keys_clip(&mut f, (1.5, 3.0), vec![]);
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.locate(40_000).unwrap();
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 1.0, "the note plays");
+    ctl.stop().unwrap();
+    ctl.set_graph(f.graph()).unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 0.0, "stopped");
+
+    ctl.locate(40_000).unwrap();
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 1.0, "the note plays");
+    ctl.locate(0).unwrap();
+    ctl.set_graph(f.graph()).unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 0.0, "located");
+
+    // Wrapping at the end of a buffer, from inside the note to before it.
+    f.set(SetLoop {
+        start_s: Some(0.5),
+        end_s: Some(1.0),
+        enabled: Some(true),
+    });
+    ctl.set_graph(f.graph()).unwrap();
+    ctl.locate(40_000).unwrap();
+    let out = process(&mut proc, 8000);
+    assert_eq!(out[7999], 1.0, "the note plays");
+    ctl.set_graph(f.graph()).unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 0.0, "wrapped");
+}
