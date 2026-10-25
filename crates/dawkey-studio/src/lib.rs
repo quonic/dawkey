@@ -26,7 +26,8 @@ use dawkey_backend_pipewire::{
 use dawkey_core::{
     AddClip, AddMidiClip, AutomationTarget, Command, ControlSpec, Controller, CoreError,
     MeterChange, MeterMap, NoteSpec, Outcome, PluginId, Project, RemoveClip, Session, SetTempoMap,
-    SetTimeSignatureMap, SourceId, TempoChange, TimeRange, TimeSignature, TrackId, TrackKind,
+    SetTimeSignatureMap, SourceId, TempoChange, TempoMap, TimeRange, TimeSignature, TrackId,
+    TrackKind,
 };
 use dawkey_engine::{
     EngineBusy, EngineController, EngineProcessor, Graph, InputFilter, MediaPool, MeterReading,
@@ -1296,8 +1297,7 @@ impl Studio {
                 )));
             }
         }
-        let empty = project.tracks.iter().all(|t| t.clips.is_empty());
-        let adopt = use_file_tempo.unwrap_or(empty);
+        let adopt = self.adopts_file_tempo(use_file_tempo);
 
         /// A step of the import: a command, or working out which clips of a
         /// mapped track the clip just added replaces.
@@ -1308,11 +1308,7 @@ impl Studio {
         let mut steps = VecDeque::new();
         if adopt {
             // The file's beat 0 lands at `position_s`, at its first tempo.
-            let first = file
-                .tempo
-                .first()
-                .filter(|(beat, _)| *beat <= 0.0)
-                .map_or(120.0, |&(_, bpm)| bpm);
+            let first = first_tempo(file);
             let offset = position_s * first / 60.0;
             steps.push_back(Step::Command(Command::from(SetTempoMap {
                 bpm: first,
@@ -1417,9 +1413,44 @@ impl Studio {
         Ok(import)
     }
 
+    /// The tempo and meter maps that an [`import_midi`](Self::import_midi)
+    /// position in beats or bars is in: the project's, or when the import
+    /// takes the file's tempo and time signature, the file's first ones,
+    /// which hold until the file starts.
+    pub fn midi_import_maps(
+        &self,
+        file: &MidiFile,
+        use_file_tempo: Option<bool>,
+    ) -> (TempoMap, MeterMap) {
+        let project = self.session.project();
+        if self.adopts_file_tempo(use_file_tempo) {
+            (
+                TempoMap::new(project.sample_rate, first_tempo(file), &[]),
+                MeterMap::new(first_meter(file), &[]),
+            )
+        } else {
+            (project.tempo_map(), project.meter_map())
+        }
+    }
+
+    /// Whether a MIDI import takes the file's tempo and time signature: if
+    /// asked to, or by default when the project has no clips yet.
+    fn adopts_file_tempo(&self, use_file_tempo: Option<bool>) -> bool {
+        use_file_tempo.unwrap_or_else(|| {
+            let project = self.session.project();
+            project.tracks.iter().all(|t| t.clips.is_empty())
+        })
+    }
+
     /// Records unsaved projects into `dir` instead of the cache folder.
     pub fn set_recording_dir(&mut self, dir: PathBuf) {
         self.recording_dir = Some(dir);
+    }
+
+    /// Whether a recording is in progress: its takes aren't in the project
+    /// until it stops.
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
     }
 
     /// Where the current recording started, in seconds.
@@ -2510,15 +2541,7 @@ fn midi_clip(
 /// file's beat 0 at project beat `offset`. A change that doesn't fall on a
 /// bar line of the map so far starts at the next one.
 fn meter_map_of(file: &MidiFile, offset: f64) -> SetTimeSignatureMap {
-    let (numerator, denominator) = file
-        .meters
-        .first()
-        .filter(|(beat, ..)| *beat <= 0.0)
-        .map_or((4, 4), |&(_, n, d)| (n, d));
-    let start = TimeSignature {
-        numerator,
-        denominator,
-    };
+    let start = first_meter(file);
     let mut changes: Vec<MeterChange> = Vec::new();
     for &(beat, numerator, denominator) in file.meters.iter().filter(|(b, ..)| *b > 0.0) {
         let map = MeterMap::new(start, &changes);
@@ -2541,9 +2564,30 @@ fn meter_map_of(file: &MidiFile, offset: f64) -> SetTimeSignatureMap {
         changes.push(change);
     }
     SetTimeSignatureMap {
+        numerator: start.numerator,
+        denominator: start.denominator,
+        changes,
+    }
+}
+
+/// A MIDI file's tempo at its start (120 bpm if it doesn't say).
+fn first_tempo(file: &MidiFile) -> f64 {
+    file.tempo
+        .first()
+        .filter(|(beat, _)| *beat <= 0.0)
+        .map_or(120.0, |&(_, bpm)| bpm)
+}
+
+/// A MIDI file's time signature at its start (4/4 if it doesn't say).
+fn first_meter(file: &MidiFile) -> TimeSignature {
+    let (numerator, denominator) = file
+        .meters
+        .first()
+        .filter(|(beat, ..)| *beat <= 0.0)
+        .map_or((4, 4), |&(_, n, d)| (n, d));
+    TimeSignature {
         numerator,
         denominator,
-        changes,
     }
 }
 

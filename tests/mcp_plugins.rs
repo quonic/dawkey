@@ -1500,6 +1500,27 @@ async fn batches_commands() {
             .unwrap();
         assert!(err.contains(expected), "{err}");
     }
+
+    // Strings that start with `$` but aren't references are taken as they
+    // are, and `$$` is a `$`.
+    dawkey
+        .call(
+            "batch",
+            json!({ "operations": [
+                { "tool": "add_track", "args": { "name": "$5 Synth" } },
+                { "tool": "add_track", "args": { "name": "$$0.track" } },
+            ] }),
+        )
+        .await
+        .unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    let names: Vec<&str> = state["project"]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["$5 Synth", "$0.track"]);
     dawkey.shutdown().await.unwrap();
 }
 

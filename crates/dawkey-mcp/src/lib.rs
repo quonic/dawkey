@@ -24,7 +24,7 @@ use std::sync::{Arc, LazyLock};
 
 use base64::Engine as _;
 use dawkey_app::{App, DragFrom, ImportRequest, Platform, WindowInfo};
-use dawkey_core::{AddClip, CommandSpec, CoreError, Handle, Project, Session, TrackId};
+use dawkey_core::{AddClip, CommandSpec, CoreError, Handle, Project, TrackId};
 use dawkey_studio::{LoadedProject, Studio};
 use dawkey_ui::{Modifiers, Point, Size};
 use rmcp::model::{
@@ -163,12 +163,13 @@ const CHANGE_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 /// The resource that is the open project (a summary, as get_state with
 /// `summary: true`). A client that subscribes to it is told
 /// (`notifications/resources/updated`) when the project changes past the
-/// revision it last saw in a result of its own.
+/// revision it last saw in a result of its own or in the resource (or, if
+/// it hasn't seen one, the revision it subscribed at).
 pub const PROJECT_URI: &str = "dawkey://project";
 
 /// The MCP server. Cheap to clone; all clones talk to the same studio. One
 /// is made per connection: `seen` is the revision the client last saw in a
-/// result, and `subscribed` whether it asked to be told of changes.
+/// result or the project resource, and `subscribed` whether it asked to be told of changes.
 #[derive(Debug, Clone)]
 pub struct DawkeyMcp {
     app: Handle<App>,
@@ -222,21 +223,22 @@ impl DawkeyMcp {
     ) -> Result<Result<Value, String>, McpError> {
         let studio = &self.app;
         // Positions in beats or bars become seconds, through the tempo map
-        // as it is now.
+        // as it is now (import_midi's once it knows whether it takes the
+        // file's).
         let stems = self
             .tools
             .iter()
             .find(|t| t.name == name)
             .map(|t| times::position_stems(&Value::Object((*t.input_schema).clone())))
             .unwrap_or_default();
-        if times::has_beats(&args, &stems) {
-            let maps = tool_try!(
-                run(studio, |s| Ok::<_, String>(times::Maps::of(
-                    s.session().project()
-                )))
+        if name != IMPORT_MIDI && times::has_beats(&args, &stems) {
+            let stems = stems.clone();
+            args = tool_try!(
+                run(studio, move |s| {
+                    times::resolve(s.session().project(), &mut args, &stems).map(|()| args)
+                })
                 .await
             );
-            tool_try!(maps.resolve(&mut args, &stems));
         }
         let result = match name {
             GET_STATE => {
@@ -313,7 +315,7 @@ impl DawkeyMcp {
                     discard_changes,
                 } = try_args!(parse(args));
                 run(studio, move |s| {
-                    refuse_if_dirty(s.session(), discard_changes)?;
+                    refuse_if_dirty(s, discard_changes)?;
                     let project = Project::new(name.unwrap_or_else(|| "Untitled".into()));
                     s.replace(LoadedProject::new(project))
                         .map_err(|e| e.to_string())?;
@@ -327,16 +329,10 @@ impl DawkeyMcp {
                     discard_changes,
                 } = try_args!(parse(args));
                 // Check before decoding (slow), and again before replacing.
-                tool_try!(
-                    run(studio, move |s| refuse_if_dirty(
-                        s.session(),
-                        discard_changes
-                    ))
-                    .await
-                );
+                tool_try!(run(studio, move |s| refuse_if_dirty(s, discard_changes)).await);
                 let loaded = tool_try!(blocking(move || LoadedProject::open(&path)).await);
                 run(studio, move |s| {
-                    refuse_if_dirty(s.session(), discard_changes)?;
+                    refuse_if_dirty(s, discard_changes)?;
                     s.replace(loaded).map_err(|e| e.to_string())?;
                     Ok::<_, String>(state_json(s, state::Trim::summary()))
                 })
@@ -356,6 +352,19 @@ impl DawkeyMcp {
             }
             IMPORT_AUDIO => self.import_audio(try_args!(parse(args))).await,
             IMPORT_MIDI => {
+                // The position, kept apart to resolve beats and bars in the
+                // tempo and meter the import puts it in.
+                let mut position = json!({});
+                if let Value::Object(fields) = &mut args {
+                    for key in ["position_beats", "position_bar"] {
+                        if let Some(value) = fields.remove(key) {
+                            position[key] = value;
+                        }
+                    }
+                    if let Some(value) = fields.get("position_s") {
+                        position["position_s"] = value.clone();
+                    }
+                }
                 let ImportMidi {
                     path,
                     position_s,
@@ -397,6 +406,11 @@ impl DawkeyMcp {
                         .collect::<Result<_, String>>()
                 );
                 run(studio, move |s| {
+                    let (tempo, meter) = s.midi_import_maps(&file, use_file_tempo);
+                    times::Maps { tempo, meter }
+                        .resolve(&mut position, &stems, None)
+                        .map_err(dawkey_studio::StudioError::Invalid)?;
+                    let position_s = position["position_s"].as_f64().unwrap_or(position_s);
                     let import =
                         s.import_midi(&file, position_s, use_file_tempo, &targets, replace)?;
                     let mut result = to_json(&import);
@@ -1486,6 +1500,10 @@ impl ServerHandler for DawkeyMcp {
         })
         .await
         .map_err(|e| McpError::internal_error(e, None))?;
+        // The client has seen this revision, as in a tool's result.
+        if let Some(revision) = state["revision"].as_u64() {
+            self.seen.store(revision, Ordering::Relaxed);
+        }
         let contents = ResourceContents::text(state.to_string(), PROJECT_URI);
         Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
             vec![contents],
@@ -1498,6 +1516,19 @@ impl ServerHandler for DawkeyMcp {
         _context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
         check_uri(&request.uri)?;
+        // A client that hasn't seen a revision yet is told of changes from
+        // the one it subscribed at.
+        if self.seen.load(Ordering::Relaxed) == u64::MAX {
+            let revision = run(&self.app, |s| Ok::<_, String>(revision(s)))
+                .await
+                .map_err(|e| McpError::internal_error(e, None))?;
+            let _ = self.seen.compare_exchange(
+                u64::MAX,
+                revision,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
         self.subscribed.store(true, Ordering::Relaxed);
         Ok(())
     }
@@ -1513,8 +1544,8 @@ impl ServerHandler for DawkeyMcp {
     }
 
     /// Once a client is connected, a task watches the project's revision
-    /// for it: when it moves past the one the client last saw in a result,
-    /// and the client subscribed to the project resource, it's told.
+    /// for it: when it moves past the one the client last saw (in a result
+    /// or the resource), and the client subscribed to the project resource, it's told.
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
         let app = self.app.clone();
         let (seen, subscribed) = (self.seen.clone(), self.subscribed.clone());
@@ -1701,8 +1732,21 @@ fn revision(studio: &Studio) -> u64 {
     studio.session().revision()
 }
 
-fn refuse_if_dirty(session: &Session, discard_changes: bool) -> Result<(), String> {
-    if session.is_dirty() && !discard_changes {
+/// Refuses to replace the open project while it has unsaved work (changes,
+/// or a recording whose takes aren't in it yet), unless it may be
+/// discarded.
+fn refuse_if_dirty(studio: &Studio, discard_changes: bool) -> Result<(), String> {
+    if discard_changes {
+        return Ok(());
+    }
+    if studio.is_recording() {
+        return Err(
+            "the open project is recording; stop (which places the takes) and save \
+                    it first, or pass discard_changes: true"
+                .into(),
+        );
+    }
+    if studio.session().is_dirty() {
         return Err(
             "the open project has unsaved changes; save it first or pass discard_changes: true"
                 .into(),

@@ -614,6 +614,65 @@ async fn imports_midi_files() {
     dawkey.shutdown().await.unwrap();
 }
 
+/// A position in bars or beats is in the tempo and meter the import puts
+/// the file in: the file's when it takes them, else the project's.
+#[tokio::test]
+async fn imports_midi_at_bars_and_beats() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("song.mid");
+    write_midi_file(&path);
+    let dawkey = start().await;
+    // The project is at 120 bpm in 4/4, the file at 100 bpm in 3/4: bar 5
+    // is beat 12, 7.2 s.
+    let import = dawkey
+        .call("import_midi", json!({ "path": path, "position_bar": 5 }))
+        .await
+        .unwrap();
+    assert_eq!(import["used_file_tempo"], true);
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    let c = &find_track(&state, import["tracks"][0].as_u64().unwrap())["clips"][0];
+    assert_eq!(c["start"], 345_600, "{c}");
+    assert_eq!(c["start_bar"], 5.0);
+    // The file's 5/8 from its bar 3 is from the project's bar 7.
+    assert_eq!(
+        state["project"]["meter_changes"],
+        json!([{ "bar": 7, "numerator": 5, "denominator": 8 }])
+    );
+
+    dawkey.call("undo", json!({})).await.unwrap();
+    let import = dawkey
+        .call("import_midi", json!({ "path": path, "position_beats": 4 }))
+        .await
+        .unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    let c = &find_track(&state, import["tracks"][0].as_u64().unwrap())["clips"][0];
+    assert_eq!(c["start"], 115_200, "{c}");
+
+    // Keeping the project's tempo, bar 2 is the project's: 2 s at 100 bpm
+    // in 3/4 (now the project's).
+    let import = dawkey
+        .call(
+            "import_midi",
+            json!({ "path": path, "position_bar": 2, "use_file_tempo": false }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(import["used_file_tempo"], false);
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    let c = &find_track(&state, import["tracks"][0].as_u64().unwrap())["clips"][0];
+    assert_eq!(c["start_bar"], 2.0, "{c}");
+
+    let err = dawkey
+        .call_err(
+            "import_midi",
+            json!({ "path": path, "position_s": 1, "position_bar": 2 }),
+        )
+        .await
+        .unwrap();
+    assert!(err.contains("not both"), "{err}");
+    dawkey.shutdown().await.unwrap();
+}
+
 /// A file's tracks can go onto existing MIDI tracks, which keep their mix
 /// and routing and lose the clips the import covers.
 #[tokio::test]
