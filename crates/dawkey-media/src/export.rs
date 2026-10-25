@@ -2,10 +2,10 @@
 //! Exporting a mix to a file: stereo audio pulled a block at a time from a
 //! [`BlockSource`] (an offline render), converted to the file's sample rate,
 //! analyzed, dithered to whole-number samples (TPDF) and written as WAV
-//! (16 or 24-bit, or 32-bit float) or FLAC (16 or 24-bit). Nothing has to
-//! fit in memory but a FLAC file's compressed frames. The file is written
-//! beside its target and renamed at the end, so a failed or cancelled
-//! export leaves what was there.
+//! (16 or 24-bit, or 32-bit float; RF64 past 4 GiB) or FLAC (16 or 24-bit).
+//! Nothing has to fit in memory but a FLAC file's compressed frames. The
+//! file is written beside its target and renamed at the end, so a failed or
+//! cancelled export leaves what was there.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -540,46 +540,120 @@ fn write_wav(
     spec: &ExportSpec,
     path: &Path,
 ) -> Result<ExportAnalysis, MediaError> {
-    let wav_err = |source| MediaError::Wav {
-        path: pipeline.path.clone(),
+    use std::io::{Seek, Write};
+
+    let target = pipeline.path.clone();
+    let io_err = |source| MediaError::Io {
+        path: target.clone(),
         source,
     };
-    let bits = spec.sample.bits();
-    let wav_spec = hound::WavSpec {
-        channels: 2,
-        sample_rate: spec.sample_rate,
-        bits_per_sample: bits as u16,
-        sample_format: match spec.sample {
-            SampleFormat::Float32 => hound::SampleFormat::Float,
-            _ => hound::SampleFormat::Int,
-        },
-    };
-    let mut writer = hound::WavWriter::create(path, wav_spec).map_err(wav_err)?;
-    let mut quantizer = Quantizer::new(bits.min(24));
+    let file = std::fs::File::create(path).map_err(io_err)?;
+    let mut writer = std::io::BufWriter::new(file);
+    let mut header = wav_header(spec.sample, spec.sample_rate);
+    writer.write_all(&header).map_err(io_err)?;
+    let mut quantizer = Quantizer::new(spec.sample.bits().min(24));
     let (mut left, mut right) = (Vec::new(), Vec::new());
+    let mut bytes = Vec::new();
+    let mut frames = 0u64;
     loop {
         pipeline.pull(BLOCK, &mut left, &mut right)?;
         if left.is_empty() {
             break;
         }
+        bytes.clear();
         for (&l, &r) in left.iter().zip(&right) {
             for x in [l, r] {
                 match spec.sample {
-                    SampleFormat::Float32 => writer.write_sample(x),
-                    _ => writer.write_sample(quantizer.sample(x)),
+                    SampleFormat::Float32 => bytes.extend_from_slice(&x.to_le_bytes()),
+                    SampleFormat::Int16 => {
+                        bytes.extend_from_slice(&(quantizer.sample(x) as i16).to_le_bytes());
+                    }
+                    SampleFormat::Int24 => {
+                        bytes.extend_from_slice(&quantizer.sample(x).to_le_bytes()[..3]);
+                    }
                 }
-                .map_err(|source| MediaError::Wav {
-                    path: pipeline.path.clone(),
-                    source,
-                })?;
             }
         }
+        writer.write_all(&bytes).map_err(io_err)?;
+        frames += left.len() as u64;
     }
-    writer.finalize().map_err(|source| MediaError::Wav {
-        path: pipeline.path.clone(),
-        source,
-    })?;
+    set_wav_length(&mut header, spec.sample, frames);
+    writer.seek(std::io::SeekFrom::Start(0)).map_err(io_err)?;
+    writer.write_all(&header).map_err(io_err)?;
+    writer.flush().map_err(io_err)?;
     Ok(pipeline.finish())
+}
+
+/// Where the `JUNK` chunk that makes room for RF64's `ds64` starts, and how
+/// long its body is: the RIFF and data sizes and the frame count (64 bits
+/// each), then an empty table's length.
+const WAV_DS64_AT: usize = 12;
+const WAV_DS64_LEN: usize = 28;
+
+/// A stereo WAV header for `sample`s at `rate`, its lengths still to be set
+/// ([`set_wav_length`]). Like hound's: PCM for 16-bit, extensible for more.
+/// After `WAVE` comes a `JUNK` chunk (which readers skip), room for the
+/// `ds64` chunk a file past 4 GiB needs (RF64, EBU Tech 3306).
+fn wav_header(sample: SampleFormat, rate: u32) -> Vec<u8> {
+    let bytes = (sample.bits() / 8) as u16;
+    let extensible = sample != SampleFormat::Int16;
+    let mut h = Vec::with_capacity(84);
+    h.extend_from_slice(b"RIFF\0\0\0\0WAVE");
+    h.extend_from_slice(b"JUNK");
+    h.extend_from_slice(&(WAV_DS64_LEN as u32).to_le_bytes());
+    h.resize(h.len() + WAV_DS64_LEN, 0);
+    h.extend_from_slice(b"fmt ");
+    h.extend_from_slice(&(if extensible { 40u32 } else { 16 }).to_le_bytes());
+    h.extend_from_slice(&(if extensible { 0xfffe_u16 } else { 1 }).to_le_bytes());
+    h.extend_from_slice(&2u16.to_le_bytes());
+    h.extend_from_slice(&rate.to_le_bytes());
+    h.extend_from_slice(&(rate * u32::from(bytes) * 2).to_le_bytes());
+    h.extend_from_slice(&(bytes * 2).to_le_bytes());
+    h.extend_from_slice(&(bytes * 8).to_le_bytes());
+    if extensible {
+        // cbSize, the valid bits, the channel mask (front left and right),
+        // then the subformat's GUID: PCM (1) or IEEE float (3).
+        h.extend_from_slice(&22u16.to_le_bytes());
+        h.extend_from_slice(&(bytes * 8).to_le_bytes());
+        h.extend_from_slice(&3u32.to_le_bytes());
+        let format = if sample == SampleFormat::Float32 {
+            3
+        } else {
+            1
+        };
+        h.extend_from_slice(&[
+            format, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71,
+        ]);
+    }
+    h.extend_from_slice(b"data\0\0\0\0");
+    h
+}
+
+/// Sets a [`wav_header`]'s lengths for `frames` frames. Past 4 GiB the
+/// 32-bit sizes can't hold them, so the file becomes RF64: its `JUNK` chunk
+/// turns into the `ds64` chunk with the real sizes, and the 32-bit ones are
+/// all ones.
+fn set_wav_length(header: &mut [u8], sample: SampleFormat, frames: u64) {
+    let data = frames * 2 * u64::from(sample.bits() / 8);
+    let riff = (header.len() - 8) as u64 + data;
+    let at = header.len() - 4;
+    match (u32::try_from(riff), u32::try_from(data)) {
+        (Ok(riff), Ok(data)) => {
+            header[4..8].copy_from_slice(&riff.to_le_bytes());
+            header[at..].copy_from_slice(&data.to_le_bytes());
+        }
+        _ => {
+            header[..4].copy_from_slice(b"RF64");
+            header[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+            header[WAV_DS64_AT..WAV_DS64_AT + 4].copy_from_slice(b"ds64");
+            let ds64 = &mut header[WAV_DS64_AT + 8..WAV_DS64_AT + 8 + WAV_DS64_LEN];
+            ds64[..8].copy_from_slice(&riff.to_le_bytes());
+            ds64[8..16].copy_from_slice(&data.to_le_bytes());
+            ds64[16..24].copy_from_slice(&frames.to_le_bytes());
+            ds64[24..].fill(0);
+            header[at..].copy_from_slice(&u32::MAX.to_le_bytes());
+        }
+    }
 }
 
 /// The pipeline as flacenc reads it.
@@ -1016,6 +1090,64 @@ mod tests {
                 export(&mut sine, 44_100, &spec, &path, &ExportProgress::default()).unwrap();
             assert_eq!(analysis.frames, 48_000, "{name}");
         }
+    }
+
+    #[test]
+    fn wav_headers_and_rf64() {
+        // An export reads back with hound too (Symphonia reads them above),
+        // the JUNK chunk skipped.
+        let dir = tempfile::tempdir().unwrap();
+        for sample in [
+            SampleFormat::Int16,
+            SampleFormat::Int24,
+            SampleFormat::Float32,
+        ] {
+            let path = dir.path().join("a.wav");
+            let mut sine = Sine {
+                at: 0,
+                frames: 1001,
+            };
+            let spec = spec(FileFormat::Wav, sample, 44_100);
+            export(&mut sine, 44_100, &spec, &path, &ExportProgress::default()).unwrap();
+            let reader = hound::WavReader::open(&path).unwrap();
+            let got = reader.spec();
+            assert_eq!(
+                (
+                    got.channels,
+                    got.sample_rate,
+                    u32::from(got.bits_per_sample)
+                ),
+                (2, 44_100, sample.bits())
+            );
+            assert_eq!(reader.duration(), 1001);
+            let len = std::fs::metadata(&path).unwrap().len();
+            let riff = u32::from_le_bytes(std::fs::read(&path).unwrap()[4..8].try_into().unwrap());
+            assert_eq!(u64::from(riff), len - 8);
+        }
+
+        // Six hours of 24-bit stereo at 48 kHz is past what a WAV's 32-bit
+        // sizes hold: it becomes RF64, the real sizes in its ds64 chunk.
+        let mut header = wav_header(SampleFormat::Int24, 48_000);
+        let frames = 6 * 3600 * 48_000u64;
+        set_wav_length(&mut header, SampleFormat::Int24, frames);
+        let u32_at = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
+        let u64_at = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().unwrap());
+        assert_eq!(&header[..4], b"RF64");
+        assert_eq!(u32_at(4), u32::MAX);
+        assert_eq!(&header[12..16], b"ds64");
+        assert_eq!(u32_at(16), 28);
+        let data = frames * 6;
+        assert_eq!(u64_at(20), header.len() as u64 - 8 + data);
+        assert_eq!(u64_at(28), data);
+        assert_eq!(u64_at(36), frames);
+        assert_eq!(&header[header.len() - 8..header.len() - 4], b"data");
+        assert_eq!(u32_at(header.len() - 4), u32::MAX);
+        // Just under the limit, it stays a WAV.
+        let mut header = wav_header(SampleFormat::Float32, 48_000);
+        let frames = (u64::from(u32::MAX) - header.len() as u64 + 8) / 8;
+        set_wav_length(&mut header, SampleFormat::Float32, frames);
+        assert_eq!(&header[..4], b"RIFF");
+        assert_eq!(&header[12..16], b"JUNK");
     }
 
     #[test]
