@@ -351,6 +351,16 @@ impl App {
         self.redraw = false;
         theme::use_palette(self.theme.palette());
         let model = self.view_model();
+        // Points are selected by index, which any change to the project (an
+        // undo, say) can make point elsewhere: a controller point is let
+        // go, automation and tempo lane points are found again.
+        let revision = self.studio.session().revision();
+        if revision != self.seen_revision {
+            self.seen_revision = revision;
+            self.view.selected_control = None;
+            self.refind_point();
+            self.refind_marker();
+        }
         // Plugins, lanes and points may be gone (undo, removal).
         let project = self.studio.session().project();
         if self
@@ -374,13 +384,6 @@ impl App {
                 .is_none_or(|l| index >= l.points.len())
         {
             self.view.selected_point = None;
-        }
-        // A controller point is selected by index, which any change to the
-        // project (an undo, say) can make point elsewhere.
-        let revision = self.studio.session().revision();
-        if revision != self.seen_revision {
-            self.seen_revision = revision;
-            self.view.selected_control = None;
         }
         // The edited clip may be gone (undo, removal).
         if self.view.editing_clip.is_some() && view::edited(&model, &self.view).is_none() {

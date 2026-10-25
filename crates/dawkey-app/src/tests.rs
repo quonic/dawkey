@@ -1874,6 +1874,54 @@ fn automation_lanes_in_the_arrange_view() {
     assert!(app.access_tree().find(&lane_id).is_none());
 }
 
+/// Automation points are selected by index, and an undo that adds or
+/// removes an earlier point moves the indices: the selection follows the
+/// point, so Delete removes the one that was picked.
+#[test]
+fn the_selected_automation_point_survives_an_undo() {
+    use dawkey_core::{AddAutomationPoint, AutomationTarget};
+    let mut app = app();
+    let (track, _) = add_clip(&mut app, 0.0);
+    let t = TrackId(track);
+    click(&mut app, &format!("track/{track}/automation")).unwrap();
+    for (time_s, value) in [(2.0, -6.0), (4.0, -12.0), (1.0, -3.0)] {
+        app.studio
+            .execute(
+                AddAutomationPoint {
+                    track: t,
+                    target: AutomationTarget::Gain,
+                    time_s,
+                    value,
+                }
+                .into(),
+            )
+            .unwrap();
+    }
+    let times = |app: &App| -> Vec<f64> {
+        let project = app.studio.session().project();
+        let lane = project.track(t).unwrap().lane(&AutomationTarget::Gain);
+        lane.unwrap()
+            .points
+            .iter()
+            .map(|p| project.frames_to_seconds(p.frame))
+            .collect()
+    };
+    // Points at 0, 1, 2 and 4 s: select the one at 2 s, undo the one at
+    // 1 s, and press Delete.
+    click(&mut app, &format!("auto/{track}/0/2")).unwrap();
+    app.key("z", CTRL).unwrap();
+    assert_eq!(app.view_state().selected_point, Some((t, 0, 1)));
+    app.key("delete", Modifiers::default()).unwrap();
+    assert_eq!(times(&app), [0.0, 4.0]);
+    // A selected point that an undo takes away is let go.
+    click(&mut app, &format!("auto/{track}/0/1")).unwrap();
+    app.key("z", CTRL).unwrap();
+    app.key("z", CTRL).unwrap();
+    assert_eq!(app.view_state().selected_point, None);
+    app.key("delete", Modifiers::default()).unwrap();
+    assert_eq!(times(&app), [0.0, 2.0]);
+}
+
 #[test]
 fn tempo_lanes_edit_the_tempo_map() {
     let mut app = app();
@@ -2014,6 +2062,67 @@ fn meter_lane_edits_time_signatures() {
     // Hiding the lanes forgets the selection.
     click(&mut app, "arrange/tempo").unwrap();
     assert!(app.access_tree().find("meter/lane").is_none());
+}
+
+/// Tempo points and time signature changes are selected by index too: the
+/// selection follows the point through an undo, so Delete removes the one
+/// that was picked.
+#[test]
+fn the_selected_tempo_point_survives_an_undo() {
+    use dawkey_core::{SetTempo, SetTimeSignature};
+    let mut app = app();
+    for (beat, bpm) in [(8.0, 100.0), (16.0, 90.0), (4.0, 110.0)] {
+        app.studio
+            .execute(
+                SetTempo {
+                    bpm,
+                    at_beats: Some(beat),
+                    ramp: false,
+                }
+                .into(),
+            )
+            .unwrap();
+    }
+    let beats = |app: &App| -> Vec<f64> {
+        let project = app.studio.session().project();
+        project.tempo_changes.iter().map(|c| c.beat).collect()
+    };
+    click(&mut app, "arrange/tempo").unwrap();
+    // The start, then beats 4, 8 and 16: select beat 8, undo beat 4, and
+    // press Delete.
+    click(&mut app, "tempo/2").unwrap();
+    app.key("z", CTRL).unwrap();
+    assert_eq!(
+        app.view_state().selected_marker,
+        Some(crate::Marker::Tempo(1))
+    );
+    app.key("delete", Modifiers::default()).unwrap();
+    assert_eq!(beats(&app), [16.0]);
+
+    // The same for time signature changes: bars 3 and 5, then 2.
+    for bar in [3, 5, 2] {
+        app.studio
+            .execute(
+                SetTimeSignature {
+                    at_bar: Some(bar),
+                    ..SetTimeSignature::new(3, 4)
+                }
+                .into(),
+            )
+            .unwrap();
+    }
+    click(&mut app, "meter/2").unwrap();
+    app.key("z", CTRL).unwrap();
+    app.key("delete", Modifiers::default()).unwrap();
+    let bars: Vec<u32> = app
+        .studio
+        .session()
+        .project()
+        .meter_changes
+        .iter()
+        .map(|c| c.bar)
+        .collect();
+    assert_eq!(bars, [5]);
 }
 
 #[test]
