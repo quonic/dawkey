@@ -2611,6 +2611,38 @@ fn exporting_the_mix() {
 }
 
 #[test]
+fn exporting_flac_past_96k_is_refused_before_asking_where() {
+    let mut project = Project::new("Test");
+    project.sample_rate = 192_000;
+    let studio = Studio::new(LoadedProject::new(project), AudioBackend::Virtual).unwrap();
+    let mut app = App::new(studio, Platform::Headless);
+    add_clip(&mut app, 0.0);
+    app.key("e", CTRL).unwrap();
+    click(&mut app, "export/format").unwrap();
+    assert_eq!(
+        app.view_state().export.format,
+        dawkey_media::FileFormat::Flac
+    );
+    // At the project's rate: refused, with the dialog still open.
+    app.take_platform_requests();
+    click(&mut app, "export/start").unwrap();
+    assert!(
+        app.message.as_deref().is_some_and(|m| m.contains("96000")),
+        "{:?}",
+        app.message
+    );
+    assert!(app.view_state().export_dialog);
+    assert!(app.take_platform_requests().is_empty());
+    // At 96 kHz it's fine.
+    for _ in 0..4 {
+        click(&mut app, "export/rate").unwrap();
+    }
+    assert_eq!(app.view_state().export.sample_rate, Some(96_000));
+    click(&mut app, "export/start").unwrap();
+    assert_eq!(app.take_platform_requests().len(), 1);
+}
+
+#[test]
 fn autosaving_and_recovering() {
     let dir = tempfile::tempdir().unwrap();
     let bundle = dir.path().join("Song.dawkey");

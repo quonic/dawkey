@@ -139,6 +139,13 @@ impl ExportSpec {
         if self.file == FileFormat::Ogg && self.sample_rate > 192_000 {
             return Err("Ogg Vorbis stores up to 192000 Hz".into());
         }
+        // The format goes higher, but flacenc doesn't.
+        if self.file == FileFormat::Flac && self.sample_rate > 96_000 {
+            return Err(format!(
+                "FLAC exports go up to 96000 Hz, not {} (WAV goes higher)",
+                self.sample_rate
+            ));
+        }
         if !(0.0..=10.0).contains(&self.quality) {
             return Err(format!("quality is 0 to 10, not {}", self.quality));
         }
@@ -709,13 +716,14 @@ fn write_flac(
 ) -> Result<ExportAnalysis, MediaError> {
     use flacenc::component::BitRepr;
     use flacenc::error::Verify;
-    let encode_err = |path: &Path, reason: String| MediaError::Encode {
-        path: path.to_owned(),
+    let target = pipeline.path.clone();
+    let encode_err = |reason: String| MediaError::Encode {
+        path: target.clone(),
         reason,
     };
     let config = flacenc::config::Encoder::default()
         .into_verified()
-        .map_err(|(_, e)| encode_err(path, format!("{e:?}")))?;
+        .map_err(|(_, e)| encode_err(format!("{e:?}")))?;
     let mut source = FlacSource {
         pipeline: &mut pipeline,
         quantizer: Quantizer::new(spec.sample.bits()),
@@ -728,15 +736,15 @@ fn write_flac(
     if let Some(error) = source.error.take() {
         return Err(error);
     }
-    let stream = stream.map_err(|e| encode_err(path, e.to_string()))?;
+    let stream = stream.map_err(|e| encode_err(e.to_string()))?;
     let mut sink = flacenc::bitsink::ByteSink::new();
     stream
         .write(&mut sink)
-        .map_err(|e| encode_err(path, format!("{e:?}")))?;
+        .map_err(|e| encode_err(format!("{e:?}")))?;
     let mut bytes = sink.as_slice().to_vec();
     fix_min_block_size(&mut bytes);
     std::fs::write(path, &bytes).map_err(|source| MediaError::Io {
-        path: path.to_owned(),
+        path: target.clone(),
         source,
     })?;
     Ok(pipeline.finish())
@@ -766,14 +774,16 @@ fn write_vorbis(
 
     use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
 
+    let target = pipeline.path.clone();
     let encode_err = |e: vorbis_rs::VorbisError| MediaError::Encode {
-        path: path.to_owned(),
+        path: target.clone(),
         reason: e.to_string(),
     };
-    let file = std::fs::File::create(path).map_err(|source| MediaError::Io {
-        path: path.to_owned(),
+    let io_err = |source| MediaError::Io {
+        path: target.clone(),
         source,
-    })?;
+    };
+    let file = std::fs::File::create(path).map_err(io_err)?;
     let rate = NonZeroU32::new(spec.sample_rate).expect("checked");
     let channels = NonZeroU8::new(2).expect("two");
     let mut builder = VorbisEncoderBuilder::new(rate, channels, std::io::BufWriter::new(file))
@@ -799,10 +809,7 @@ fn write_vorbis(
             .map_err(encode_err)?;
     }
     let mut out = encoder.finish().map_err(encode_err)?;
-    std::io::Write::flush(&mut out).map_err(|source| MediaError::Io {
-        path: path.to_owned(),
-        source,
-    })?;
+    std::io::Write::flush(&mut out).map_err(io_err)?;
     Ok(pipeline.finish())
 }
 
@@ -821,12 +828,13 @@ fn write_opus(
     /// Frames per packet: 20 ms at 48 kHz.
     const FRAME: usize = 960;
 
+    let target = pipeline.path.clone();
     let encode_err = |e: opus_pure::Error| MediaError::Encode {
-        path: path.to_owned(),
+        path: target.clone(),
         reason: e.to_string(),
     };
     let io_err = |source| MediaError::Io {
-        path: path.to_owned(),
+        path: target.clone(),
         source,
     };
     let mut encoder =
@@ -1073,6 +1081,40 @@ mod tests {
             (decoded.source_rate, decoded.audio.frames()),
             (44_100, 44_100)
         );
+    }
+
+    #[test]
+    fn flac_goes_up_to_96k() {
+        let dir = tempfile::tempdir().unwrap();
+        for rate in [8_000, 12_345, 65_536, 96_000] {
+            let path = dir.path().join(format!("{rate}.flac"));
+            let mut sine = Sine {
+                at: 0,
+                frames: 12_000,
+            };
+            let spec = spec(FileFormat::Flac, SampleFormat::Int24, rate);
+            export(&mut sine, rate, &spec, &path, &ExportProgress::default()).unwrap();
+            let decoded = decode_file(&path, rate).unwrap();
+            assert_eq!(
+                (decoded.source_rate, decoded.audio.frames()),
+                (rate, 12_000)
+            );
+        }
+        // Past that the encoder can't, so it's refused before rendering.
+        let path = dir.path().join("hi.flac");
+        let spec = spec(FileFormat::Flac, SampleFormat::Int24, 176_400);
+        let mut sine = Sine {
+            at: 0,
+            frames: 12_000,
+        };
+        let progress = ExportProgress::default();
+        let err = export(&mut sine, 48_000, &spec, &path, &progress).unwrap_err();
+        assert!(
+            matches!(&err, MediaError::Unsupported { path: p, reason }
+                if p == &path && reason.contains("96000")),
+            "{err}"
+        );
+        assert_eq!(progress.frames.load(Ordering::Relaxed), 0);
     }
 
     #[test]
