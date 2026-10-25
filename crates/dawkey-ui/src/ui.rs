@@ -157,6 +157,8 @@ pub struct Ui {
     last_click: Option<(WidgetId, u32, Point)>,
     /// Where the pointer last was, while it's over the window.
     pointer: Option<Point>,
+    /// A drag ended without its `DragPhase::End`; see `take_dropped_drag`.
+    dropped_drag: bool,
 }
 
 impl Ui {
@@ -198,9 +200,17 @@ impl Ui {
             .is_some_and(|id| self.root.find(id.as_str()).is_none())
         {
             self.state.pressed = None;
-            self.state.dragging = false;
+            self.dropped_drag |= std::mem::take(&mut self.state.dragging);
             self.press = None;
         }
+    }
+
+    /// Whether a drag ended without a `DragPhase::End` since this was last
+    /// asked: its widget left the tree (the view changed under it), or its
+    /// button's release never came (let go while another window had the
+    /// pointer). Whatever the drag was doing should be dropped.
+    pub fn take_dropped_drag(&mut self) -> bool {
+        std::mem::take(&mut self.dropped_drag)
     }
 
     /// The laid-out tree.
@@ -306,6 +316,19 @@ impl Ui {
                 button,
                 time_ms,
             } => {
+                if self.state.dragging {
+                    // Another button pressed during a drag (a right click by
+                    // accident) is ignored: the drag keeps its release,
+                    // which is what ends it.
+                    if self.press.is_some_and(|(_, held)| held != button) {
+                        return actions;
+                    }
+                    // The same button again: its release was lost.
+                    self.state.pressed = None;
+                    self.state.dragging = false;
+                    self.press = None;
+                    self.dropped_drag = true;
+                }
                 let target = self.hit_test(pos).map(|n| (n.id.clone(), n.chrome));
                 self.state.hovered = target.as_ref().and_then(|(id, _)| id.clone());
                 match (target, button) {

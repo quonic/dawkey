@@ -334,6 +334,99 @@ fn drags_start_after_a_threshold() {
     assert!(!ui.state().dragging);
 }
 
+fn phases(actions: &[UiAction]) -> Vec<DragPhase> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            UiAction::Drag { phase, .. } => Some(*phase),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn other_buttons_during_a_drag_leave_it_alone() {
+    let mut ui = laid_out(timeline(), 200.0, 100.0);
+    let from = rect(&ui, "clip").center();
+    let over = rect(&ui, "offscreen").center();
+    let mut actions = ui.handle(InputEvent::PointerMove(from));
+    actions.extend(ui.handle(InputEvent::PointerDown {
+        pos: from,
+        button: MouseButton::Left,
+        time_ms: 0,
+    }));
+    actions.extend(ui.handle(InputEvent::PointerMove(over)));
+    assert_eq!(phases(&actions), [DragPhase::Start, DragPhase::Move]);
+    // A right click over another widget, still holding left: no click, and
+    // the drag goes on.
+    let mut actions = ui.handle(InputEvent::PointerDown {
+        pos: over,
+        button: MouseButton::Right,
+        time_ms: 100,
+    });
+    actions.extend(ui.handle(InputEvent::PointerUp {
+        pos: over,
+        button: MouseButton::Right,
+    }));
+    assert_eq!(actions, []);
+    assert!(ui.state().is_pressed("clip") && ui.state().dragging);
+    // Letting go of left ends it.
+    let actions = ui.handle(InputEvent::PointerUp {
+        pos: over,
+        button: MouseButton::Left,
+    });
+    assert_eq!(phases(&actions), [DragPhase::End]);
+    assert!(!ui.take_dropped_drag());
+}
+
+#[test]
+fn drags_that_never_end_are_reported() {
+    let mut ui = laid_out(timeline(), 200.0, 100.0);
+    let from = rect(&ui, "clip").center();
+    let to = Point::new(from.x + 30.0, from.y);
+    let start = |ui: &mut Ui| {
+        ui.handle(InputEvent::PointerMove(from));
+        ui.handle(InputEvent::PointerDown {
+            pos: from,
+            button: MouseButton::Left,
+            time_ms: 0,
+        });
+        let actions = ui.handle(InputEvent::PointerMove(to));
+        assert_eq!(phases(&actions), [DragPhase::Start, DragPhase::Move]);
+    };
+    // The dragged widget leaves the tree (the view changed).
+    start(&mut ui);
+    ui.set_root(
+        Node::column().fill(),
+        Size::new(200.0, 100.0),
+        &mut FakeText,
+    );
+    assert!(ui.take_dropped_drag());
+    assert!(!ui.take_dropped_drag(), "reported once");
+    let actions = ui.handle(InputEvent::PointerUp {
+        pos: to,
+        button: MouseButton::Left,
+    });
+    assert_eq!(actions, []);
+    // The release went elsewhere: the next press of the same button starts
+    // afresh.
+    ui.set_root(timeline(), Size::new(200.0, 100.0), &mut FakeText);
+    start(&mut ui);
+    ui.handle(InputEvent::PointerLeave);
+    ui.handle(InputEvent::PointerDown {
+        pos: from,
+        button: MouseButton::Left,
+        time_ms: 5000,
+    });
+    assert!(ui.take_dropped_drag());
+    assert!(!ui.state().dragging);
+    let actions = ui.handle(InputEvent::PointerUp {
+        pos: from,
+        button: MouseButton::Left,
+    });
+    assert!(matches!(&actions[..], [UiAction::Click { id, .. }] if id.as_str() == "clip"));
+}
+
 #[test]
 fn scroll_keys_and_modifiers() {
     let mut ui = laid_out(timeline(), 200.0, 100.0);

@@ -37,6 +37,7 @@ impl App {
                 self.close_overlays();
                 Ok(())
             }
+            ["plugin_picker"] | ["plugin_editor"] => Ok(()),
             ["track", track, "add_plugin"] => {
                 let track = TrackId(track.parse().ok()?);
                 self.close_overlays();

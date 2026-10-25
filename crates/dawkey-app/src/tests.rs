@@ -952,6 +952,27 @@ fn zoom_scroll_ruler_and_drops() {
 }
 
 #[test]
+fn drops_from_the_desktop_follow_the_ui_scale() {
+    let mut app = app();
+    let (track, _) = add_clip(&mut app, 4.0);
+    app.set_ui_scale(1.5);
+    // 40 units into the track's lane, before its clip...
+    let lane = app
+        .access_tree()
+        .find(&format!("track/{track}/lane"))
+        .unwrap()
+        .bounds;
+    let pos = Point::new(lane.x + 40.0, lane.y + lane.h / 2.0);
+    let expected = app.view_state().scroll_s + 40.0 / f64::from(app.view_state().px_per_s);
+    // ...is here in the platform's logical pixels.
+    app.handle_drop(vec!["/a.wav".into()], Point::new(pos.x * 1.5, pos.y * 1.5));
+    let imports = app.take_imports();
+    assert_eq!(imports[0].track, Some(TrackId(track)));
+    let snapped = crate::input::snap(app.studio.session().project(), expected);
+    assert!((imports[0].position_s - snapped).abs() < 1e-9);
+}
+
+#[test]
 fn arm_record_with_keys_and_clicks() {
     let mut app = app();
     let (track, _) = add_clip(&mut app, 4.0);
@@ -1248,6 +1269,56 @@ fn piano_roll_edits_notes() {
 }
 
 #[test]
+fn dragged_chords_stop_at_the_ends_of_the_keyboard() {
+    let mut app = app();
+    let (_, clip) = add_midi(&mut app, 0.0, &[(1, 0.0, 1.0), (3, 0.0, 1.0)]);
+    app.open_piano_roll(ClipId(clip)).unwrap();
+    app.key("a", CTRL).unwrap();
+    let pitches = |app: &App| {
+        let mut p: Vec<u8> = notes_of(app, clip).iter().map(|n| n.0).collect();
+        p.sort();
+        p
+    };
+    // The top note, three rows down: the chord stops at the bottom with its
+    // shape.
+    app.drag(
+        DragFrom::Widget("note/2".into()),
+        Point::new(0.0, 3.0 * ROW_H),
+        6,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert_eq!(pitches(&app), [0, 2]);
+    // And at the top.
+    app.execute(
+        dawkey_core::EditMidiNotes {
+            clip: ClipId(clip),
+            notes: [(1, 124), (2, 126)]
+                .map(|(id, pitch)| dawkey_core::NoteChange {
+                    id: dawkey_core::NoteId(id),
+                    pitch: Some(pitch),
+                    start_beats: None,
+                    length_beats: None,
+                    velocity: None,
+                })
+                .into(),
+        }
+        .into(),
+    )
+    .unwrap();
+    app.open_piano_roll(ClipId(clip)).unwrap();
+    app.key("a", CTRL).unwrap();
+    app.drag(
+        DragFrom::Widget("note/1".into()),
+        Point::new(0.0, -3.0 * ROW_H),
+        6,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert_eq!(pitches(&app), [125, 127]);
+}
+
+#[test]
 fn piano_roll_marquee_selects_notes() {
     let mut app = app();
     let (_, clip) = add_midi(
@@ -1539,6 +1610,32 @@ fn app_with_plugins() -> (App, tempfile::TempDir) {
 fn slot_param(app: &App, slot: dawkey_core::PluginId) -> Option<f64> {
     let (_, s) = app.studio.session().project().plugin(slot).unwrap();
     s.params.get("1").copied()
+}
+
+#[test]
+fn clicks_on_the_picker_and_editor_panels_keep_them_open() {
+    let (mut app, _dir) = app_with_plugins();
+    let (track, _) = add_clip(&mut app, 0.0);
+    click(&mut app, "view/mixer").unwrap();
+    click(&mut app, &format!("track/{track}/add_plugin")).unwrap();
+    // Just inside the panel's top-left corner, clear of its controls.
+    let corner = |app: &mut App, id: &str| {
+        let panel = app.access_tree().find(id).unwrap().bounds;
+        Point::new(panel.x + 3.0, panel.y + 3.0)
+    };
+    let at = corner(&mut app, "plugin_picker");
+    app.click_at(at, MouseButton::Left, Modifiers::default())
+        .unwrap();
+    assert!(app.view_state().plugin_picker.is_some());
+    type_keys(&mut app, &["g", "a", "i", "n", "return"]);
+    assert!(app.view_state().plugin_editor.is_some());
+    let at = corner(&mut app, "plugin_editor");
+    app.click_at(at, MouseButton::Left, Modifiers::default())
+        .unwrap();
+    assert!(app.view_state().plugin_editor.is_some());
+    // The backdrop around them still closes them.
+    click(&mut app, "overlay/backdrop").unwrap();
+    assert!(app.view_state().plugin_editor.is_none());
 }
 
 #[test]
@@ -2403,6 +2500,81 @@ fn moving_a_fader_while_playing_writes_automation() {
     .unwrap();
     let t = &app.studio.session().project().tracks[0];
     assert!(t.automation.is_empty() && t.gain_db < -10.0);
+}
+
+#[test]
+fn right_clicks_and_tab_during_a_drag_leave_no_gesture_hanging() {
+    use dawkey_core::AutomationTarget;
+    use dawkey_ui::InputEvent;
+    let press = |app: &mut App, pos: Point, button: MouseButton| {
+        app.handle_input(InputEvent::PointerDown {
+            pos,
+            button,
+            time_ms: 0,
+        });
+    };
+    let release = |app: &mut App, pos: Point, button: MouseButton| {
+        app.handle_input(InputEvent::PointerUp { pos, button });
+    };
+
+    // A right click during a clip drag: the clip still lands where it's let
+    // go.
+    let mut app = app();
+    let (track, clip) = add_clip(&mut app, 1.0);
+    let at = app.widget_center(&format!("clip/{clip}")).unwrap();
+    let to = Point::new(at.x + 160.0, at.y);
+    app.handle_input(InputEvent::PointerMove(at));
+    press(&mut app, at, MouseButton::Left);
+    for i in 1..=4 {
+        let x = at.x + 40.0 * i as f32;
+        app.handle_input(InputEvent::PointerMove(Point::new(x, at.y)));
+    }
+    press(&mut app, to, MouseButton::Right);
+    release(&mut app, to, MouseButton::Right);
+    release(&mut app, to, MouseButton::Left);
+    assert_eq!(clip_start_s(&app, clip), 3.0, "the drop was lost");
+
+    // Touch automation, playing with "Auto" on: the fader is grabbed, and
+    // a right click (or Tab, which takes the fader away) comes mid-drag.
+    // Once it's let go, the lane stops growing.
+    click(&mut app, "view/mixer").unwrap();
+    click(&mut app, "transport/automation").unwrap();
+    app.studio.play().unwrap();
+    let last_point_s = |app: &App| {
+        let project = app.studio.session().project();
+        let t = project.track(TrackId(track)).unwrap();
+        let lane = t.lane(&AutomationTarget::Gain).unwrap();
+        project.frames_to_seconds(lane.points.last().unwrap().frame)
+    };
+    for tab in [false, true] {
+        click(&mut app, "view/mixer").unwrap();
+        app.studio.advance(0.25).unwrap();
+        let at = app.widget_center(&format!("track/{track}/fader")).unwrap();
+        let p = Point::new(at.x, at.y + 30.0);
+        app.handle_input(InputEvent::PointerMove(at));
+        press(&mut app, at, MouseButton::Left);
+        app.handle_input(InputEvent::PointerMove(Point::new(at.x, at.y + 4.0)));
+        app.studio.advance(0.25).unwrap();
+        app.handle_input(InputEvent::PointerMove(p));
+        if tab {
+            type_keys(&mut app, &["tab"]);
+        } else {
+            press(&mut app, p, MouseButton::Right);
+            release(&mut app, p, MouseButton::Right);
+        }
+        release(&mut app, p, MouseButton::Left);
+        assert!(app.view_state().gesture.is_none());
+        let released_at = last_point_s(&app);
+        for _ in 0..8 {
+            app.studio.advance(0.25).unwrap();
+            app.tick();
+        }
+        let later = last_point_s(&app);
+        assert!(
+            (later - released_at).abs() < 1e-3,
+            "kept writing after release (tab: {tab}): {released_at:.3} s -> {later:.3} s"
+        );
+    }
 }
 
 #[test]

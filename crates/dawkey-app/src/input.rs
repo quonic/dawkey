@@ -688,7 +688,9 @@ impl App {
         })
     }
 
-    fn end_gesture(&mut self) {
+    /// Ends the gesture in progress. Without its last drag event, that
+    /// drops it: a preview isn't committed, and what applied live stays.
+    pub(crate) fn end_gesture(&mut self) {
         self.view.gesture = None;
         self.release_automation();
     }
@@ -858,8 +860,16 @@ impl App {
         }
     }
 
-    /// Queues files dropped at `pos` for import: the first onto the audio
-    /// track under the pointer (or a new track), the rest onto new tracks.
+    /// Files dropped on the window from the desktop, at `pos` in the
+    /// platform's logical pixels (like `handle_input`'s events).
+    pub fn handle_drop(&mut self, paths: Vec<std::path::PathBuf>, pos: Point) {
+        let z = self.ui_scale;
+        self.drop_files(paths, Point::new(pos.x / z, pos.y / z));
+    }
+
+    /// Queues files dropped at `pos` (in the app's units, like `click_at`)
+    /// for import: the first onto the audio track under the pointer (or a
+    /// new track), the rest onto new tracks.
     pub fn drop_files(&mut self, paths: Vec<std::path::PathBuf>, pos: Point) {
         let lanes = self.lanes_rect();
         let in_timeline = self.view.page == Page::Arrange && lanes.contains(pos);

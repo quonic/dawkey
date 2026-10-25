@@ -1082,7 +1082,7 @@ impl DataDeviceHandler for Gui {
                         offer.destroy();
                         let paths = dialogs::parse_uri_list(&data);
                         if !paths.is_empty() {
-                            gui.app.drop_files(paths, gui.drop_pos);
+                            gui.app.handle_drop(paths, gui.drop_pos);
                             gui.after_app_change();
                         }
                         PostAction::Remove
