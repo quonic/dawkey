@@ -1266,8 +1266,10 @@ impl Project {
             track.clips.retain(|c| c.kind() == kind);
             // Lanes need sorted, distinct points and a target on this track.
             let plugins: Vec<PluginId> = track.plugins.iter().map(|p| p.id).collect();
+            let sends: Vec<TrackId> = track.sends.iter().map(|s| s.bus).collect();
             track.automation.retain(|l| match &l.target {
                 AutomationTarget::Param { plugin, .. } => plugins.contains(plugin),
+                AutomationTarget::Send { bus } => sends.contains(bus),
                 _ => true,
             });
             for lane in &mut track.automation {

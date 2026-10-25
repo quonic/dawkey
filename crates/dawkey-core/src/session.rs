@@ -2648,6 +2648,69 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_bus_removes_sends_to_it_and_their_automation() {
+        use crate::command::{PointSpec, SetAutomation, SetTrackSend};
+        use crate::model::AutomationTarget;
+        let mut s = Session::default();
+        let track = add(&mut s, "Vox");
+        let bus = s
+            .execute(
+                AddTrack {
+                    kind: TrackKind::Bus,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        s.execute(
+            SetTrackSend {
+                track,
+                bus,
+                gain_db: Some(-6.0),
+                pre_fader: None,
+            }
+            .into(),
+        )
+        .unwrap();
+        let target = AutomationTarget::Send { bus };
+        s.execute(
+            SetAutomation {
+                track,
+                target: target.clone(),
+                points: vec![PointSpec {
+                    time_s: 0.0,
+                    value: -3.0,
+                }],
+            }
+            .into(),
+        )
+        .unwrap();
+        s.execute(RemoveTrack { track: bus }.into()).unwrap();
+        let t = s.project().track(track).unwrap();
+        assert!(t.sends.is_empty());
+        assert!(t.automation.is_empty(), "{:?}", t.automation);
+        // Undo brings the lane back with the send.
+        s.undo().unwrap();
+        let t = s.project().track(track).unwrap();
+        assert_eq!((t.sends.len(), t.automation.len()), (1, 1));
+
+        // A file with a send lane but no send loses the lane.
+        let dir = tempfile::tempdir().unwrap();
+        let path = s.save(Some(&dir.path().join("Sends"))).unwrap();
+        let document = path.join(project_file::DOCUMENT_NAME);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&document).unwrap()).unwrap();
+        for t in json["project"]["tracks"].as_array_mut().unwrap() {
+            t["sends"] = serde_json::json!([]);
+        }
+        std::fs::write(&document, serde_json::to_vec(&json).unwrap()).unwrap();
+        let loaded = Session::open(&path).unwrap();
+        assert!(loaded.project().track(track).unwrap().automation.is_empty());
+    }
+
+    #[test]
     fn writing_automation_replaces_a_stretch() {
         use crate::command::{PointSpec, SetAutomation, WriteAutomation};
         use crate::model::AutomationTarget;

@@ -215,7 +215,8 @@ impl AddTrack {
 }
 
 /// Remove a track (or bus) and everything on it. Tracks sent to a removed
-/// bus go to the master.
+/// bus go to the master, and their sends to it (with the sends' automation)
+/// go.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RemoveTrack {
@@ -235,7 +236,8 @@ impl RemoveTrack {
                 prop: TrackProp::Output(None),
             })
             .collect();
-        // Sidechains from it, plugin outputs to it, and sends to it stop.
+        // Sidechains from it, plugin outputs to it, and sends to it (and
+        // their automation) stop.
         for track in project.all_tracks().filter(|t| t.id != gone) {
             if track.sends.iter().any(|s| s.bus == gone) {
                 edits.push(Edit::SetTrack {
@@ -246,6 +248,20 @@ impl RemoveTrack {
                             .iter()
                             .copied()
                             .filter(|s| s.bus != gone)
+                            .collect(),
+                    ),
+                });
+            }
+            let send_lane = |l: &AutomationLane| l.target == AutomationTarget::Send { bus: gone };
+            if track.automation.iter().any(send_lane) {
+                edits.push(Edit::SetTrack {
+                    id: track.id,
+                    prop: TrackProp::Automation(
+                        track
+                            .automation
+                            .iter()
+                            .filter(|l| !send_lane(l))
+                            .cloned()
                             .collect(),
                     ),
                 });
