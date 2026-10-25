@@ -14,7 +14,9 @@ use serde_json::Value;
 /// error says which one and why. An argument can be the result of an earlier
 /// operation in the batch: `"$0.track"` is the `track` the first operation
 /// returned, `"$2.clip"` the third's `clip`, `"$1.notes[0]"` the second's
-/// first note. Returns each operation's result under `outcomes`.
+/// first note. Other strings are taken as they are; to write one that
+/// looks like a reference, double its `$` (`"$$0.track"`). Returns each
+/// operation's result under `outcomes`.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Batch {
@@ -65,10 +67,14 @@ impl Prepared {
 }
 
 /// Replaces every `"$N.path"` string in `args` with that part of operation
-/// `N`'s outcome.
+/// `N`'s outcome. Other strings stay as they are, but for one `$` less at
+/// the start of those that start with `$$`.
 fn substitute(args: &mut Value, outcomes: &[Value]) -> Result<(), String> {
     match args {
-        Value::String(s) if s.starts_with('$') => {
+        Value::String(s) if s.starts_with("$$") => {
+            s.remove(0);
+        }
+        Value::String(s) if is_reference(s) => {
             *args = lookup(s, outcomes)?;
         }
         Value::Array(items) => {
@@ -84,6 +90,25 @@ fn substitute(args: &mut Value, outcomes: &[Value]) -> Result<(), String> {
         _ => {}
     }
     Ok(())
+}
+
+/// Whether `s` is meant as a reference: `$` and an operation number, alone
+/// or followed by `.` and a name. A name or path like "$5 Synth" or
+/// "$5.99" isn't one.
+fn is_reference(s: &str) -> bool {
+    let Some(body) = s.strip_prefix('$') else {
+        return false;
+    };
+    let rest = body.trim_start_matches(|c: char| c.is_ascii_digit());
+    if rest.len() == body.len() {
+        return false;
+    }
+    let mut rest = rest.chars();
+    match rest.next() {
+        None => true,
+        Some('.') => rest.next().is_some_and(|c| c.is_alphabetic() || c == '_'),
+        Some(_) => false,
+    }
 }
 
 /// `$1.notes[0]` → outcome 1's first note.
@@ -137,6 +162,23 @@ mod tests {
             json!({ "track": "$0.track", "clips": ["$1.clip", 9], "note": "$0.notes[1]" });
         substitute(&mut args, &outcomes).unwrap();
         assert_eq!(args, json!({ "track": 3, "clips": [4, 9], "note": 8 }));
+
+        // Strings that aren't references stay; `$$` is a `$`.
+        let mut args = json!({
+            "name": "$5 Synth",
+            "names": ["$5.99", "$", "$x.track", "$$0.track", "US$1"],
+        });
+        substitute(&mut args, &outcomes).unwrap();
+        assert_eq!(
+            args,
+            json!({
+                "name": "$5 Synth",
+                "names": ["$5.99", "$", "$x.track", "$0.track", "US$1"],
+            })
+        );
+        let mut args = json!({ "track": "$0" });
+        let err = substitute(&mut args, &outcomes).unwrap_err();
+        assert!(err.contains("\"$N.field\""), "{err}");
 
         for (reference, expected) in [
             ("$2.track", "hasn't run yet"),
