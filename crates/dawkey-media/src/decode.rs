@@ -141,7 +141,11 @@ fn resample(channels: &[Vec<f32>], from: u32, to: u32) -> Result<Vec<Vec<f32>>, 
     let output = resampler
         .process_all(&input, frames, None)
         .map_err(|e| e.to_string())?;
-    let interleaved = output.take_data();
+    let mut interleaved = output.take_data();
+    // rubato rounds the length up from a float ratio, which can come out a
+    // frame long (48000 / 44100 * 44100 is a hair over 48000).
+    let exact = (frames as u64 * u64::from(to)).div_ceil(u64::from(from)) as usize;
+    interleaved.truncate(exact * count);
     let mut planar = vec![Vec::with_capacity(interleaved.len() / count); count];
     for frame in interleaved.chunks_exact(count) {
         for (channel, sample) in planar.iter_mut().zip(frame) {
@@ -183,8 +187,8 @@ mod tests {
 
         let decoded = decode_file(&path, 48_000).unwrap();
         assert_eq!(decoded.source_rate, 44_100);
-        let frames = decoded.audio.frames();
-        assert!((47_990..=48_010).contains(&frames), "{frames} frames");
+        // Exactly a second: the length is rounded in whole numbers.
+        assert_eq!(decoded.audio.frames(), 48_000);
         let peak = decoded
             .audio
             .channel(0)

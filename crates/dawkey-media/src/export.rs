@@ -392,6 +392,9 @@ struct StreamResampler {
     out: Vec<Vec<f32>>,
     /// Output frames still to drop: the resampler's delay.
     trim: usize,
+    /// The rates, for working out how long the output is.
+    from: u32,
+    to: u32,
     frames_in: u64,
     frames_out: u64,
 }
@@ -412,6 +415,8 @@ impl StreamResampler {
             resampler,
             pending: vec![Vec::new(), Vec::new()],
             out: vec![vec![0.0; out_max], vec![0.0; out_max]],
+            from,
+            to,
             frames_in: 0,
             frames_out: 0,
         })
@@ -441,7 +446,8 @@ impl StreamResampler {
     /// The rest: what's pending, then silence until all of the input has
     /// come out.
     fn finish(&mut self, emit: &mut dyn FnMut(&[f32], &[f32])) -> Result<(), String> {
-        let expected = (self.resampler.resample_ratio() * self.frames_in as f64).ceil() as u64;
+        // In whole numbers: the float ratio can round a frame too many.
+        let expected = (self.frames_in * u64::from(self.to)).div_ceil(u64::from(self.from));
         let need = self.resampler.input_frames_next();
         let real = self.pending[0].len();
         self.pending.iter_mut().for_each(|p| p.resize(need, 0.0));
@@ -993,6 +999,23 @@ mod tests {
             (decoded.source_rate, decoded.audio.frames()),
             (44_100, 44_100)
         );
+    }
+
+    #[test]
+    fn a_second_at_44k1_is_a_second_at_48k() {
+        // 48000 / 44100 * 44100 is a hair over 48000 in floats.
+        let dir = tempfile::tempdir().unwrap();
+        for (name, file) in [("a.wav", FileFormat::Wav), ("a.opus", FileFormat::Opus)] {
+            let path = dir.path().join(name);
+            let mut sine = Sine {
+                at: 0,
+                frames: 44_100,
+            };
+            let spec = spec(file, SampleFormat::Float32, 48_000);
+            let analysis =
+                export(&mut sine, 44_100, &spec, &path, &ExportProgress::default()).unwrap();
+            assert_eq!(analysis.frames, 48_000, "{name}");
+        }
     }
 
     #[test]
