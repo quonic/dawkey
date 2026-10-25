@@ -105,7 +105,8 @@ pub(crate) struct NewProject {
     /// Project name. Defaults to "Untitled".
     #[serde(default)]
     pub(crate) name: Option<String>,
-    /// Required to replace a project with unsaved changes.
+    /// Required to replace a project with unsaved changes (or a recording
+    /// in progress).
     #[serde(default)]
     pub(crate) discard_changes: bool,
 }
@@ -119,7 +120,8 @@ pub(crate) struct NewProject {
 pub(crate) struct OpenProject {
     /// Path to the `.dawkey` bundle.
     pub(crate) path: PathBuf,
-    /// Required to replace a project with unsaved changes.
+    /// Required to replace a project with unsaved changes (or a recording
+    /// in progress).
     #[serde(default)]
     pub(crate) discard_changes: bool,
 }

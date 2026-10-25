@@ -1395,6 +1395,12 @@ impl Studio {
         self.recording_dir = Some(dir);
     }
 
+    /// Whether a recording is in progress: its takes aren't in the project
+    /// until it stops.
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
     /// Where the current recording started, in seconds.
     pub fn record_start_s(&self) -> Option<f64> {
         self.recording

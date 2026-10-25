@@ -267,6 +267,41 @@ async fn saved_projects_record_into_the_bundle() {
     dawkey.shutdown().await.unwrap();
 }
 
+/// A recording in progress is unsaved work: new_project and open_project
+/// don't replace the project (losing the take) without discard_changes.
+#[tokio::test]
+async fn replacing_a_recording_project_needs_discard_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_input(dir.path(), RATE);
+    let dawkey = start().await;
+    let track = armed_track(&dawkey, "left").await;
+    let bundle = dir.path().join("Song.dawkey");
+    dawkey
+        .call("save_project", json!({ "path": bundle }))
+        .await
+        .unwrap();
+    dawkey.call("record", json!({})).await.unwrap();
+    dawkey
+        .call(
+            "advance_clock",
+            json!({ "seconds": 0.5, "input_path": input }),
+        )
+        .await
+        .unwrap();
+    for (tool, args) in [
+        ("new_project", json!({})),
+        ("open_project", json!({ "path": bundle })),
+    ] {
+        let err = dawkey.call_err(tool, args).await.unwrap();
+        assert!(err.contains("recording"), "{tool}: {err}");
+    }
+    // Still recording; stopping places the take.
+    dawkey.call("stop", json!({})).await.unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    assert_eq!(clips(&state, track).len(), 1);
+    dawkey.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn armed_tracks_meter_and_monitor_their_input() {
     let dir = tempfile::tempdir().unwrap();

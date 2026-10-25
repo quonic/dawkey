@@ -24,7 +24,7 @@ use std::sync::{Arc, LazyLock};
 
 use base64::Engine as _;
 use dawkey_app::{App, DragFrom, ImportRequest, Platform, WindowInfo};
-use dawkey_core::{AddClip, CommandSpec, CoreError, Handle, Project, Session, TrackId};
+use dawkey_core::{AddClip, CommandSpec, CoreError, Handle, Project, TrackId};
 use dawkey_studio::{LoadedProject, Studio};
 use dawkey_ui::{Modifiers, Point, Size};
 use rmcp::model::{
@@ -313,7 +313,7 @@ impl DawkeyMcp {
                     discard_changes,
                 } = try_args!(parse(args));
                 run(studio, move |s| {
-                    refuse_if_dirty(s.session(), discard_changes)?;
+                    refuse_if_dirty(s, discard_changes)?;
                     let project = Project::new(name.unwrap_or_else(|| "Untitled".into()));
                     s.replace(LoadedProject::new(project))
                         .map_err(|e| e.to_string())?;
@@ -327,16 +327,10 @@ impl DawkeyMcp {
                     discard_changes,
                 } = try_args!(parse(args));
                 // Check before decoding (slow), and again before replacing.
-                tool_try!(
-                    run(studio, move |s| refuse_if_dirty(
-                        s.session(),
-                        discard_changes
-                    ))
-                    .await
-                );
+                tool_try!(run(studio, move |s| refuse_if_dirty(s, discard_changes)).await);
                 let loaded = tool_try!(blocking(move || LoadedProject::open(&path)).await);
                 run(studio, move |s| {
-                    refuse_if_dirty(s.session(), discard_changes)?;
+                    refuse_if_dirty(s, discard_changes)?;
                     s.replace(loaded).map_err(|e| e.to_string())?;
                     Ok::<_, String>(state_json(s, state::Trim::summary()))
                 })
@@ -1718,8 +1712,21 @@ fn revision(studio: &Studio) -> u64 {
     studio.session().revision()
 }
 
-fn refuse_if_dirty(session: &Session, discard_changes: bool) -> Result<(), String> {
-    if session.is_dirty() && !discard_changes {
+/// Refuses to replace the open project while it has unsaved work (changes,
+/// or a recording whose takes aren't in it yet), unless it may be
+/// discarded.
+fn refuse_if_dirty(studio: &Studio, discard_changes: bool) -> Result<(), String> {
+    if discard_changes {
+        return Ok(());
+    }
+    if studio.is_recording() {
+        return Err(
+            "the open project is recording; stop (which places the takes) and save \
+                    it first, or pass discard_changes: true"
+                .into(),
+        );
+    }
+    if studio.session().is_dirty() {
         return Err(
             "the open project has unsaved changes; save it first or pass discard_changes: true"
                 .into(),

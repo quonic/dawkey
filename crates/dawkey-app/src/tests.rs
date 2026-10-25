@@ -990,6 +990,40 @@ fn arm_record_with_keys_and_clicks() {
     assert_eq!(app.studio.session().undo_label(), Some("record"));
 }
 
+/// A recording in progress is unsaved work: opening another project or
+/// closing stops it, so the take is in the project, and asks first.
+#[test]
+fn opening_or_closing_while_recording_asks_first() {
+    let mut app = app();
+    let track = add_track(&mut app, "Vox");
+    click(&mut app, &format!("track/{track}/arm")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    app.studio
+        .save(Some(&dir.path().join("Song.dawkey")))
+        .unwrap();
+    app.studio
+        .set_virtual_input(Some(AudioData::new(vec![vec![0.25; 48_000]])))
+        .unwrap();
+    for (takes, request) in [(1, "open"), (2, "close")] {
+        app.studio.record().unwrap();
+        app.studio.advance(0.5).unwrap();
+        assert!(!app.studio.session().is_dirty());
+        if request == "open" {
+            app.key("o", CTRL).unwrap();
+            assert_eq!(app.view_state().confirm, Some(PendingAction::OpenProject));
+            assert!(app.take_platform_requests().is_empty());
+        } else {
+            assert!(!app.request_close());
+            assert_eq!(app.view_state().confirm, Some(PendingAction::Close));
+        }
+        assert!(!app.studio.is_recording());
+        assert!(app.studio.session().is_dirty());
+        assert_eq!(app.studio.session().project().tracks[0].clips.len(), takes);
+        click(&mut app, "confirm/cancel").unwrap();
+        app.studio.save(None).unwrap();
+    }
+}
+
 #[test]
 fn ranges_from_ruler_drags() {
     let mut app = app();
