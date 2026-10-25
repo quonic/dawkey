@@ -2134,7 +2134,11 @@ impl AddMidiClip {
                 }
                 length
             }
-            None => fit_to_bars(project, start, 0, &notes),
+            None => {
+                // Past its last note and controller change.
+                let end = notes_end(&notes).max(controls.last().map_or(0, |c| c.frame + 1));
+                fit_to_bars(project, start, 0, end)
+            }
         };
         let mut edits = Vec::new();
         let name = match (&self.track_name, self.track) {
@@ -3153,7 +3157,7 @@ fn set_notes(
     length: u64,
     notes: Vec<Note>,
 ) -> Vec<Edit> {
-    let fitted = fit_to_bars(project, start, length, &notes);
+    let fitted = fit_to_bars(project, start, length, notes_end(&notes));
     let mut edits = vec![Edit::SetClip {
         id,
         prop: ClipProp::Notes(sorted(notes)),
@@ -3167,23 +3171,29 @@ fn set_notes(
     edits
 }
 
+/// Where the last of `notes` ends, in frames from the clip's start.
+fn notes_end(notes: &[Note]) -> u64 {
+    notes.iter().map(Note::end).max().unwrap_or(0)
+}
+
 /// `length`, or the whole number of bars (at least one, counted from the
-/// clip's start at timeline frame `start`) that covers every note,
-/// whichever is longer. A clip that starts on a bar line ends on one, with
-/// the bars of the meter map; otherwise bars are as long as the one the
-/// clip starts in.
-fn fit_to_bars(project: &Project, start: u64, length: u64, notes: &[Note]) -> u64 {
-    let end = notes.iter().map(Note::end).max().unwrap_or(0);
+/// clip's start at timeline frame `start`) that covers `end` (frames from
+/// the clip's start), whichever is longer. A clip that starts on a bar line
+/// ends on one, with the bars of the meter map; otherwise bars are as long
+/// as the one the clip starts in.
+fn fit_to_bars(project: &Project, start: u64, length: u64, end: u64) -> u64 {
     if end <= length && length > 0 {
         return length;
     }
     let map = project.tempo_map();
     let meter = project.meter_map();
     let start_beat = map.beat_at(start as f64);
-    let first_bar = meter.bar_start(meter.bar_at(start_beat + 1e-9));
+    let first = meter.bar_at(start_beat + 1e-9);
+    let first_bar = meter.bar_start(first);
     let beats = if (first_bar - start_beat).abs() < 1e-6 {
-        let end_beat = map.beat_at((start + end) as f64).max(start_beat + 1e-6);
-        meter.bar_at_or_after(end_beat - 1e-9) - start_beat
+        let end_beat = map.beat_at((start + end) as f64);
+        let last_bar = meter.bar_at_or_after(end_beat - 1e-9);
+        last_bar.max(meter.bar_start(first + 1)) - start_beat
     } else {
         let bar = meter.meter_at(start_beat).beats_per_bar();
         (map.clip_beats(start, end) / bar - 1e-9).ceil().max(1.0) * bar

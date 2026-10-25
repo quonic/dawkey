@@ -1887,6 +1887,55 @@ mod tests {
     }
 
     #[test]
+    fn empty_midi_clips_are_a_bar_long() {
+        use crate::command::{AddMidiClip, ControlSpec};
+        use crate::model::Controller;
+
+        // With nothing to cover, a clip on a bar line came out 0 frames
+        // long.
+        for (bpm, position_s) in [(120.0, 0.0), (120.0, 2.0), (90.0, 0.0), (120.0, 0.5)] {
+            let mut s = Session::default();
+            s.execute(SetTempo::new(bpm).into()).unwrap();
+            let clip = s
+                .execute(
+                    AddMidiClip {
+                        position_s,
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .unwrap()
+                .clip
+                .unwrap();
+            let bar = (4.0 * 60.0 / bpm * 48_000.0) as u64;
+            let length = s.project().clip(clip).unwrap().1.length;
+            assert_eq!(length, bar, "at {bpm} BPM, {position_s} s");
+        }
+
+        // Controller changes count like notes.
+        let mut s = Session::default();
+        let control = |time_beats| ControlSpec {
+            controller: Controller::Cc { number: 7 },
+            time_beats,
+            value: 20,
+        };
+        for (controls, bars) in [(vec![control(1.0)], 1), (vec![control(5.0)], 2)] {
+            let clip = s
+                .execute(
+                    AddMidiClip {
+                        controls,
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .unwrap()
+                .clip
+                .unwrap();
+            assert_eq!(s.project().clip(clip).unwrap().1.length, bars * 96_000);
+        }
+    }
+
+    #[test]
     fn midi_controls() {
         use crate::command::{AddMidiClip, ControlSpec, ControlValue, SetMidiControls};
         use crate::model::Controller;
