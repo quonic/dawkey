@@ -2406,6 +2406,81 @@ fn moving_a_fader_while_playing_writes_automation() {
 }
 
 #[test]
+fn right_clicks_and_tab_during_a_drag_leave_no_gesture_hanging() {
+    use dawkey_core::AutomationTarget;
+    use dawkey_ui::InputEvent;
+    let press = |app: &mut App, pos: Point, button: MouseButton| {
+        app.handle_input(InputEvent::PointerDown {
+            pos,
+            button,
+            time_ms: 0,
+        });
+    };
+    let release = |app: &mut App, pos: Point, button: MouseButton| {
+        app.handle_input(InputEvent::PointerUp { pos, button });
+    };
+
+    // A right click during a clip drag: the clip still lands where it's let
+    // go.
+    let mut app = app();
+    let (track, clip) = add_clip(&mut app, 1.0);
+    let at = app.widget_center(&format!("clip/{clip}")).unwrap();
+    let to = Point::new(at.x + 160.0, at.y);
+    app.handle_input(InputEvent::PointerMove(at));
+    press(&mut app, at, MouseButton::Left);
+    for i in 1..=4 {
+        let x = at.x + 40.0 * i as f32;
+        app.handle_input(InputEvent::PointerMove(Point::new(x, at.y)));
+    }
+    press(&mut app, to, MouseButton::Right);
+    release(&mut app, to, MouseButton::Right);
+    release(&mut app, to, MouseButton::Left);
+    assert_eq!(clip_start_s(&app, clip), 3.0, "the drop was lost");
+
+    // Touch automation, playing with "Auto" on: the fader is grabbed, and
+    // a right click (or Tab, which takes the fader away) comes mid-drag.
+    // Once it's let go, the lane stops growing.
+    click(&mut app, "view/mixer").unwrap();
+    click(&mut app, "transport/automation").unwrap();
+    app.studio.play().unwrap();
+    let last_point_s = |app: &App| {
+        let project = app.studio.session().project();
+        let t = project.track(TrackId(track)).unwrap();
+        let lane = t.lane(&AutomationTarget::Gain).unwrap();
+        project.frames_to_seconds(lane.points.last().unwrap().frame)
+    };
+    for tab in [false, true] {
+        click(&mut app, "view/mixer").unwrap();
+        app.studio.advance(0.25).unwrap();
+        let at = app.widget_center(&format!("track/{track}/fader")).unwrap();
+        let p = Point::new(at.x, at.y + 30.0);
+        app.handle_input(InputEvent::PointerMove(at));
+        press(&mut app, at, MouseButton::Left);
+        app.handle_input(InputEvent::PointerMove(Point::new(at.x, at.y + 4.0)));
+        app.studio.advance(0.25).unwrap();
+        app.handle_input(InputEvent::PointerMove(p));
+        if tab {
+            type_keys(&mut app, &["tab"]);
+        } else {
+            press(&mut app, p, MouseButton::Right);
+            release(&mut app, p, MouseButton::Right);
+        }
+        release(&mut app, p, MouseButton::Left);
+        assert!(app.view_state().gesture.is_none());
+        let released_at = last_point_s(&app);
+        for _ in 0..8 {
+            app.studio.advance(0.25).unwrap();
+            app.tick();
+        }
+        let later = last_point_s(&app);
+        assert!(
+            (later - released_at).abs() < 1e-3,
+            "kept writing after release (tab: {tab}): {released_at:.3} s -> {later:.3} s"
+        );
+    }
+}
+
+#[test]
 fn latch_and_write_automation_modes() {
     use dawkey_core::{AddAutomationPoint, AutomationTarget};
     let mut app = app();

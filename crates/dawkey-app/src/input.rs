@@ -688,7 +688,9 @@ impl App {
         })
     }
 
-    fn end_gesture(&mut self) {
+    /// Ends the gesture in progress. Without its last drag event, that
+    /// drops it: a preview isn't committed, and what applied live stays.
+    pub(crate) fn end_gesture(&mut self) {
         self.view.gesture = None;
         self.release_automation();
     }

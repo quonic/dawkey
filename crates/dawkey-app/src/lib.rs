@@ -392,6 +392,13 @@ impl App {
         }
         let root = view::build(&model, &self.view, self.ui.state(), &self.zoomed);
         self.ui.set_root(root, self.zoomed.size, &mut self.text);
+        // A drag that will never end (its widget went away, or its release
+        // was lost) drops its gesture, or a preview, an undo merge or touch
+        // automation would hang on.
+        if self.ui.take_dropped_drag() && self.view.gesture.is_some() {
+            self.end_gesture();
+            self.rebuild();
+        }
     }
 
     /// Routes one input event from a device. Window-chrome requests are
