@@ -20,7 +20,7 @@
 //! wait for each block instead, so they add no latency.
 
 use std::collections::{HashMap, VecDeque};
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -38,8 +38,9 @@ use super::sandbox::{Enforced, Entered, Sandbox};
 use super::shm::{MAX_AUX, MAX_EVENTS, Shm, WireEvent, WireTransport, futex_wait, send_fd, signal};
 use crate::{ParamChange, PluginError, PluginInfo, SearchPath, StatePaths};
 
-/// How long a plugin may take to load (and a process to enter its
-/// sandbox): one that takes longer is taken to hang, and its process goes.
+/// How long a plugin may take to load (and a process to enter its sandbox,
+/// or to take in what's written to it): one that takes longer is taken to
+/// hang, and its process goes.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long Dawkey waits for an answer to a question, to save a state (a
 /// big one takes a while) and to show a GUI. One that takes longer is
@@ -193,7 +194,25 @@ impl Process {
             request,
             message,
         };
-        write_frame(&mut &*lock(&self.socket), &envelope, blob)
+        self.write(LOAD_TIMEOUT, |socket| write_frame(socket, &envelope, blob))
+    }
+
+    /// Writes to its socket, for up to `timeout`: a frame bigger than the
+    /// socket's buffer (a big state) waits for the process to read it, and
+    /// a GUI's dialog can hold that up. A write that doesn't finish in time
+    /// means the process hangs, and one that fails leaves the stream broken
+    /// (half a frame, perhaps): either way it goes, with every instance in
+    /// it.
+    fn write(
+        &self,
+        timeout: Duration,
+        write: impl FnOnce(&mut Until<'_>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let written = write(&mut Until::new(&lock(&self.socket), timeout));
+        if written.is_err() {
+            self.kill();
+        }
+        written
     }
 
     /// Sends `load` for `instance`, then its shared memory.
@@ -205,14 +224,15 @@ impl Process {
         state: &[u8],
         shm: &Shm,
     ) -> io::Result<()> {
-        let socket = lock(&self.socket);
         let envelope = Envelope {
             instance,
             request,
             message: load,
         };
-        write_frame(&mut &*socket, &envelope, state)?;
-        send_fd(&socket, shm.fd())
+        self.write(LOAD_TIMEOUT, |socket| {
+            write_frame(socket, &envelope, state)?;
+            send_fd(socket.socket()?, shm.fd())
+        })
     }
 
     /// Whether it exited (then its instances are gone).
@@ -252,6 +272,42 @@ impl Drop for Process {
     }
 }
 
+/// A socket that's written to until a deadline, however many writes that
+/// takes (a socket's write timeout is for each write).
+struct Until<'a> {
+    socket: &'a UnixStream,
+    until: Instant,
+}
+
+impl<'a> Until<'a> {
+    fn new(socket: &'a UnixStream, timeout: Duration) -> Self {
+        Self {
+            socket,
+            until: Instant::now() + timeout,
+        }
+    }
+
+    /// The socket, its write timeout set to the time left.
+    fn socket(&self) -> io::Result<&'a UnixStream> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.socket.set_write_timeout(Some(left))?;
+        Ok(self.socket)
+    }
+}
+
+impl Write for Until<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.socket()?.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Has a new process enter `sandbox`, before anything else.
 fn enter_sandbox(socket: &UnixStream, sandbox: &Sandbox) -> Result<Entered, String> {
     let message = Envelope {
@@ -259,7 +315,7 @@ fn enter_sandbox(socket: &UnixStream, sandbox: &Sandbox) -> Result<Entered, Stri
         request: 0,
         message: ToHost::Sandbox(sandbox.clone()),
     };
-    write_frame(&mut &*socket, &message, &[]).map_err(|e| e.to_string())?;
+    write_frame(&mut Until::new(socket, LOAD_TIMEOUT), &message, &[]).map_err(|e| e.to_string())?;
     socket
         .set_read_timeout(Some(LOAD_TIMEOUT))
         .map_err(|e| e.to_string())?;
@@ -983,5 +1039,41 @@ impl PluginProcessor for BridgedProcessor {
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_process_that_takes_in_nothing_is_not_waited_for_forever() {
+        // A process that never reads (as a GUI's dialog holds up a plugin
+        // process's main thread).
+        let program = BridgeProgram {
+            program: PathBuf::from("sleep"),
+            args: vec!["60".to_owned()],
+            share: false,
+            sandbox: None,
+        };
+        let process = Process::start(&program).unwrap();
+        // A frame bigger than the socket's buffer (a big state) doesn't
+        // hang Dawkey: writing it gives up in time (LOAD_TIMEOUT, shortened
+        // here), however many writes it took...
+        let envelope = Envelope {
+            instance: 1,
+            request: 1,
+            message: ToHost::Unload,
+        };
+        let timeout = Duration::from_millis(300);
+        let started = Instant::now();
+        let written = process.write(timeout, |socket| {
+            write_frame(socket, &envelope, &vec![0; 8 << 20])
+        });
+        let took = started.elapsed();
+        assert!(written.is_err());
+        assert!(took < 2 * timeout, "{took:?}");
+        // ... and the process is taken to hang: it goes.
+        assert!(process.is_dead());
     }
 }
