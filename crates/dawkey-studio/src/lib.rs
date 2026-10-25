@@ -1158,11 +1158,34 @@ impl Studio {
     /// Each is a take (`AddClip::take`): in a take lane above what it
     /// overlaps, which goes silent where it plays. On each track, takes
     /// that a later take overlaps (earlier loop passes) are placed muted.
+    /// Takes of tracks removed while they were recorded are dropped (their
+    /// files deleted), so the other tracks still get theirs.
     fn place_takes(
         &mut self,
         takes: Vec<Take>,
         midi: Vec<(Vec<TrackId>, Vec<MidiTake>)>,
     ) -> Result<Vec<dawkey_core::ClipId>, StudioError> {
+        let project = self.session.project();
+        let still = |track, kind| project.track(track).is_some_and(|t| t.kind == kind);
+        let (takes, gone): (Vec<Take>, Vec<Take>) = takes
+            .into_iter()
+            .partition(|t| still(t.track, TrackKind::Audio));
+        for take in gone {
+            tracing::warn!("track {} was removed while recording", take.track);
+            if let Err(e) = std::fs::remove_file(&take.path) {
+                tracing::warn!("removing {}: {e}", take.path.display());
+            }
+        }
+        let midi: Vec<(Vec<TrackId>, Vec<MidiTake>)> = midi
+            .into_iter()
+            .map(|(tracks, takes)| {
+                let tracks = tracks
+                    .into_iter()
+                    .filter(|&t| still(t, TrackKind::Midi))
+                    .collect();
+                (tracks, takes)
+            })
+            .collect();
         let rate = self.sample_rate();
         let latency = self.record_latency_frames();
         let midi_latency = self.midi_record_latency_frames();
