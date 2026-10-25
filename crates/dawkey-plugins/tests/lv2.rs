@@ -6,7 +6,8 @@
 use std::time::Duration;
 
 use dawkey_engine::{
-    MAX_PLUGIN_EVENTS, MidiSink, PluginEvent, PluginProcessor, ProcessContext, Transport,
+    MAX_PLUGIN_EVENTS, MidiSink, PluginEvent, PluginEventKind, PluginProcessor, ProcessContext,
+    Transport,
 };
 use dawkey_plugins::{Host, Loaded, SearchPath, StateValue, scan};
 
@@ -14,7 +15,7 @@ use dawkey_plugins::{Host, Loaded, SearchPath, StateValue, scan};
 static ALLOCATOR: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
 /// One block of `input` on both channels: the left output.
-fn run(p: &mut Box<dyn PluginProcessor>, input: &[f32]) -> Vec<f32> {
+fn run(p: &mut Box<dyn PluginProcessor>, input: &[f32], events: &[PluginEvent]) -> Vec<f32> {
     let mut left = input.to_vec();
     let mut right = input.to_vec();
     let mut sent: Vec<PluginEvent> = Vec::with_capacity(MAX_PLUGIN_EVENTS);
@@ -22,7 +23,7 @@ fn run(p: &mut Box<dyn PluginProcessor>, input: &[f32]) -> Vec<f32> {
         p.process(
             [&mut left, &mut right],
             ProcessContext::new(Transport::default()),
-            &[],
+            events,
             MidiSink::new(&mut sent),
         );
     });
@@ -77,13 +78,20 @@ fn custom_gain(gain_port: &str) -> (tempfile::TempDir, SearchPath) {
     (dir, search)
 }
 
-/// The gain (in dB) the custom gain plays at when loaded at `sample_rate`.
-fn plays_at(search: &SearchPath, sample_rate: u32) -> f32 {
+/// The gain (in dB) the custom gain plays at when loaded at `sample_rate`,
+/// starting at its default or set to `value`.
+fn plays_at(search: &SearchPath, sample_rate: u32, value: Option<f64>) -> f32 {
     let catalog = scan(search, None, Duration::from_secs(10));
     let info = catalog.get("lv2:urn:dawkey:test:gain").expect("scanned");
     let mut host = Host::new(sample_rate, search.clone());
     let mut loaded = host.load(info).unwrap();
-    let out = run(&mut loaded.processor, &[0.5; 64]);
+    let events: Vec<PluginEvent> = (value.iter())
+        .map(|&value| PluginEvent {
+            offset: 0,
+            kind: PluginEventKind::Param { index: 0, value },
+        })
+        .collect();
+    let out = run(&mut loaded.processor, &[0.5; 64], &events);
     unload(loaded);
     20.0 * (out[0] / 0.5).log10()
 }
@@ -101,7 +109,7 @@ fn an_lv2_port_without_a_maximum_keeps_its_default() {
         .params[0];
     assert_eq!((gain.min, gain.default), (-60.0, 6.0), "{gain:?}");
     assert!(gain.max >= 6.0, "{gain:?}");
-    let db = plays_at(&search, 48_000);
+    let db = plays_at(&search, 48_000, None);
     assert!((db - 6.0).abs() < 1e-3, "the plugin plays at {db} dB");
 }
 
@@ -142,6 +150,35 @@ fn declared_lv2_bounds_hold_the_default() {
         .expect("scanned")
         .params[0];
     assert_eq!((p.min, p.max, p.default), (0.0, 1.0, 0.0), "{p:?}");
+}
+
+/// With `lv2:sampleRate`, a port's bounds and default are fractions of the
+/// sample rate ("hosts that support bounds at all must support this
+/// property", LV2 core): the catalog has them at 48 kHz, values are what
+/// the plugin gets at any rate, and only the bounds move with it.
+#[test]
+fn lv2_sample_rate_bounds_are_scaled() {
+    let (_dir, search) = custom_gain(
+        "lv2:portProperty lv2:sampleRate ; lv2:default 0.0001 ; lv2:minimum 0.0 ; \
+         lv2:maximum 0.0005",
+    );
+    let catalog = scan(&search, None, Duration::from_secs(10));
+    let p = &catalog
+        .get("lv2:urn:dawkey:test:gain")
+        .expect("scanned")
+        .params[0];
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-3;
+    assert!(
+        close(p.min, 0.0) && close(p.max, 24.0) && close(p.default, 4.8),
+        "{p:?}"
+    );
+    let db = plays_at(&search, 48_000, None);
+    assert!((db - 4.8).abs() < 1e-3, "the plugin plays at {db} dB");
+    // At 44.1 kHz the same value is the same, up to the maximum there.
+    let db = plays_at(&search, 44_100, Some(10.0));
+    assert!((db - 10.0).abs() < 1e-3, "the plugin plays at {db} dB");
+    let db = plays_at(&search, 44_100, Some(24.0));
+    assert!((db - 22.05).abs() < 1e-3, "the plugin plays at {db} dB");
 }
 
 /// Saved LV2 state as Dawkey encodes it: magic, count, then each

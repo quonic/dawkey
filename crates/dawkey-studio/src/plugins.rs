@@ -73,7 +73,8 @@ pub(crate) struct Plugins {
 /// different plugins, so older caches are scanned again. (3: LV2 plugins
 /// whose ports can't be read are left out; 4: LV2 plugins that require the
 /// worker are in; 5: VST3 plugins; 7: LV2 control ports keep the bounds
-/// and default they declare.)
+/// and default they declare, scaled by the sample rate with
+/// `lv2:sampleRate`.)
 const CACHE_VERSION: u32 = 7;
 
 /// The catalog as cached on disk, with what it was scanned from.
