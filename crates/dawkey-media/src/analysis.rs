@@ -17,8 +17,11 @@ pub struct Analysis {
     /// EBU R128 integrated loudness. `None` if the audio is too short or
     /// too quiet to measure.
     pub lufs: Option<f64>,
-    /// True if every sample is zero.
+    /// True if every sample is zero (none is NaN or infinite).
     pub silent: bool,
+    /// How many samples are NaN or infinite (a plugin that blew up, say).
+    /// The levels, loudness and bands leave them out, as if they were zero.
+    pub non_finite: usize,
     /// FNV-1a hash of the samples quantized to 24 bits, as hex. Equal hashes
     /// mean the audio is identical to 24-bit precision.
     pub hash: String,
@@ -166,6 +169,17 @@ pub fn analyze(channels: &[Vec<f32>], sample_rate: u32) -> Analysis {
     analyzer.finish()
 }
 
+/// A sample as the hash sees it: quantized to 24 bits, and NaN and
+/// infinities as numbers no sample quantizes to.
+fn hash_value(s: f32) -> i32 {
+    match s {
+        s if s.is_nan() => i32::MIN,
+        f32::INFINITY => i32::MAX,
+        f32::NEG_INFINITY => i32::MIN + 1,
+        s => (f64::from(s).clamp(-1.0, 1.0) * 8_388_607.0).round() as i32,
+    }
+}
+
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -178,6 +192,7 @@ pub struct Analyzer {
     meter: Option<EbuR128>,
     hash: u64,
     bands: BandSplitter,
+    non_finite: usize,
 }
 
 impl std::fmt::Debug for Analyzer {
@@ -200,13 +215,34 @@ impl Analyzer {
                 .flatten(),
             hash: FNV_OFFSET,
             bands: BandSplitter::new(sample_rate),
+            non_finite: 0,
         }
     }
 
     /// Adds the next block: one slice per channel, all the same length.
     pub fn add(&mut self, planes: &[&[f32]]) {
         let frames = planes.first().map_or(0, |p| p.len());
-        for (i, plane) in planes.iter().enumerate() {
+        // NaN and infinities are counted, and measured as zeros (one would
+        // turn every level, and the band filters, into NaN for good).
+        let non_finite: usize = planes
+            .iter()
+            .map(|p| p.iter().filter(|s| !s.is_finite()).count())
+            .sum();
+        self.non_finite += non_finite;
+        let scrubbed: Vec<Vec<f32>> = match non_finite {
+            0 => Vec::new(),
+            _ => planes
+                .iter()
+                .map(|p| {
+                    p.iter()
+                        .map(|&s| if s.is_finite() { s } else { 0.0 })
+                        .collect()
+                })
+                .collect(),
+        };
+        let scrubbed: Vec<&[f32]> = scrubbed.iter().map(Vec::as_slice).collect();
+        let measured = if non_finite == 0 { planes } else { &scrubbed };
+        for (i, plane) in measured.iter().enumerate() {
             self.peak[i] = plane.iter().fold(self.peak[i], |m, s| m.max(s.abs()));
             self.sum_sq[i] += plane
                 .iter()
@@ -214,18 +250,16 @@ impl Analyzer {
                 .sum::<f64>();
         }
         if let Some(meter) = &mut self.meter
-            && meter.add_frames_planar_f32(planes).is_err()
+            && meter.add_frames_planar_f32(measured).is_err()
         {
             self.meter = None;
         }
         let channels = planes.len().max(1) as f64;
         for frame in 0..frames {
             let mut sum = 0.0;
-            for plane in planes {
-                sum += f64::from(plane[frame]);
-                let quantized =
-                    (f64::from(plane[frame]).clamp(-1.0, 1.0) * 8_388_607.0).round() as i32;
-                for byte in quantized.to_le_bytes() {
+            for (plane, measured) in planes.iter().zip(measured) {
+                sum += f64::from(measured[frame]);
+                for byte in hash_value(plane[frame]).to_le_bytes() {
                     self.hash ^= u64::from(byte);
                     self.hash = self.hash.wrapping_mul(FNV_PRIME);
                 }
@@ -254,7 +288,8 @@ impl Analyzer {
             frames,
             duration_s: frames as f64 / f64::from(self.sample_rate),
             channels: self.peak.len(),
-            silent: peak_dbfs.iter().all(Option::is_none),
+            silent: self.non_finite == 0 && peak_dbfs.iter().all(Option::is_none),
+            non_finite: self.non_finite,
             peak_dbfs,
             rms_dbfs,
             lufs: self
@@ -286,6 +321,34 @@ mod tests {
         // A full-scale 1 kHz-ish sine in one channel is about -3 LUFS.
         let lufs = a.lufs.unwrap();
         assert!((lufs + 3.0).abs() < 0.5, "{lufs}");
+    }
+
+    #[test]
+    fn nan_and_infinities_are_not_silence() {
+        let rate = 48_000;
+        let nan = analyze(&[vec![f32::NAN; 48_000], vec![f32::NAN; 48_000]], rate);
+        let zeros = analyze(&[vec![0.0; 48_000], vec![0.0; 48_000]], rate);
+        assert!(!nan.silent && zeros.silent);
+        assert_eq!((nan.non_finite, zeros.non_finite), (96_000, 0));
+        assert_ne!(nan.hash, zeros.hash);
+        let inf = analyze(&[vec![f32::INFINITY; 48_000], vec![0.0; 48_000]], rate);
+        let full = analyze(&[vec![1.0; 48_000], vec![0.0; 48_000]], rate);
+        assert_ne!(inf.hash, full.hash);
+
+        // One NaN in a sine leaves its levels as they were.
+        let mut sine: Vec<f32> = (0..rate * 2)
+            .map(|i| (i as f32 * 997.0 * std::f32::consts::TAU / rate as f32).sin())
+            .collect();
+        let clean = analyze(&[sine.clone()], rate);
+        sine[1000] = f32::NAN;
+        let a = analyze(&[sine], rate);
+        assert_eq!(a.non_finite, 1);
+        assert!(!a.silent);
+        assert_eq!(a.peak_dbfs, clean.peak_dbfs);
+        let near = |x: Option<f64>, y: Option<f64>| (x.unwrap() - y.unwrap()).abs() < 0.01;
+        assert!(near(a.rms_dbfs[0], clean.rms_dbfs[0]), "{a:?}");
+        assert!(near(a.lufs, clean.lufs), "{a:?}");
+        assert!(near(a.bands.high_dbfs, clean.bands.high_dbfs), "{a:?}");
     }
 
     #[test]
