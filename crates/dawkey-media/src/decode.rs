@@ -98,6 +98,11 @@ fn decode_native(path: &Path) -> Result<(Vec<Vec<f32>>, u32), MediaError> {
             Ok(None) => break,
             // A new logical stream (chained Ogg) starts; treat it as the end.
             Err(SymphoniaError::ResetRequired) => break,
+            // The file ends before its header says (a copy that didn't
+            // finish, a recording cut short): keep what's there, as players do.
+            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                break;
+            }
             Err(e) => return Err(decode_err(e.to_string())),
         };
         if packet.track_id != track_id {
@@ -195,6 +200,29 @@ mod tests {
             .iter()
             .fold(0.0f32, |m, s| m.max(s.abs()));
         assert!((peak - 0.5).abs() < 0.02, "peak {peak}");
+    }
+
+    #[test]
+    fn decodes_files_that_were_cut_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("cut.wav");
+        write_wav(&wav, &[sine(48_000, 48_000, 440.0)], 48_000).unwrap();
+        let flac = dir.path().join("cut.flac");
+        crate::export(
+            &mut crate::MemorySource::new(vec![sine(48_000, 48_000, 440.0)]),
+            48_000,
+            &crate::ExportSpec::new(crate::FileFormat::Flac, crate::SampleFormat::Int24, 48_000),
+            &flac,
+            &crate::ExportProgress::default(),
+        )
+        .unwrap();
+        // Their headers say a second; the files hold about half of it.
+        for path in [wav, flac] {
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, &bytes[..bytes.len() / 2 + 1]).unwrap();
+            let frames = decode_file(&path, 48_000).unwrap().audio.frames();
+            assert!((20_000..48_000).contains(&frames), "{path:?}: {frames}");
+        }
     }
 
     #[test]
