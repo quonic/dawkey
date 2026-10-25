@@ -67,15 +67,39 @@ Tests never touch the machine they run on:
 
 Some tests pin exact output:
 
-- **Audio hashes** in `tests/mcp_audio.rs` (and `GOLDEN_CHORD_HASH` in `tests/mcp_midi.rs` for the synth). If a change alters the output on purpose, update the constant and say why in the commit message.
+- **Audio hashes** in `tests/mcp_audio.rs` (and `GOLDEN_CHORD_HASH` in `tests/mcp_midi.rs` for the synth). If a change alters the output on purpose, update the constant and say why in the commit message's body.
 - **Screenshots** in `tests/golden/*.png`, rendered on lavapipe with the dark theme. After an intended visual change, run `DAWKEY_UPDATE_GOLDENS=1 cargo test --test mcp_ui`, look at the new images, and commit them.
 
 ## Sending a change
 
 - Open the pull request against `main`. Keep it to one topic, and rebase it on `main` if it falls behind.
-- Write the commit title as a short summary of what changed for the user, such as "Copy, paste and repeat clips", and explain why in the body when it isn't obvious.
+- Write commit messages as [Conventional Commits](https://www.conventionalcommits.org/) (see [Commit messages](#commit-messages)).
 - Make sure formatting, clippy and the tests pass.
 - Say in the pull request what you tested by hand. Pointer and keyboard input, dialogs, real audio and plugin GUIs aren't covered by the automated tests.
+
+### Commit messages
+
+release-plz writes `CHANGELOG.md` from the commits that reach `main` and picks each crate's next version from them, so every commit message starts with a type:
+
+```text
+<type>[(scope)][!]: <summary>
+
+[body: why, when it isn't obvious]
+
+[BREAKING CHANGE: what breaks and what to do instead]
+```
+
+| Type                                                       | For                        | In the changelog |
+| ---------------------------------------------------------- | -------------------------- | ---------------- |
+| `feat`                                                     | something new users can do | Added            |
+| `fix`                                                      | a bug fix                  | Fixed            |
+| `perf`, `refactor`, `docs`, `test`, `ci`, `build`, `chore` | everything else            | Other            |
+
+- The summary is the changelog entry, so write it for users, in the imperative: `feat: copy, paste and repeat clips`, `fix: stop import_midi panicking with several replacing targets`.
+- A scope is optional. Use the area, not a file: `feat(mcp): ...`, `fix(plugins): ...`.
+- Mark a breaking change with `!` after the type (`feat!: ...`) and a `BREAKING CHANGE:` footer saying what breaks: a project file that older versions can't read, an MCP tool that's renamed or removed, a widget ID that changes. While Dawkey is at 0.x, release-plz makes that a minor bump.
+- Every commit in a pull request becomes a changelog entry, so squash fixups ("formatting", "address review") into the commits they fix before it's merged.
+- Leave release-plz's own `chore: release` commits alone.
 
 ## License
 

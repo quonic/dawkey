@@ -1276,15 +1276,9 @@ impl Studio {
         /// mapped track the clip just added replaces.
         enum Step {
             Command(Command),
-            Replace { track: TrackId, added: usize },
+            Replace(TrackId),
         }
         let mut steps = VecDeque::new();
-        let mut command_count = 0;
-        let mut push = |steps: &mut VecDeque<Step>, command: Command| {
-            steps.push_back(Step::Command(command));
-            command_count += 1;
-            command_count - 1
-        };
         if adopt {
             // The file's beat 0 lands at `position_s`, at its first tempo.
             let first = file
@@ -1293,19 +1287,16 @@ impl Studio {
                 .filter(|(beat, _)| *beat <= 0.0)
                 .map_or(120.0, |&(_, bpm)| bpm);
             let offset = position_s * first / 60.0;
-            push(
-                &mut steps,
-                Command::from(SetTempoMap {
-                    bpm: first,
-                    changes: file
-                        .tempo
-                        .iter()
-                        .filter(|(beat, _)| *beat > 0.0)
-                        .map(|&(beat, bpm)| TempoChange::new(beat + offset, bpm))
-                        .collect(),
-                }),
-            );
-            push(&mut steps, meter_map_of(file, offset).into());
+            steps.push_back(Step::Command(Command::from(SetTempoMap {
+                bpm: first,
+                changes: file
+                    .tempo
+                    .iter()
+                    .filter(|(beat, _)| *beat > 0.0)
+                    .map(|&(beat, bpm)| TempoChange::new(beat + offset, bpm))
+                    .collect(),
+            })));
+            steps.push_back(Step::Command(meter_map_of(file, offset).into()));
         }
         for (index, track) in file.tracks.iter().enumerate() {
             let notes = track
@@ -1331,8 +1322,7 @@ impl Studio {
                 })
                 .collect();
             let target = targets.iter().find(|t| t.file_track == index);
-            let added = push(
-                &mut steps,
+            steps.push_back(Step::Command(
                 AddMidiClip {
                     track: target.map(|t| t.track),
                     track_name: target.is_none().then(|| track.name.clone()),
@@ -1342,14 +1332,11 @@ impl Studio {
                     ..Default::default()
                 }
                 .into(),
-            );
+            ));
             if let Some(target) = target
                 && replace
             {
-                steps.push_back(Step::Replace {
-                    track: target.track,
-                    added,
-                });
+                steps.push_back(Step::Replace(target.track));
             }
         }
         let mut removed = Vec::new();
@@ -1358,10 +1345,16 @@ impl Studio {
                 match steps.pop_front() {
                     None => return Ok(None),
                     Some(Step::Command(command)) => return Ok(Some(command)),
-                    Some(Step::Replace { track, added }) => {
+                    Some(Step::Replace(track)) => {
                         // The clips the new one overlaps go, in front of the
-                        // remaining steps.
-                        let new = outcomes[added].clip.expect("add_midi_clip makes a clip");
+                        // remaining steps. It's the last outcome: a replace
+                        // follows its add_midi_clip, and the removals it
+                        // queues run after it.
+                        let Some(new) = outcomes.last().and_then(|o| o.clip) else {
+                            return Err(CoreError::InvalidArgument(
+                                "the imported clip to replace others with is missing".into(),
+                            ));
+                        };
                         let Some((_, clip)) = project.clip(new) else {
                             continue;
                         };
