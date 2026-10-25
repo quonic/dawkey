@@ -4,6 +4,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -220,6 +221,12 @@ pub fn scan(search: &SearchPath, scanner: Option<(&Path, &[&str])>, timeout: Dur
     catalog
 }
 
+/// How long the scanner's output is read for after it exits. All of it is
+/// in the pipe by then; only a process the plugin started (wine's
+/// wineserver for yabridge's plugins, a licence daemon) that holds the
+/// pipe open keeps it from ending.
+const OUTPUT_GRACE: Duration = Duration::from_millis(500);
+
 fn scan_in_subprocess(
     program: &Path,
     args: &[&str],
@@ -234,12 +241,20 @@ fn scan_in_subprocess(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("starting the scanner: {e}"))?;
-    // Read on a thread, so a chatty plugin can't fill the pipe and stall.
+    // Read on a thread, so a chatty plugin can't fill the pipe and stall;
+    // what it reads comes over a channel, so waiting for it has a limit.
     let mut stdout = child.stdout.take().expect("piped");
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let _ = stdout.read_to_end(&mut out);
-        out
+    let (chunks, read) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0; 8192];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) if chunks.send(buf[..n].to_vec()).is_ok() => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                _ => break,
+            }
+        }
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -254,7 +269,13 @@ fn scan_in_subprocess(
             Err(e) => return Err(e.to_string()),
         }
     };
-    let out = reader.join().unwrap_or_default();
+    // Until the pipe ends, or for a moment: a process the plugin left
+    // running may hold it open (and the reader, until it goes).
+    let until = Instant::now() + OUTPUT_GRACE;
+    let mut out = Vec::new();
+    while let Ok(chunk) = read.recv_timeout(until.saturating_duration_since(Instant::now())) {
+        out.extend(chunk);
+    }
     if !status.success() {
         return Err(match status.code() {
             Some(code) => format!("the scanner failed (exit status {code})"),
