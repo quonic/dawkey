@@ -2306,6 +2306,40 @@ fn typing_a_time_signature() {
     );
 }
 
+/// Clicking a field that's being typed in (to put the caret there, say)
+/// keeps what's been typed, rather than starting again from the value.
+#[test]
+fn clicking_a_field_being_typed_in_keeps_the_typing() {
+    let mut app = app();
+    click(&mut app, "arrange/tempo").unwrap();
+    click(&mut app, "tempo/value").unwrap();
+    type_keys(&mut app, &["9", "5"]);
+    click(&mut app, "tempo/value").unwrap();
+    let field = app.access_tree().find("tempo/value").unwrap().clone();
+    assert_eq!(field.value.as_deref(), Some("95"));
+    type_keys(&mut app, &["return"]);
+    assert_eq!(app.studio.session().project().tempo_bpm, 95.0);
+
+    click(&mut app, "meter/numerator/value").unwrap();
+    type_keys(&mut app, &["3"]);
+    click(&mut app, "meter/numerator/value").unwrap();
+    type_keys(&mut app, &["return"]);
+    assert_eq!(app.studio.session().project().time_signature.numerator, 3);
+
+    // The preferences' record offset and MCP port.
+    app.key(",", CTRL).unwrap();
+    click(&mut app, "prefs/record_offset").unwrap();
+    type_keys(&mut app, &["1", "2"]);
+    click(&mut app, "prefs/record_offset").unwrap();
+    type_keys(&mut app, &["return"]);
+    assert_eq!(app.preferences().record_offset_ms, 12.0);
+    click(&mut app, "prefs/mcp_port").unwrap();
+    type_keys(&mut app, &["8", "0", "8", "0"]);
+    click(&mut app, "prefs/mcp_port").unwrap();
+    type_keys(&mut app, &["return"]);
+    assert_eq!(app.preferences().mcp_http_port, 8080);
+}
+
 #[test]
 fn buses_and_the_master_in_the_mixer() {
     let (mut app, _dir) = app_with_plugins();

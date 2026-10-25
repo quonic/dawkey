@@ -68,8 +68,13 @@ pub(crate) fn format_ms(ms: f64) -> String {
 }
 
 impl App {
-    /// Starts typing in `field`, with its current value selected.
+    /// Starts typing in `field`, with its current value selected. A field
+    /// already being typed in (clicked again, to put the caret there, say)
+    /// keeps what's been typed.
     pub(crate) fn start_text_edit(&mut self, field: TextField) -> Result<(), String> {
+        if self.editing(&field) {
+            return Ok(());
+        }
         let text = match &field {
             &TextField::Tempo(n) => {
                 let project = self.studio.session().project();
