@@ -1542,6 +1542,32 @@ fn slot_param(app: &App, slot: dawkey_core::PluginId) -> Option<f64> {
 }
 
 #[test]
+fn clicks_on_the_picker_and_editor_panels_keep_them_open() {
+    let (mut app, _dir) = app_with_plugins();
+    let (track, _) = add_clip(&mut app, 0.0);
+    click(&mut app, "view/mixer").unwrap();
+    click(&mut app, &format!("track/{track}/add_plugin")).unwrap();
+    // Just inside the panel's top-left corner, clear of its controls.
+    let corner = |app: &mut App, id: &str| {
+        let panel = app.access_tree().find(id).unwrap().bounds;
+        Point::new(panel.x + 3.0, panel.y + 3.0)
+    };
+    let at = corner(&mut app, "plugin_picker");
+    app.click_at(at, MouseButton::Left, Modifiers::default())
+        .unwrap();
+    assert!(app.view_state().plugin_picker.is_some());
+    type_keys(&mut app, &["g", "a", "i", "n", "return"]);
+    assert!(app.view_state().plugin_editor.is_some());
+    let at = corner(&mut app, "plugin_editor");
+    app.click_at(at, MouseButton::Left, Modifiers::default())
+        .unwrap();
+    assert!(app.view_state().plugin_editor.is_some());
+    // The backdrop around them still closes them.
+    click(&mut app, "overlay/backdrop").unwrap();
+    assert!(app.view_state().plugin_editor.is_none());
+}
+
+#[test]
 fn plugins_from_the_mixer() {
     let (mut app, _dir) = app_with_plugins();
     let (track, _) = add_clip(&mut app, 0.0);

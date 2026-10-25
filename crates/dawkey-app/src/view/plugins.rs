@@ -136,6 +136,8 @@ fn panel(id: &str, label: &str) -> Node {
         .id(id)
         .accessible_label(label)
         .role(Role::Group)
+        // Clicks between the controls stay in the panel.
+        .clickable()
         .width(Sizing::Fixed(PANEL_W))
         .height(Sizing::Fixed(PANEL_H))
         .clip()
