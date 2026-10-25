@@ -8,7 +8,8 @@
 //! choice's name). Backspace deletes, Return or
 //! Tab (or clicking elsewhere) sets it with one command, and Escape leaves
 //! it as it was. Tab from a numerator goes on to the denominator. While a
-//! field is being typed in, it gets every key.
+//! field is being typed in, it gets every key (keys with Ctrl or Alt held
+//! type nothing).
 
 use dawkey_core::{
     DEVICE_LATENCY_MS_MAX, RenameClip, RenameTrack, SetPluginParam, SetTempo, SetTimeSignature,
@@ -173,6 +174,9 @@ impl App {
                     edit.text.pop();
                 }
             }
+            // Shortcuts (Ctrl+S, Ctrl+Z, ...) type nothing, and don't
+            // get past the field either.
+            _ if m.ctrl || m.alt => {}
             _ if free_text(&edit.field) => {
                 // Any text (a plugin reads its parameters' text).
                 let c = match key {

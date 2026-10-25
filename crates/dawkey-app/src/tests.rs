@@ -2340,6 +2340,37 @@ fn clicking_a_field_being_typed_in_keeps_the_typing() {
     assert_eq!(app.preferences().mcp_http_port, 8080);
 }
 
+/// While a name is being typed, Ctrl shortcuts type nothing: Ctrl+Z
+/// doesn't add a "z", nor Ctrl+S an "s" (nor save).
+#[test]
+fn ctrl_shortcuts_type_nothing_into_names() {
+    let mut app = app();
+    let id = add_track(&mut app, "Track");
+    let name = format!("track/{id}/name");
+    app.double_click(&name, Modifiers::default()).unwrap();
+    type_keys(&mut app, &["b", "a", "s", "s"]);
+    app.key("z", CTRL).unwrap();
+    app.key("s", CTRL).unwrap();
+    app.key(
+        "x",
+        Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        },
+    )
+    .unwrap();
+    assert!(app.take_platform_requests().is_empty());
+    type_keys(&mut app, &["return"]);
+    assert_eq!(app.studio.session().project().tracks[0].name, "bass");
+    // Nor into numbers.
+    click(&mut app, "arrange/tempo").unwrap();
+    click(&mut app, "tempo/value").unwrap();
+    type_keys(&mut app, &["9"]);
+    app.key("1", CTRL).unwrap();
+    type_keys(&mut app, &["0", "return"]);
+    assert_eq!(app.studio.session().project().tempo_bpm, 90.0);
+}
+
 #[test]
 fn buses_and_the_master_in_the_mixer() {
     let (mut app, _dir) = app_with_plugins();
