@@ -1185,6 +1185,27 @@ impl Project {
             .retain(|c| c.bar > 1 && c.time_signature().valid());
         self.meter_changes.sort_by_key(|c| c.bar);
         self.meter_changes.dedup_by_key(|c| c.bar);
+        // Routing is put back one link at a time, as commands would make
+        // it, so that a bad link can't cost a good one its place: outputs,
+        // then sends, then plugins' sidechains and outputs.
+        let sends: Vec<Vec<Send>> = self
+            .tracks
+            .iter_mut()
+            .map(|t| std::mem::take(&mut t.sends))
+            .collect();
+        self.master.sends.clear();
+        type Routes = (Option<TrackId>, BTreeMap<u32, TrackId>);
+        let routes: Vec<Vec<Routes>> = self
+            .tracks
+            .iter_mut()
+            .chain(std::iter::once(&mut self.master))
+            .map(|t| {
+                t.plugins
+                    .iter_mut()
+                    .map(|p| (p.sidechain.take(), std::mem::take(&mut p.outputs)))
+                    .collect()
+            })
+            .collect();
         // Outputs go to buses that exist, without loops.
         let buses: Vec<TrackId> = self
             .tracks
@@ -1207,19 +1228,30 @@ impl Project {
                 self.tracks[i].output = None;
             }
         }
+        // Sends go to buses that exist (not the master, nor the track
+        // itself), one to each, without loops.
+        for (i, wanted) in sends.into_iter().enumerate() {
+            let id = self.tracks[i].id;
+            for send in wanted {
+                let fits = buses.contains(&send.bus)
+                    && send.bus != id
+                    && !self.tracks[i].sends.iter().any(|s| s.bus == send.bus)
+                    && !self.depends_on(id, send.bus);
+                if fits {
+                    self.tracks[i].sends.push(send);
+                }
+            }
+        }
         // Sidechains from tracks that exist (not the master, nor the
         // plugin's own track), plugin outputs to buses; no loops.
         let ids: Vec<TrackId> = self.tracks.iter().map(|t| t.id).collect();
-        for t in 0..=self.tracks.len() {
+        for (t, routes) in routes.into_iter().enumerate() {
             let id = if t < self.tracks.len() {
                 self.tracks[t].id
             } else {
                 MASTER
             };
-            let count = self.track(id).map_or(0, |t| t.plugins.len());
-            for p in 0..count {
-                let slot = &self.track(id).expect("exists").plugins[p];
-                let (sidechain, outputs) = (slot.sidechain, slot.outputs.clone());
+            for (p, (sidechain, outputs)) in routes.into_iter().enumerate() {
                 let sidechain =
                     sidechain.filter(|s| ids.contains(s) && *s != id && !self.depends_on(*s, id));
                 let outputs = outputs
@@ -1266,8 +1298,10 @@ impl Project {
             track.clips.retain(|c| c.kind() == kind);
             // Lanes need sorted, distinct points and a target on this track.
             let plugins: Vec<PluginId> = track.plugins.iter().map(|p| p.id).collect();
+            let sends: Vec<TrackId> = track.sends.iter().map(|s| s.bus).collect();
             track.automation.retain(|l| match &l.target {
                 AutomationTarget::Param { plugin, .. } => plugins.contains(plugin),
+                AutomationTarget::Send { bus } => sends.contains(bus),
                 _ => true,
             });
             for lane in &mut track.automation {

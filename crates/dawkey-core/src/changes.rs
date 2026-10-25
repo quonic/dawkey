@@ -2,12 +2,12 @@
 //! A log of what changed the project, so a client can ask what happened
 //! since a revision it knows (`get_changes` over MCP).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use serde::Serialize;
 
 use crate::edit::{ClipProp, Edit, TrackProp};
-use crate::model::{ClipId, NoteId, PluginId, Project, TrackId};
+use crate::model::{ClipId, Note, NoteId, PluginId, Project, TrackId};
 use crate::session::Outcome;
 
 /// How many changes are remembered.
@@ -30,6 +30,10 @@ pub enum ChangeKind {
 pub struct Change {
     /// The revision the change made.
     pub revision: u64,
+    /// The first revision it covers: a merged gesture is one change for
+    /// all the revisions its steps made, up to `revision`.
+    #[serde(skip)]
+    pub(crate) first_revision: u64,
     pub kind: ChangeKind,
     /// The undo step's name (the command's tool name).
     pub label: String,
@@ -65,6 +69,7 @@ impl Change {
     ) -> Self {
         let mut change = Self {
             revision,
+            first_revision: revision,
             kind,
             label: label.into(),
             tracks: Vec::new(),
@@ -135,12 +140,17 @@ impl Change {
                 if let ClipProp::Notes(before) = prop
                     && let Some((_, clip)) = project.clip(*id)
                 {
-                    // The notes that differ between before and after.
+                    // The notes that differ between before and after, by
+                    // ID (a clip can hold many thousands).
                     let after = clip.notes();
-                    for note in before.iter().filter(|n| !after.contains(n)) {
+                    let by_id = |notes: &[Note]| -> HashMap<NoteId, Note> {
+                        notes.iter().map(|n| (n.id, *n)).collect()
+                    };
+                    let (was, is) = (by_id(before), by_id(after));
+                    for note in before.iter().filter(|n| is.get(&n.id) != Some(n)) {
                         self.notes.push(note.id);
                     }
-                    for note in after.iter().filter(|n| !before.contains(n)) {
+                    for note in after.iter().filter(|n| was.get(&n.id) != Some(n)) {
                         self.notes.push(note.id);
                     }
                 }
@@ -184,9 +194,10 @@ pub struct ChangesSince {
     /// The changes after `since_revision`, oldest first.
     pub changes: Vec<Change>,
     /// Whether `changes` has every change since `since_revision`. False if
-    /// the log doesn't go back that far, or `since_revision` is past the
-    /// current revision (another project was opened, or Dawkey restarted:
-    /// get_state gives the project as it is).
+    /// the log doesn't go back that far (another project was opened since:
+    /// the revisions carry on from the old project's), or `since_revision`
+    /// is past the current revision (Dawkey restarted). get_state gives the
+    /// project as it is.
     pub complete: bool,
 }
 
@@ -209,6 +220,15 @@ impl ChangeLog {
         self.changes.back_mut()
     }
 
+    /// Numbers every change `offset` revisions later (see
+    /// [`Session::continue_revisions`](crate::Session::continue_revisions)).
+    pub(crate) fn shift(&mut self, offset: u64) {
+        for change in &mut self.changes {
+            change.revision += offset;
+            change.first_revision += offset;
+        }
+    }
+
     pub(crate) fn since(&self, since_revision: u64, revision: u64) -> ChangesSince {
         let changes: Vec<Change> = self
             .changes
@@ -221,7 +241,7 @@ impl ChangeLog {
                 || self
                     .changes
                     .front()
-                    .is_some_and(|first| first.revision <= since_revision + 1));
+                    .is_some_and(|first| first.first_revision <= since_revision + 1));
         ChangesSince {
             since_revision,
             revision,

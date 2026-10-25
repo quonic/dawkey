@@ -215,7 +215,8 @@ impl AddTrack {
 }
 
 /// Remove a track (or bus) and everything on it. Tracks sent to a removed
-/// bus go to the master.
+/// bus go to the master, and their sends to it (with the sends' automation)
+/// go.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RemoveTrack {
@@ -235,7 +236,8 @@ impl RemoveTrack {
                 prop: TrackProp::Output(None),
             })
             .collect();
-        // Sidechains from it, plugin outputs to it, and sends to it stop.
+        // Sidechains from it, plugin outputs to it, and sends to it (and
+        // their automation) stop.
         for track in project.all_tracks().filter(|t| t.id != gone) {
             if track.sends.iter().any(|s| s.bus == gone) {
                 edits.push(Edit::SetTrack {
@@ -246,6 +248,20 @@ impl RemoveTrack {
                             .iter()
                             .copied()
                             .filter(|s| s.bus != gone)
+                            .collect(),
+                    ),
+                });
+            }
+            let send_lane = |l: &AutomationLane| l.target == AutomationTarget::Send { bus: gone };
+            if track.automation.iter().any(send_lane) {
+                edits.push(Edit::SetTrack {
+                    id: track.id,
+                    prop: TrackProp::Automation(
+                        track
+                            .automation
+                            .iter()
+                            .filter(|l| !send_lane(l))
+                            .cloned()
                             .collect(),
                     ),
                 });
@@ -330,6 +346,12 @@ impl SetTrackSend {
     fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
         require_not_master(project, self.track, "sent elsewhere")?;
         let bus = self.bus;
+        if bus == MASTER {
+            return Err(CoreError::invalid(
+                "a send can't go to the master, which every track reaches already; \
+                 send to a bus (add_track with kind \"bus\" makes one)",
+            ));
+        }
         let target = project.track(bus).ok_or(CoreError::TrackNotFound(bus))?;
         if target.kind != TrackKind::Bus {
             return Err(CoreError::invalid(format!(
@@ -2134,7 +2156,11 @@ impl AddMidiClip {
                 }
                 length
             }
-            None => fit_to_bars(project, start, 0, &notes),
+            None => {
+                // Past its last note and controller change.
+                let end = notes_end(&notes).max(controls.last().map_or(0, |c| c.frame + 1));
+                fit_to_bars(project, start, 0, end)
+            }
         };
         let mut edits = Vec::new();
         let name = match (&self.track_name, self.track) {
@@ -3153,7 +3179,7 @@ fn set_notes(
     length: u64,
     notes: Vec<Note>,
 ) -> Vec<Edit> {
-    let fitted = fit_to_bars(project, start, length, &notes);
+    let fitted = fit_to_bars(project, start, length, notes_end(&notes));
     let mut edits = vec![Edit::SetClip {
         id,
         prop: ClipProp::Notes(sorted(notes)),
@@ -3167,23 +3193,29 @@ fn set_notes(
     edits
 }
 
+/// Where the last of `notes` ends, in frames from the clip's start.
+fn notes_end(notes: &[Note]) -> u64 {
+    notes.iter().map(Note::end).max().unwrap_or(0)
+}
+
 /// `length`, or the whole number of bars (at least one, counted from the
-/// clip's start at timeline frame `start`) that covers every note,
-/// whichever is longer. A clip that starts on a bar line ends on one, with
-/// the bars of the meter map; otherwise bars are as long as the one the
-/// clip starts in.
-fn fit_to_bars(project: &Project, start: u64, length: u64, notes: &[Note]) -> u64 {
-    let end = notes.iter().map(Note::end).max().unwrap_or(0);
+/// clip's start at timeline frame `start`) that covers `end` (frames from
+/// the clip's start), whichever is longer. A clip that starts on a bar line
+/// ends on one, with the bars of the meter map; otherwise bars are as long
+/// as the one the clip starts in.
+fn fit_to_bars(project: &Project, start: u64, length: u64, end: u64) -> u64 {
     if end <= length && length > 0 {
         return length;
     }
     let map = project.tempo_map();
     let meter = project.meter_map();
     let start_beat = map.beat_at(start as f64);
-    let first_bar = meter.bar_start(meter.bar_at(start_beat + 1e-9));
+    let first = meter.bar_at(start_beat + 1e-9);
+    let first_bar = meter.bar_start(first);
     let beats = if (first_bar - start_beat).abs() < 1e-6 {
-        let end_beat = map.beat_at((start + end) as f64).max(start_beat + 1e-6);
-        meter.bar_at_or_after(end_beat - 1e-9) - start_beat
+        let end_beat = map.beat_at((start + end) as f64);
+        let last_bar = meter.bar_at_or_after(end_beat - 1e-9);
+        last_bar.max(meter.bar_start(first + 1)) - start_beat
     } else {
         let bar = meter.meter_at(start_beat).beats_per_bar();
         (map.clip_beats(start, end) / bar - 1e-9).ceil().max(1.0) * bar

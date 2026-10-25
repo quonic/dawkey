@@ -86,6 +86,53 @@ fn replacing_or_closing_an_unsaved_project_deletes_its_takes() {
 }
 
 #[test]
+fn removing_a_track_while_recording_keeps_the_other_takes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut studio = recording_studio(dir.path());
+    studio.set_virtual_midi_devices(vec!["Keys".into()], Vec::new());
+    let vox = studio.session().project().tracks[0].id;
+    let armed = |studio: &mut Studio, kind| {
+        let track = studio
+            .execute(
+                AddTrack {
+                    kind,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        studio
+            .execute(SetTrackArm { track, armed: true }.into())
+            .unwrap();
+        track
+    };
+    let gtr = armed(&mut studio, dawkey_core::TrackKind::Audio);
+    let keys = armed(&mut studio, dawkey_core::TrackKind::Midi);
+    let pads = armed(&mut studio, dawkey_core::TrackKind::Midi);
+    studio.record().unwrap();
+    let note = [(0.1, [0x90, 60, 100], 0), (0.2, [0x80, 60, 0], 0)];
+    studio.queue_virtual_midi(Some("Keys"), &note).unwrap();
+    studio.advance(0.3).unwrap();
+    for track in [gtr, pads] {
+        studio
+            .execute(dawkey_core::RemoveTrack { track }.into())
+            .unwrap();
+    }
+    studio.stop().unwrap();
+
+    let project = studio.session().project();
+    for track in [vox, keys] {
+        assert_eq!(project.track(track).unwrap().clips.len(), 1, "{track}");
+    }
+    // The removed track's recording went with it.
+    assert_eq!(project.sources.len(), 1);
+    let files = std::fs::read_dir(dir.path()).unwrap().count();
+    assert_eq!(files, 1, "only Vox's take is left");
+}
+
+#[test]
 fn reported_midi_device_latency_is_compensated() {
     let mut studio = Studio::new(
         LoadedProject::new(Project::default()),
