@@ -1544,6 +1544,29 @@ fn unit_symbol(world: &World, unit: &lilv::node::Node) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// A control port's range and default from its `lv2:minimum`,
+/// `lv2:maximum` and `lv2:default` (NaN where it leaves one out) and its
+/// scale points. The bounds are hints a port may leave out: a bound it
+/// leaves out (or both, if they're the wrong way round) is made up to hold
+/// its default and scale points, and 0 to 1 as well, so a declared default
+/// stays what it is. Only a declared bound moves the default.
+fn control_range(min: f32, max: f32, default: f32, points: &[f32]) -> (f32, f32, f32) {
+    let declared = |v: f32| v.is_finite().then_some(v);
+    let (min, max) = match (declared(min), declared(max)) {
+        (Some(min), Some(max)) if max <= min => (None, None),
+        bounds => bounds,
+    };
+    let default = declared(default);
+    let held = || default.into_iter().chain(points.iter().copied());
+    let lo = min.unwrap_or_else(|| {
+        let lowest = held().fold(0.0, f32::min);
+        // Below a declared maximum.
+        max.map_or(lowest, |max| lowest.min(max - 1.0))
+    });
+    let hi = max.unwrap_or_else(|| held().fold(1.0, f32::max).max(lo + 1.0));
+    (lo, hi, default.unwrap_or(lo).clamp(lo, hi))
+}
+
 fn port_kinds(world: &World, plugin: &Plugin) -> Vec<PortKind> {
     let uri = |s: &str| world.new_uri(s);
     let (input, audio, control, atom_port, optional, midi) = (
@@ -1567,18 +1590,24 @@ fn port_kinds(world: &World, plugin: &Plugin) -> Vec<PortKind> {
         .iter_ports()
         .map(|port| {
             let index = port.index();
+            let labels: Vec<ValueLabel> = port
+                .scale_points()
+                .iter()
+                .filter_map(|p| {
+                    let value = p.value();
+                    let value = value
+                        .as_float()
+                        .map(f64::from)
+                        .or_else(|| value.as_int().map(f64::from))?;
+                    Some(ValueLabel {
+                        value,
+                        label: p.label().as_str()?.to_owned(),
+                    })
+                })
+                .collect();
             let range = ranges.get(index).map_or((0.0, 0.0, 1.0), |r| {
-                let (min, max) = if r.min.is_finite() && r.max.is_finite() && r.max > r.min {
-                    (r.min, r.max)
-                } else {
-                    (0.0, 1.0)
-                };
-                let default = if r.default.is_finite() {
-                    r.default
-                } else {
-                    min
-                };
-                (min, max, default.clamp(min, max))
+                let points: Vec<f32> = labels.iter().map(|l| l.value as f32).collect();
+                control_range(r.min, r.max, r.default, &points)
             });
             PortKind {
                 index,
@@ -1605,21 +1634,7 @@ fn port_kinds(world: &World, plugin: &Plugin) -> Vec<PortKind> {
                 range,
                 stepped: stepped.iter().any(|p| port.has_property(p)),
                 unit: port.get(&unit).and_then(|u| unit_symbol(world, &u)),
-                labels: port
-                    .scale_points()
-                    .iter()
-                    .filter_map(|p| {
-                        let value = p.value();
-                        let value = value
-                            .as_float()
-                            .map(f64::from)
-                            .or_else(|| value.as_int().map(f64::from))?;
-                        Some(ValueLabel {
-                            value,
-                            label: p.label().as_str()?.to_owned(),
-                        })
-                    })
-                    .collect(),
+                labels,
             }
         })
         .collect()

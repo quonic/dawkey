@@ -72,8 +72,9 @@ pub(crate) struct Plugins {
 /// Bump when [`PluginInfo`] gains something scans find, or scans find
 /// different plugins, so older caches are scanned again. (3: LV2 plugins
 /// whose ports can't be read are left out; 4: LV2 plugins that require the
-/// worker are in; 5: VST3 plugins.)
-const CACHE_VERSION: u32 = 6;
+/// worker are in; 5: VST3 plugins; 7: LV2 control ports keep the bounds
+/// and default they declare.)
+const CACHE_VERSION: u32 = 7;
 
 /// The catalog as cached on disk, with what it was scanned from.
 #[derive(Serialize, Deserialize)]
