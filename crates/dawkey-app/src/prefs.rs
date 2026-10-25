@@ -106,7 +106,9 @@ impl Preferences {
     }
 
     /// The preferences at `path`; the defaults if there are none, or (with
-    /// a warning) if they can't be read.
+    /// a warning) if they can't be read. A value that isn't of its type
+    /// (a file edited by hand) takes its default, with a warning, and the
+    /// rest are kept.
     pub fn load(path: &Path) -> Self {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
@@ -116,13 +118,30 @@ impl Preferences {
                 return Self::default();
             }
         };
-        match serde_json::from_slice::<Self>(&bytes) {
-            Ok(prefs) => prefs.sanitized(),
+        let file = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(serde_json::Value::Object(file)) => file,
+            Ok(_) => {
+                tracing::warn!("{}: not a JSON object; using the defaults", path.display());
+                return Self::default();
+            }
             Err(e) => {
                 tracing::warn!("{}: {e}; using the defaults", path.display());
-                Self::default()
+                return Self::default();
+            }
+        };
+        // Take the file's values one at a time (missing ones are the
+        // defaults), leaving out those that don't fit.
+        let mut prefs = serde_json::Map::new();
+        for (key, value) in file {
+            prefs.insert(key.clone(), value);
+            if let Err(e) = serde_json::from_value::<Self>(prefs.clone().into()) {
+                tracing::warn!("{}: {key}: {e}; using its default", path.display());
+                prefs.remove(&key);
             }
         }
+        serde_json::from_value::<Self>(prefs.into())
+            .unwrap_or_default()
+            .sanitized()
     }
 
     /// Writes them to `path` (replacing what was there at once).
@@ -200,5 +219,26 @@ mod tests {
         assert_eq!(loaded.autosave_every(), None);
         std::fs::write(&path, b"not json").unwrap();
         assert_eq!(Preferences::load(&path), Preferences::default());
+    }
+
+    /// A value of the wrong type (an interval of 5.5 minutes, a port
+    /// above 65535) takes its default, and the rest of the file is kept.
+    #[test]
+    fn a_mistyped_value_takes_its_default_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        std::fs::write(
+            &path,
+            br#"{ "lv2_folders": ["/opt/lv2"], "ui_scale": 1.5, "autosave_minutes": 5.5,
+                  "mcp_http_port": 70000, "theme": "pink", "autosave": false }"#,
+        )
+        .unwrap();
+        let expected = Preferences {
+            lv2_folders: vec![PathBuf::from("/opt/lv2")],
+            ui_scale: 1.5,
+            autosave: false,
+            ..Preferences::default()
+        };
+        assert_eq!(Preferences::load(&path), expected);
     }
 }
