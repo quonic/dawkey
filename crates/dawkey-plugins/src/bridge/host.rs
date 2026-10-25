@@ -14,9 +14,10 @@
 //! The output comes out of a FIFO that starts with a block of silence, so
 //! the plugin is late by exactly that much (reported as latency, which
 //! delay compensation lines up). A block longer than that grows the delay
-//! once. If the host process isn't done in time, the block is silence; if
-//! it dies, the track's audio passes through. Offline renders wait for each
-//! block instead, so they add no latency.
+//! once. If the host process isn't done in time, the block is silence (its
+//! events go with the next block it gets); if it dies, the track's audio
+//! passes through. Offline renders wait for each block instead, so they
+//! add no latency.
 
 use std::collections::HashMap;
 use std::io;
@@ -28,7 +29,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::time::{Duration, Instant};
 
-use dawkey_engine::{MAX_BLOCK, MidiSink, PluginEvent, PluginProcessor, ProcessContext};
+use dawkey_engine::{
+    MAX_BLOCK, MidiSink, PluginEvent, PluginEventKind, PluginProcessor, ProcessContext,
+};
 
 use super::proto::{Envelope, FromHost, ToHost, read_frame, write_frame};
 use super::sandbox::{Enforced, Entered, Sandbox};
@@ -738,6 +741,9 @@ pub(crate) struct BridgedProcessor {
     aux: Box<[[Fifo; 2]]>,
     /// MIDI the plugin sent in the last block it did, to pass on now.
     midi: Vec<PluginEvent>,
+    /// What still matters of the events of blocks the host process missed
+    /// (it was busy), to go with the next block it gets.
+    held: Vec<PluginEvent>,
     /// Blocks the host process wasn't done with in time.
     late: u64,
 }
@@ -763,6 +769,7 @@ impl BridgedProcessor {
             main: [Fifo::new(), Fifo::new()],
             aux: (0..aux).map(|_| [Fifo::new(), Fifo::new()]).collect(),
             midi: Vec::with_capacity(MAX_EVENTS),
+            held: Vec::with_capacity(MAX_EVENTS),
             late: 0,
         };
         for fifo in processor.fifos() {
@@ -794,15 +801,42 @@ impl BridgedProcessor {
         let aux = context.aux.len().min(MAX_AUX);
         block.aux_count = aux as u32;
         block.transport = WireTransport::from_transport(&context.transport);
-        let n = events.len().min(MAX_EVENTS);
-        for (wire, event) in block.events.iter_mut().zip(&events[..n]) {
+        // What it missed first (at its start), then this block's events.
+        let n = (self.held.len() + events.len()).min(MAX_EVENTS);
+        for (wire, event) in block.events.iter_mut().zip(self.held.iter().chain(events)) {
             *wire = WireEvent::from_event(event);
         }
         block.events_in = n as u32;
         block.events_out = 0;
+        self.held.clear();
         self.sent = self.sent.wrapping_add(1);
         signal(self.shm.request(), self.sent);
         self.pending = Some((frames, aux));
+    }
+
+    /// Keeps what matters of the events of a block the host process misses,
+    /// for the next block it gets: each parameter's last value, note-offs
+    /// and other MIDI. Note-ons are dropped (too late to play).
+    fn hold(&mut self, events: &[PluginEvent]) {
+        for event in events {
+            let kind = event.kind;
+            match kind {
+                PluginEventKind::NoteOn { .. } => continue,
+                PluginEventKind::Param { index, .. } => {
+                    let earlier = self.held.iter_mut().find(
+                        |e| matches!(e.kind, PluginEventKind::Param { index: i, .. } if i == index),
+                    );
+                    if let Some(earlier) = earlier {
+                        earlier.kind = kind;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            if self.held.len() < self.held.capacity() {
+                self.held.push(PluginEvent { offset: 0, kind });
+            }
+        }
     }
 
     /// Whether the host process is done with the block sent.
@@ -912,9 +946,11 @@ impl PluginProcessor for BridgedProcessor {
             self.status.delay.store(frames as u32, Ordering::Relaxed);
         }
         // This block goes to it, unless it's still busy (then the plugin
-        // misses it).
+        // misses it, but not what its events change).
         if self.pending.is_none() {
             self.send(&audio, &context, events);
+        } else {
+            self.hold(events);
         }
         let [left, right] = audio;
         self.main[0].pop(left);

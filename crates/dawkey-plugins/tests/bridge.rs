@@ -68,8 +68,14 @@ fn until_crashed(loaded: &mut Loaded) -> String {
 
 fn kill(pid: u32) {
     // SIGKILL, as a crash would end it.
+    signal(pid, "-9");
+}
+
+/// Sends process `pid` signal `sig` (`-STOP` holds it up, as a busy
+/// machine would, and `-CONT` lets it go on).
+fn signal(pid: u32, sig: &str) {
     std::process::Command::new("kill")
-        .args(["-9", &pid.to_string()])
+        .args([sig, &pid.to_string()])
         .status()
         .unwrap();
 }
@@ -450,6 +456,80 @@ fn a_busy_plugin_is_waited_for_not_killed() {
     assert_eq!(loaded.instance.param_value(info, 0, "-12 dB"), Some(-12.0));
     let text = loaded.instance.param_text(info, 0, -3.0).unwrap();
     assert_eq!(text, "-3.0 dB");
+    unload(loaded);
+}
+
+/// A plugin process that misses a block's deadline (here: stopped for a
+/// moment) still gets that block's events, with the next block: the engine
+/// sends a parameter only when it changes, so one lost would stay lost.
+#[test]
+fn a_late_block_keeps_its_parameter_changes() {
+    let mut host = host(64);
+    let mut loaded = host.load(plugin("clap:dawkey.test.gain")).unwrap();
+    let pid = loaded.instance.process_id().unwrap();
+    run_and_wait(&mut loaded.processor, &[0.5; 64], &[]);
+    // The process is held up for a moment...
+    signal(pid, "-STOP");
+    std::thread::sleep(Duration::from_millis(50));
+    run(&mut loaded.processor, &[0.5; 64], &[]);
+    // ... while the project turns the gain down to -60 dB (sent once).
+    run(&mut loaded.processor, &[0.5; 64], &[param(0, -12.0)]);
+    run(&mut loaded.processor, &[0.5; 64], &[param(0, -60.0)]);
+    signal(pid, "-CONT");
+    std::thread::sleep(Duration::from_millis(50));
+    // Then it runs on, in time.
+    let mut last = Vec::new();
+    for _ in 0..10 {
+        last = run_and_wait(&mut loaded.processor, &[0.5; 64], &[]).0;
+    }
+    let expected = 0.5 * 10f32.powf(-60.0 / 20.0);
+    assert!(
+        (last[0] - expected).abs() < 1e-6,
+        "the plugin plays at {} dB, the project says -60 dB",
+        20.0 * (last[0] / 0.5).log10()
+    );
+    unload(loaded);
+}
+
+/// The same with a note-off: the note ends.
+#[test]
+fn a_late_block_keeps_its_note_offs() {
+    let mut host = host(64);
+    let mut loaded = host.load(plugin("clap:dawkey.test.beep")).unwrap();
+    let pid = loaded.instance.process_id().unwrap();
+    let on = PluginEvent {
+        offset: 0,
+        kind: PluginEventKind::NoteOn {
+            channel: 0,
+            key: 60,
+            velocity: 1.0,
+        },
+    };
+    let off = PluginEvent {
+        offset: 0,
+        kind: PluginEventKind::NoteOff {
+            channel: 0,
+            key: 60,
+        },
+    };
+    run_and_wait(&mut loaded.processor, &[0.0; 64], &[on]);
+    let (sounding, _) = run_and_wait(&mut loaded.processor, &[0.0; 64], &[]);
+    assert!(sounding.iter().any(|&s| s != 0.0), "the note sounds");
+    signal(pid, "-STOP");
+    std::thread::sleep(Duration::from_millis(50));
+    run(&mut loaded.processor, &[0.0; 64], &[]);
+    run(&mut loaded.processor, &[0.0; 64], &[off]);
+    signal(pid, "-CONT");
+    std::thread::sleep(Duration::from_millis(50));
+    let mut last = Vec::new();
+    for _ in 0..10 {
+        last = run_and_wait(&mut loaded.processor, &[0.0; 64], &[]).0;
+    }
+    assert!(
+        last.iter().all(|&s| s == 0.0),
+        "the note still sounds long after its note-off: {}",
+        last[0]
+    );
     unload(loaded);
 }
 
