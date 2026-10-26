@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/quonic/dawkey/compare/v0.1.4...v0.1.5) - 2026-10-26
+
+### Added
+
+- *(mcp)* list a choice parameter's options in get_plugin
+- add a Claude Code plugin with a skill for working in Dawkey
+
+### Fixed
+
+- stop repeat_clip adding a sliver of an extra copy at the end
+- *(mcp)* stop requiring a position in seconds when it's given in beats or bars
+
+### Other
+
+- changes ci to self-hosted isolet
+
 ## [0.1.4](https://github.com/quonic/dawkey/compare/v0.1.3...v0.1.4) - 2026-10-26
 
 ### Fixed
