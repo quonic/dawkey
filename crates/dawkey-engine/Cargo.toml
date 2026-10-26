@@ -1,6 +1,6 @@
 [package]
 name = "dawkey-engine"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 rust-version.workspace = true
 description = "Dawkey's real-time audio engine: mix graph, transport and metering"
