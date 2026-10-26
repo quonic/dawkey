@@ -1696,6 +1696,52 @@ mod tests {
     }
 
     #[test]
+    fn repeating_a_bar_long_clip_makes_whole_copies() {
+        use crate::command::{AddMidiClip, RepeatClip, SetTempo};
+
+        // At 122 BPM a bar is 94 426.23 frames, so a one-bar clip is a
+        // fraction of a frame short of it, and seven copies end two frames
+        // before bar 9. That's rounding, not a piece of an eighth copy.
+        let mut s = Session::default();
+        s.execute(
+            SetTempo {
+                bpm: 122.0,
+                at_beats: None,
+                ramp: false,
+            }
+            .into(),
+        )
+        .unwrap();
+        let bar_s = 240.0 / 122.0;
+        let clip = s
+            .execute(
+                AddMidiClip {
+                    position_s: 0.0,
+                    length_s: Some(bar_s),
+                    notes: vec![note(36, 0.0, 0.25)],
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .clip
+            .unwrap();
+        let repeated = s
+            .execute(
+                RepeatClip {
+                    clip,
+                    until_s: 8.0 * bar_s,
+                }
+                .into(),
+            )
+            .unwrap();
+        assert_eq!(repeated.clips.len(), 7);
+        let until = s.project().seconds_to_frames(8.0 * bar_s);
+        let last = s.project().clip(repeated.clips[6]).unwrap().1;
+        assert!(until - last.end() <= 8, "{} {until}", last.end());
+    }
+
+    #[test]
     fn trim_and_split_midi_clips() {
         use crate::command::{AddMidiClip, ControlSpec, SplitClip, TrimClip};
         use crate::model::Controller;
