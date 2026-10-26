@@ -41,6 +41,8 @@ pub(crate) fn augment_schema(schema: &mut Map<String, Value>) {
     let Some(Value::Object(properties)) = schema.get_mut("properties") else {
         return;
     };
+    // Each position in seconds and what else stands in for it.
+    let mut alternatives = Vec::new();
     for (stem, description) in seconds {
         let name_s = format!("{stem}_s");
         if stem.contains("length") {
@@ -54,6 +56,7 @@ pub(crate) fn augment_schema(schema: &mut Map<String, Value>) {
                     ),
                 }),
             );
+            alternatives.push((name_s, format!("{stem}_beats")));
             continue;
         }
         properties.insert(
@@ -77,6 +80,35 @@ pub(crate) fn augment_schema(schema: &mut Map<String, Value>) {
                 ),
             }),
         );
+        alternatives.push((name_s, format!("{stem}_beats or {stem}_bar")));
+    }
+    // A required position may come in beats or bars instead, so the one in
+    // seconds isn't required as such (a client that checks the schema
+    // would refuse the others); its description says one of them is.
+    let Some(Value::Array(required)) = schema.get_mut("required") else {
+        return;
+    };
+    let mut relaxed = Vec::new();
+    required.retain(|name| {
+        let found = alternatives.iter().find(|(name_s, _)| name == name_s);
+        relaxed.extend(found.cloned());
+        found.is_none()
+    });
+    if required.is_empty() {
+        schema.remove("required");
+    }
+    let Some(Value::Object(properties)) = schema.get_mut("properties") else {
+        return;
+    };
+    for (name_s, others) in relaxed {
+        if let Some(Value::Object(prop)) = properties.get_mut(&name_s) {
+            let description = prop
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let description = format!("{description} Required: this, or {others}.");
+            prop.insert("description".into(), description.trim_start().into());
+        }
     }
 }
 
@@ -503,6 +535,22 @@ mod tests {
         }
         let stems = position_stems(&Value::Object(schema));
         assert_eq!(stems, ["end", "start"]);
+
+        // A required position in seconds isn't required when it can come
+        // in beats or bars instead, and says so; other fields stay required.
+        let schema = dawkey_core::args_schema::<dawkey_core::RepeatClip>();
+        let Value::Object(mut schema) = schema.to_value() else {
+            panic!()
+        };
+        augment_schema(&mut schema);
+        assert_eq!(schema["required"], json!(["clip"]));
+        let until = schema["properties"]["until_s"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            until.ends_with("Required: this, or until_beats or until_bar."),
+            "{until}"
+        );
         assert!(!has_beats(&json!({ "start_s": 1 }), &stems));
         assert!(has_beats(&json!({ "start_bar": 1 }), &stems));
     }

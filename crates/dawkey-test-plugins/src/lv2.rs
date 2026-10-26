@@ -115,6 +115,11 @@ pub const MANIFEST: &str = r#"@prefix atom: <http://lv2plug.in/ns/ext/atom#> .
         a lv2:OutputPort , lv2:AudioPort ; lv2:index 1 ; lv2:symbol "out_l" ; lv2:name "Out L"
     ] , [
         a lv2:OutputPort , lv2:AudioPort ; lv2:index 2 ; lv2:symbol "out_r" ; lv2:name "Out R"
+    ] , [
+        a lv2:InputPort , lv2:ControlPort ; lv2:index 3 ; lv2:symbol "count_from" ;
+        lv2:name "Count bars from" ; lv2:portProperty lv2:integer , lv2:enumeration ;
+        lv2:default 1 ; lv2:minimum 0 ; lv2:maximum 1 ;
+        lv2:scalePoint [ rdfs:label "One" ; rdf:value 1 ] , [ rdfs:label "Zero" ; rdf:value 0 ]
     ] .
 
 <urn:dawkey:test:subtract>
@@ -838,9 +843,11 @@ static TEMPO: Descriptor = Descriptor {
 
 /// Like the CLAP tempo: the left output is the tempo / 1000, the right one
 /// (bar + 1) / 100 while rolling, from the `time:Position` objects it gets.
+/// Its one control, a choice, counts bars from 0 instead.
 struct TempoPlugin {
     control: *const Atom,
     out: [*mut f32; 2],
+    count_from: *const f32,
     /// atom:Object, time:Position, time:speed, time:bar,
     /// time:beatsPerMinute.
     urids: [u32; 5],
@@ -873,6 +880,7 @@ unsafe extern "C" fn tempo_instantiate(
     Box::into_raw(Box::new(TempoPlugin {
         control: ptr::null(),
         out: [ptr::null_mut(); 2],
+        count_from: ptr::null(),
         urids,
         bpm: 0.0,
         bar: 0,
@@ -888,6 +896,7 @@ unsafe extern "C" fn tempo_connect(handle: Handle, port: u32, data: *mut c_void)
         0 => plugin.control = data.cast(),
         1 => plugin.out[0] = data.cast(),
         2 => plugin.out[1] = data.cast(),
+        3 => plugin.count_from = data.cast(),
         _ => {}
     }
 }
@@ -927,7 +936,7 @@ unsafe extern "C" fn tempo_run(handle: Handle, frames: u32) {
         }
         let left = plugin.bpm / 1000.0;
         let right = if plugin.speed > 0.0 {
-            (plugin.bar + 1) as f32 / 100.0
+            (plugin.bar as f32 + *plugin.count_from) / 100.0
         } else {
             0.0
         };

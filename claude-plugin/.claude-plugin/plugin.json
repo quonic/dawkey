@@ -1,0 +1,9 @@
+{
+  "name": "dawkey",
+  "description": "Make, mix and export music in Dawkey: connects Claude to the Dawkey window over MCP and teaches it to compose, choose plugins, mix by measuring renders, and export.",
+  "author": { "name": "quonic" },
+  "homepage": "https://github.com/quonic/dawkey",
+  "repository": "https://github.com/quonic/dawkey",
+  "license": "AGPL-3.0-or-later",
+  "keywords": ["daw", "music", "audio", "midi", "mixing", "mcp"]
+}

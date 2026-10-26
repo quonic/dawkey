@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "dawkey": {
+      "command": "dawkey",
+      "args": ["mcp", "--attach"]
+    }
+  }
+}

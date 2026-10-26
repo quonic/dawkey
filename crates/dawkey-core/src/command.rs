@@ -1654,6 +1654,14 @@ impl RepeatClip {
         let mut clips = Vec::new();
         let mut at = clip.end();
         while at < until {
+            // Lengths are whole frames, so a clip made a bar long can fall
+            // short of the bar by up to a frame (a bar at 122 BPM is
+            // 94 426.23 frames), and so can each copy. A remainder no longer
+            // than that shortfall is where the copies were meant to end,
+            // not a sliver of one more.
+            if !clips.is_empty() && until - at <= clips.len() as u64 + 1 {
+                break;
+            }
             let mut copy = copy_clip(project, &clip, at);
             if copy.end() > until {
                 copy = cut_clip(&copy, until, copy.id).0;
@@ -2738,7 +2746,8 @@ impl MovePlugin {
 /// Set a plugin parameter (get_plugin lists a plugin's parameters, with
 /// their IDs, ranges, and values as the plugin shows them). Give the new
 /// `value`, or `text` for the plugin to read the way it shows values
-/// (e.g. "-6 dB", "50 %", or a choice's name).
+/// (e.g. "-6 dB", "50 %", or one of the names in the parameter's
+/// `choices`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetPluginParam {

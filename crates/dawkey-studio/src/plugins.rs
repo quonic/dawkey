@@ -67,6 +67,9 @@ pub(crate) struct Plugins {
     bridge_waits: bool,
     /// Parameters plugins changed themselves, not yet taken.
     changes: Vec<(PluginId, ParamChange)>,
+    /// Choice parameters' options, by plugin and parameter index, as
+    /// running instances named them (finding them asks a lot).
+    choices: HashMap<(String, usize), Vec<(f64, String)>>,
 }
 
 /// Bump when [`PluginInfo`] gains something scans find, or scans find
@@ -76,6 +79,9 @@ pub(crate) struct Plugins {
 /// and default they declare, scaled by the sample rate with
 /// `lv2:sampleRate`.)
 const CACHE_VERSION: u32 = 7;
+
+/// How finely [`Plugins::choices`] samples a parameter's range.
+const CHOICE_SAMPLES: usize = 128;
 
 /// The catalog as cached on disk, with what it was scanned from.
 #[derive(Serialize, Deserialize)]
@@ -116,6 +122,7 @@ impl Plugins {
             bridge_block: 512,
             bridge_waits: false,
             changes: Vec::new(),
+            choices: HashMap::new(),
         }
     }
 
@@ -192,6 +199,7 @@ impl Plugins {
         self.cache = cache;
         self.catalog = None;
         self.errors.clear();
+        self.choices.clear();
     }
 
     /// Like [`set_search`](Self::set_search), keeping the cache.
@@ -310,6 +318,7 @@ impl Plugins {
         self.catalog = Some(catalog);
         self.host.refresh();
         self.errors.clear();
+        self.choices.clear();
     }
 
     fn read_cache(&self) -> Option<Catalog> {
@@ -446,6 +455,123 @@ impl Plugins {
         live.and_then(|s| s.instance.param_text(info, index, value))
             .or_else(|| info.params.get(index).map(|p| p.text(value)))
             .unwrap_or_default()
+    }
+
+    /// The options of slot `slot`'s parameter `index` (plugin `info`), if
+    /// it's a choice, as values and the plugin's names for them: an LV2
+    /// port's scale points, or the runs of one name across the range,
+    /// each at the value the plugin reads its name as. Nothing when there
+    /// are more than [`MAX_CHOICES`](crate::MAX_CHOICES), or when every
+    /// option shows as just its number (a count, not a choice).
+    ///
+    /// Whole numbers aren't enough: a CLAP plugin may call a parameter
+    /// stepped and still spread its options across 0 to 1 (LSP's do), so
+    /// the range is sampled.
+    pub(crate) fn choices(
+        &mut self,
+        slot: PluginId,
+        info: &PluginInfo,
+        index: usize,
+    ) -> Vec<(f64, String)> {
+        let Some(p) = info.params.get(index).filter(|p| p.stepped) else {
+            return Vec::new();
+        };
+        let key = (info.id.clone(), index);
+        if let Some(choices) = self.choices.get(&key) {
+            return choices.clone();
+        }
+        let live = self.live.get(&slot).is_some_and(|s| s.plugin == info.id);
+        let choices = if p.labels.is_empty() {
+            self.sampled_choices(slot, info, index)
+        } else {
+            // In order of value, whatever order the plugin lists them in.
+            let mut labels: Vec<f64> = p.labels.iter().map(|l| l.value).collect();
+            labels.sort_by(f64::total_cmp);
+            labels
+                .into_iter()
+                .map(|value| (value, self.param_text(slot, info, index, value)))
+                .collect()
+        };
+        let named = choices
+            .iter()
+            .any(|(value, text)| text.trim().parse::<f64>().ok() != Some(*value));
+        let choices = if named && choices.len() <= crate::MAX_CHOICES {
+            choices
+        } else {
+            Vec::new()
+        };
+        // What the catalog says alone may differ from what the plugin
+        // shows once it's running.
+        if live {
+            self.choices.insert(key, choices.clone());
+        }
+        choices
+    }
+
+    /// The runs of one name across parameter `index`'s range: sampled at
+    /// [`CHOICE_SAMPLES`] even steps and every whole number, each run at
+    /// the value the plugin reads its name as (or a whole number in it, or
+    /// its middle).
+    fn sampled_choices(
+        &mut self,
+        slot: PluginId,
+        info: &PluginInfo,
+        index: usize,
+    ) -> Vec<(f64, String)> {
+        let p = &info.params[index];
+        let (min, max) = (p.min, p.max);
+        if !(min.is_finite() && max.is_finite() && max > min) {
+            return Vec::new();
+        }
+        let mut values: Vec<f64> = (0..=CHOICE_SAMPLES)
+            .map(|n| min + (max - min) * n as f64 / CHOICE_SAMPLES as f64)
+            .collect();
+        if max - min <= CHOICE_SAMPLES as f64 {
+            values.extend((min.ceil() as i64..=max.floor() as i64).map(|n| n as f64));
+        }
+        values.sort_by(f64::total_cmp);
+        values.dedup();
+        let mut runs: Vec<(String, Vec<f64>)> = Vec::new();
+        for value in values {
+            let text = self.param_text(slot, info, index, value);
+            match runs.last_mut() {
+                Some((last, run)) if *last == text => run.push(value),
+                _ => runs.push((text, vec![value])),
+            }
+            if runs.len() > crate::MAX_CHOICES {
+                return Vec::new();
+            }
+        }
+        runs.into_iter()
+            .map(|(text, run)| {
+                // The value the plugin reads the name as is the option's
+                // own (it may lie just outside the samples that show it),
+                // if it shows as that name.
+                let read = self
+                    .param_value(slot, info, index, &text)
+                    .filter(|&v| self.param_text(slot, info, index, v) == text);
+                let value = read
+                    .or_else(|| run.iter().copied().find(|v| v.fract() == 0.0))
+                    .unwrap_or(run[run.len() / 2]);
+                (value, text)
+            })
+            .collect()
+    }
+
+    /// The value parameter `index` of slot `slot` (plugin `info`) has when
+    /// it shows `text` (asking the running instance, if there is one).
+    fn param_value(
+        &mut self,
+        slot: PluginId,
+        info: &PluginInfo,
+        index: usize,
+        text: &str,
+    ) -> Option<f64> {
+        let live = self.live.get_mut(&slot).filter(|s| s.plugin == info.id);
+        match live {
+            Some(s) => s.instance.param_value(info, index, text),
+            None => info.params.get(index)?.parse(text),
+        }
     }
 
     /// Lets every loaded plugin do its control-thread work.

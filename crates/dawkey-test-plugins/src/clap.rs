@@ -76,6 +76,9 @@ struct ParamSpec {
     min: f64,
     max: f64,
     default: f64,
+    /// A choice's options, spread evenly from `min` to `max` the way LSP's
+    /// are (a stepped parameter whose steps aren't whole numbers).
+    choices: &'static [&'static str],
 }
 
 const GAIN_PARAM: ParamSpec = ParamSpec {
@@ -83,6 +86,7 @@ const GAIN_PARAM: ParamSpec = ParamSpec {
     min: -60.0,
     max: 12.0,
     default: 0.0,
+    choices: &[],
 };
 
 const LEVEL_PARAM: ParamSpec = ParamSpec {
@@ -90,7 +94,28 @@ const LEVEL_PARAM: ParamSpec = ParamSpec {
     min: 0.0,
     max: 1.0,
     default: 1.0,
+    choices: &[],
 };
+
+/// The tempo's: which number the bars it shows count from.
+const COUNT_FROM_PARAM: ParamSpec = ParamSpec {
+    name: b"Count bars from",
+    min: 0.0,
+    max: 1.0,
+    default: 1.0 / 3.0,
+    choices: &["Zero", "One", "Two", "Three"],
+};
+
+impl ParamSpec {
+    /// The index of the choice `value` is: the last one at or below it, as
+    /// LSP's plugins do, so an option's own value lies at the very start of
+    /// the values that show it.
+    fn choice(&self, value: f64) -> usize {
+        let steps = (self.choices.len() - 1) as f64;
+        let at = (value - self.min) / (self.max - self.min) * steps;
+        ((at + 1e-9).floor().max(0.0) as usize).min(self.choices.len() - 1)
+    }
+}
 
 impl Shared {
     fn new(spec: &'static ParamSpec) -> Self {
@@ -208,9 +233,14 @@ impl PluginMainThreadParams for MainThread<'_> {
             return;
         }
         let spec = self.shared.spec;
+        let flags = if spec.choices.is_empty() {
+            ParamInfoFlags::IS_AUTOMATABLE
+        } else {
+            ParamInfoFlags::IS_AUTOMATABLE | ParamInfoFlags::IS_STEPPED
+        };
         info.set(&ParamInfo {
             id: PARAM,
-            flags: ParamInfoFlags::IS_AUTOMATABLE,
+            flags,
             cookie: Default::default(),
             name: spec.name,
             module: b"",
@@ -239,7 +269,10 @@ impl PluginMainThreadParams for MainThread<'_> {
         if value == STALL_DB && !self.instrument {
             std::thread::sleep(std::time::Duration::from_secs(3));
         }
-        if self.instrument {
+        let spec = self.shared.spec;
+        if !spec.choices.is_empty() {
+            write!(writer, "{}", spec.choices[spec.choice(value)])
+        } else if self.instrument {
             write!(writer, "{:.0} %", value * 100.0)
         } else {
             write!(writer, "{value:.1} dB")
@@ -251,7 +284,15 @@ impl PluginMainThreadParams for MainThread<'_> {
             return None;
         }
         let text = text.to_str().ok()?.trim();
-        if self.instrument {
+        let spec = self.shared.spec;
+        if !spec.choices.is_empty() {
+            let index = spec
+                .choices
+                .iter()
+                .position(|c| c.eq_ignore_ascii_case(text))?;
+            let steps = (spec.choices.len() - 1) as f64;
+            Some(spec.min + (spec.max - spec.min) * index as f64 / steps)
+        } else if self.instrument {
             let number: f64 = text.trim_end_matches('%').trim_end().parse().ok()?;
             Some(number / 100.0)
         } else {
@@ -709,38 +750,47 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for MemoProcessor<'a> 
 
 /// Shows the transport as audio: the left channel is the tempo / 1000, the
 /// right one (bar number + 1) / 100 while playing, 0 while stopped. Its
-/// input is ignored.
+/// input is ignored. Its one parameter, a choice, counts bars from 0, 2
+/// or 3 instead.
 pub struct Tempo;
 
 impl Plugin for Tempo {
-    type AudioProcessor<'a> = TempoProcessor;
+    type AudioProcessor<'a> = TempoProcessor<'a>;
     type Shared<'a> = Shared;
     type MainThread<'a> = MainThread<'a>;
 
     fn declare_extensions(builder: &mut PluginExtensions<Self>, _shared: Option<&Shared>) {
-        builder.register::<PluginAudioPorts>();
+        builder
+            .register::<PluginAudioPorts>()
+            .register::<PluginParams>();
     }
 }
 
-pub struct TempoProcessor;
+pub struct TempoProcessor<'a> {
+    shared: &'a Shared,
+}
 
-impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for TempoProcessor {
+impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for TempoProcessor<'a> {
     fn activate(
         _host: HostAudioProcessorHandle<'a>,
         _main_thread: &MainThread<'a>,
-        _shared: &'a Shared,
+        shared: &'a Shared,
         _config: PluginAudioConfiguration,
     ) -> Result<Self, PluginError> {
-        Ok(Self)
+        Ok(Self { shared })
     }
 
     fn process(
         &mut self,
         process: Process,
         mut audio: Audio,
-        _events: Events,
+        events: Events,
     ) -> Result<ProcessStatus, PluginError> {
         use clack_plugin::events::event_types::TransportFlags;
+        for event in events.input {
+            self.shared.handle(event);
+        }
+        let count_from = self.shared.spec.choice(self.shared.value.get()) as i32;
         let (tempo, bar) = match process.transport {
             Some(t) => (
                 if t.flags.contains(TransportFlags::HAS_TEMPO) {
@@ -749,7 +799,7 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for TempoProcessor {
                     0.0
                 },
                 if t.flags.contains(TransportFlags::IS_PLAYING) {
-                    f64::from(t.bar_number + 1) / 100.0
+                    f64::from(t.bar_number + count_from) / 100.0
                 } else {
                     0.0
                 },
@@ -772,6 +822,14 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for TempoProcessor {
             }
         }
         Ok(ProcessStatus::Continue)
+    }
+}
+
+impl PluginAudioProcessorParams for TempoProcessor<'_> {
+    fn flush(&mut self, input: &InputEvents, _output: &mut OutputEvents) {
+        for event in input {
+            self.shared.handle(event);
+        }
     }
 }
 
@@ -1083,8 +1141,8 @@ impl PluginFactoryImpl for Factory {
             PluginInstance::new::<Tempo>(
                 host_info,
                 tempo,
-                |_| Ok(Shared::new(&GAIN_PARAM)),
-                main(false, false),
+                |_| Ok(Shared::new(&COUNT_FROM_PARAM)),
+                main(false, true),
             )
         } else if plugin_id == MEMO_ID {
             PluginInstance::new::<Memo>(
