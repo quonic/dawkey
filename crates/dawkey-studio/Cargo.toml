@@ -1,6 +1,6 @@
 [package]
 name = "dawkey-studio"
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "A running Dawkey instance: session, decoded media, engine and audio backend"

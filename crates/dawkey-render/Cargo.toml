@@ -1,6 +1,6 @@
 [package]
 name = "dawkey-render"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Dawkey's GPU renderer (wgpu/Vulkan): draws dawkey-ui scenes to a window or an image"

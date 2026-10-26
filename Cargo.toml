@@ -1,6 +1,6 @@
 [package]
 name = "dawkey"
-version = "0.1.3"
+version = "0.1.4"
 edition.workspace = true
 rust-version.workspace = true
 description = "A digital audio workstation for the Linux (Wayland + PipeWire) desktop"
@@ -66,21 +66,21 @@ repository = "https://github.com/quonic/dawkey.git"
 license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
-dawkey-app = { package = "dawkey-app", path = "crates/dawkey-app", version = "0.2.1" }
-dawkey-backend-pipewire = { package = "dawkey-backend-pipewire", path = "crates/dawkey-backend-pipewire", version = "0.1.2" }
-dawkey-core = { package = "dawkey-core", path = "crates/dawkey-core", version = "0.3.0" }
-dawkey-dsp = { package = "dawkey-dsp", path = "crates/dawkey-dsp", version = "0.1.2" }
-dawkey-engine = { package = "dawkey-engine", path = "crates/dawkey-engine", version = "0.1.2" }
-dawkey-mcp = { package = "dawkey-mcp", path = "crates/dawkey-mcp", version = "0.1.3" }
-dawkey-media = { package = "dawkey-media", path = "crates/dawkey-media", version = "0.2.0" }
-dawkey-plugins = { package = "dawkey-plugins", path = "crates/dawkey-plugins", version = "0.2.0" }
-dawkey-render = { package = "dawkey-render", path = "crates/dawkey-render", version = "0.1.1" }
-dawkey-studio = { package = "dawkey-studio", path = "crates/dawkey-studio", version = "0.2.1" }
+dawkey-app = { package = "dawkey-app", path = "crates/dawkey-app", version = "0.2.2" }
+dawkey-backend-pipewire = { package = "dawkey-backend-pipewire", path = "crates/dawkey-backend-pipewire", version = "0.1.3" }
+dawkey-core = { package = "dawkey-core", path = "crates/dawkey-core", version = "0.4.0" }
+dawkey-dsp = { package = "dawkey-dsp", path = "crates/dawkey-dsp", version = "0.1.3" }
+dawkey-engine = { package = "dawkey-engine", path = "crates/dawkey-engine", version = "0.1.3" }
+dawkey-mcp = { package = "dawkey-mcp", path = "crates/dawkey-mcp", version = "0.1.4" }
+dawkey-media = { package = "dawkey-media", path = "crates/dawkey-media", version = "0.3.0" }
+dawkey-plugins = { package = "dawkey-plugins", path = "crates/dawkey-plugins", version = "0.2.1" }
+dawkey-render = { package = "dawkey-render", path = "crates/dawkey-render", version = "0.1.2" }
+dawkey-studio = { package = "dawkey-studio", path = "crates/dawkey-studio", version = "0.2.2" }
 dawkey-test-plugins = { package = "dawkey-test-plugins", path = "crates/dawkey-test-plugins" }
 dawkey-testkit = { package = "dawkey-testkit", path = "crates/dawkey-testkit" }
-dawkey-text = { package = "dawkey-text", path = "crates/dawkey-text", version = "0.1.1" }
-dawkey-ui = { package = "dawkey-ui", path = "crates/dawkey-ui", version = "0.1.1" }
-dawkey-wayland = { package = "dawkey-wayland", path = "crates/dawkey-wayland", version = "0.1.3" }
+dawkey-text = { package = "dawkey-text", path = "crates/dawkey-text", version = "0.1.2" }
+dawkey-ui = { package = "dawkey-ui", path = "crates/dawkey-ui", version = "0.1.2" }
+dawkey-wayland = { package = "dawkey-wayland", path = "crates/dawkey-wayland", version = "0.1.4" }
 
 anyhow = "1"
 ashpd = { version = "0.13.13", features = ["file_chooser", "settings"] }
