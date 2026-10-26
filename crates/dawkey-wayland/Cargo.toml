@@ -1,6 +1,6 @@
 [package]
 name = "dawkey-wayland"
-version = "0.1.4"
+version = "0.1.5"
 edition.workspace = true
 rust-version.workspace = true
 description = "Dawkey's Wayland window: client-side decorations, input, fractional scaling, wgpu surface"

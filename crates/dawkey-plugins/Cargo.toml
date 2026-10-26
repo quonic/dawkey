@@ -1,6 +1,6 @@
 [package]
 name = "dawkey-plugins"
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Dawkey's plugin hosting: CLAP, LV2 and VST3 discovery, scanning and processing"
