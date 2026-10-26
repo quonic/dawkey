@@ -18,7 +18,7 @@ concurrency:
 jobs:
   check:
     name: Format, lint and test
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     # The same distribution Dawkey is developed on, so the Rust toolchain and
     # system libraries match.
     container:
