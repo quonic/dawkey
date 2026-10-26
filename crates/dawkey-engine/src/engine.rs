@@ -7,7 +7,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use serde::Serialize;
 
 use crate::MAX_BLOCK;
-use crate::graph::{Graph, SendNode};
+use crate::graph::{Graph, SendNode, TrackNode};
 use crate::meter::{MeterBank, MeterReading};
 use crate::midi::{MidiEvent, MidiOut};
 use crate::mix::{self, Live, MidiOutput};
@@ -328,14 +328,19 @@ impl EngineProcessor {
         // While stopped, instruments still play live input and release
         // tails; the transport doesn't move.
         while done < total {
-            // Split at block size and at the loop end.
+            // Split at block size and at the loop's start and end, so a loop
+            // shorter than a block is entered and wraps.
             let mut len = (total - done).min(MAX_BLOCK);
             let looping = self
                 .graph
                 .loop_range
                 .filter(|r| self.playing && self.position >= r.start && self.position < r.end);
-            if let Some(r) = looping {
-                len = len.min((r.end - self.position) as usize);
+            match self.graph.loop_range {
+                Some(r) if looping.is_some() => len = len.min((r.end - self.position) as usize),
+                Some(r) if self.playing && self.position < r.start => {
+                    len = len.min((r.start - self.position) as usize)
+                }
+                _ => {}
             }
             let range = done..done + len;
             let from = midi.partition_point(|e| (e.offset as usize) < range.start);
@@ -428,7 +433,10 @@ impl EngineProcessor {
                     self.retire(Retired::Graph(old));
                 }
                 Message::Play => {
-                    self.chase |= !self.playing;
+                    if !self.playing {
+                        self.chase = true;
+                        self.clear_skipped_delays();
+                    }
                     self.playing = true;
                 }
                 Message::Stop => {
@@ -459,6 +467,20 @@ impl EngineProcessor {
     fn retire(&mut self, retired: Retired) {
         if let Err(PushError::Full(retired)) = self.garbage.push(retired) {
             self.retired = Some(retired);
+        }
+    }
+
+    /// Empties the delay lines of tracks that were skipped while stopped:
+    /// they still hold what played before the stop.
+    fn clear_skipped_delays(&mut self) {
+        for track in &mut self.graph.tracks {
+            if sounds_while_stopped(track) {
+                continue;
+            }
+            let sends = track.sends.iter_mut().filter_map(|s| s.delay.as_mut());
+            for delay in track.delay.iter_mut().chain(sends) {
+                delay.clear();
+            }
         }
     }
 
@@ -510,11 +532,7 @@ impl EngineProcessor {
                 let [l, r] = armed.pick(input);
                 meters.tracks[m].record(peak(l), peak(r));
             }
-            // While stopped, only instruments, plugins, buses and monitored
-            // input sound (live input, tails).
-            let monitoring = track.input.is_some_and(|i| i.monitor);
-            let quiet = track.instrument.is_none() && track.plugins.is_empty() && !monitoring;
-            if !playing && track.sum.is_none() && quiet {
+            if !playing && !sounds_while_stopped(track) {
                 continue;
             }
             // Rendered even when inaudible, so voices and plugins stay
@@ -540,10 +558,11 @@ impl EngineProcessor {
                 l[..frames].copy_from_slice(lane_l);
                 r[..frames].copy_from_slice(lane_r);
             }
-            if let Some(delay) = &mut track.delay {
-                delay.process(lane_l, lane_r);
-            }
             if !track.audible {
+                // Kept current all the same.
+                if let Some(delay) = &mut track.delay {
+                    delay.process(lane_l, lane_r);
+                }
                 continue;
             }
             // Plugins' other outputs, to their buses.
@@ -559,9 +578,6 @@ impl EngineProcessor {
                         add_into(&mut to_r[..frames], r);
                     }
                 }
-            }
-            if let (None, Some(m)) = (metered, track.meter) {
-                meters.tracks[m].record(peak(lane_l), peak(lane_r));
             }
             // Aux sends: the signal after the fader (before lining up), or
             // before it, at the send's level, to their buses.
@@ -590,21 +606,24 @@ impl EngineProcessor {
                         r.copy_from_slice(lane_r);
                     }
                 }
+                // While stopped, the level at the playhead (like faders).
                 let at = position.saturating_sub(u64::from(*offset));
-                match lane {
-                    Some(lane) if playing => {
-                        for (k, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
-                            let g = crate::graph::lane_value(lane, at + k as u64)
-                                .map_or(*fixed, |v| crate::graph::db_to_gain(v as f32));
-                            *a *= g;
-                            *b *= g;
-                        }
+                let gain_at = |frame: u64| {
+                    lane.as_deref()
+                        .and_then(|lane| crate::graph::lane_value(lane, frame))
+                        .map_or(*fixed, |v| crate::graph::db_to_gain(v as f32))
+                };
+                if playing && lane.is_some() {
+                    for (k, (a, b)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
+                        let g = gain_at(at + k as u64);
+                        *a *= g;
+                        *b *= g;
                     }
-                    _ => {
-                        for (a, b) in l.iter_mut().zip(r.iter_mut()) {
-                            *a *= *fixed;
-                            *b *= *fixed;
-                        }
+                } else {
+                    let g = gain_at(at);
+                    for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+                        *a *= g;
+                        *b *= g;
                     }
                 }
                 if let Some(delay) = delay {
@@ -612,6 +631,13 @@ impl EngineProcessor {
                 }
                 add_into(&mut to_l[..frames], l);
                 add_into(&mut to_r[..frames], r);
+            }
+            // Lined up with the rest of what reaches its destination.
+            if let Some(delay) = &mut track.delay {
+                delay.process(lane_l, lane_r);
+            }
+            if let (None, Some(m)) = (metered, track.meter) {
+                meters.tracks[m].record(peak(lane_l), peak(lane_r));
             }
             let (to_l, to_r) = match track.dest {
                 Some(d) => match &mut later[d - i - 1].sum {
@@ -625,6 +651,13 @@ impl EngineProcessor {
         }
         meters.master.record(peak(out_l), peak(out_r));
     }
+}
+
+/// While stopped, only instruments, plugins, buses and monitored input
+/// sound (live input, tails); other tracks are skipped.
+fn sounds_while_stopped(track: &TrackNode) -> bool {
+    let monitoring = track.input.is_some_and(|i| i.monitor);
+    track.sum.is_some() || track.instrument.is_some() || !track.plugins.is_empty() || monitoring
 }
 
 fn peak(samples: &[f32]) -> f32 {

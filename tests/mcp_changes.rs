@@ -102,12 +102,31 @@ async fn instance_and_changes() {
         .call("new_project", json!({ "discard_changes": true }))
         .await
         .unwrap();
+    // Another project carries the revisions on, so the old project's
+    // revisions aren't covered, however many changes the new one makes.
     let fresh = dawkey
         .call("get_changes", json!({ "since_revision": 5 }))
         .await
         .unwrap();
-    assert_eq!(fresh["revision"], 0);
+    assert_eq!(fresh["revision"], 6);
     assert_eq!(fresh["complete"], false);
+    for n in 0..5 {
+        dawkey
+            .call("add_track", json!({ "name": format!("New {n}") }))
+            .await
+            .unwrap();
+    }
+    let since_old = dawkey
+        .call("get_changes", json!({ "since_revision": 5 }))
+        .await
+        .unwrap();
+    assert_eq!(since_old["changes"].as_array().unwrap().len(), 5);
+    assert_eq!(since_old["complete"], false, "{since_old}");
+    let since_new = dawkey
+        .call("get_changes", json!({ "since_revision": 6 }))
+        .await
+        .unwrap();
+    assert_eq!(since_new["complete"], true);
     dawkey.shutdown().await.unwrap();
 }
 
@@ -130,7 +149,7 @@ async fn project_resource_updates() {
     assert!(project["instance"].is_string());
 
     watcher.subscribe("dawkey://project").await.unwrap();
-    // It must have seen a revision to be told of a later one.
+    // What it sees in its own results counts, like the resource.
     watcher
         .call("get_state", json!({ "summary": true }))
         .await
@@ -174,5 +193,40 @@ async fn project_resource_updates() {
     // The one that didn't subscribe is never told.
     assert_eq!(dawkey.resource_updates(), Vec::<String>::new());
     watcher.shutdown().await.unwrap();
+    dawkey.shutdown().await.unwrap();
+}
+
+/// A client that calls no tools is told of changes too: one that read the
+/// resource before subscribing, and one that only subscribed.
+#[tokio::test]
+async fn watchers_without_tool_calls_are_told() {
+    let dawkey = Harness::headless_http(DAWKEY, std::iter::empty::<&str>(), TOKEN)
+        .await
+        .unwrap();
+    let url = dawkey.url().unwrap().to_owned();
+    let reader = Harness::connect_http(&url, TOKEN).await.unwrap();
+    let project = reader.read_resource("dawkey://project").await.unwrap();
+    assert_eq!(project["revision"], 0);
+    reader.subscribe("dawkey://project").await.unwrap();
+    let subscriber = Harness::connect_http(&url, TOKEN).await.unwrap();
+    subscriber.subscribe("dawkey://project").await.unwrap();
+
+    dawkey
+        .call("add_track", json!({ "name": "Drums" }))
+        .await
+        .unwrap();
+    for watcher in [&reader, &subscriber] {
+        let mut updates = Vec::new();
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            updates.extend(watcher.resource_updates());
+            if !updates.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(updates, ["dawkey://project"]);
+    }
+    reader.shutdown().await.unwrap();
+    subscriber.shutdown().await.unwrap();
     dawkey.shutdown().await.unwrap();
 }

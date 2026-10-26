@@ -933,6 +933,7 @@ impl clack_plugin::entry::Entry for Entry {
         if std::env::var_os("dawkey_TEST_PLUGIN_CRASH").is_some() {
             std::process::abort();
         }
+        crate::chatter();
         Ok(Self {
             factory: PluginFactoryWrapper::new(Factory {
                 descriptors: [

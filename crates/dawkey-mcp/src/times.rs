@@ -7,7 +7,7 @@
 //! and meter maps before the tool sees them. [`with_beats`] adds beats to
 //! the state tools' results the same way.
 
-use dawkey_core::{MeterMap, Project, TempoMap};
+use dawkey_core::{ClipId, MeterMap, Project, TempoMap};
 use serde_json::{Map, Value, json};
 
 /// Arguments in seconds that aren't timeline positions, so beats and bars
@@ -107,6 +107,19 @@ fn stem_of(key: &str) -> Option<&str> {
         .or_else(|| key.strip_suffix("_bar"))
 }
 
+/// Replaces the positions in beats and bars among `args` with seconds,
+/// through `project`'s tempo and meter maps (see [`Maps::resolve`]). A
+/// length in beats for the clip `args` name, where they give no position
+/// (set_clip_length), is at the tempo where that clip starts.
+pub(crate) fn resolve(project: &Project, args: &mut Value, stems: &[String]) -> Result<(), String> {
+    let clip_start_s = args
+        .get("clip")
+        .and_then(Value::as_u64)
+        .and_then(|id| project.clip(ClipId(id)))
+        .map(|(_, clip)| project.frames_to_seconds(clip.start));
+    Maps::of(project).resolve(args, stems, clip_start_s)
+}
+
 /// The project's tempo and meter maps, for resolving positions.
 #[derive(Debug, Clone)]
 pub(crate) struct Maps {
@@ -138,8 +151,15 @@ impl Maps {
     }
 
     /// Replaces every `*_beats` and `*_bar` in `args` whose stem is one of
-    /// `stems` with its `*_s`.
-    pub(crate) fn resolve(&self, args: &mut Value, stems: &[String]) -> Result<(), String> {
+    /// `stems` with its `*_s`. A length in beats is measured from the
+    /// position `args` give (`position_s` or `start_s`), else from
+    /// `clip_start_s`, else from the project's start.
+    pub(crate) fn resolve(
+        &self,
+        args: &mut Value,
+        stems: &[String],
+        clip_start_s: Option<f64>,
+    ) -> Result<(), String> {
         let Value::Object(args) = args else {
             return Ok(());
         };
@@ -183,6 +203,7 @@ impl Maps {
                 .get("position_s")
                 .or_else(|| args.get("start_s"))
                 .and_then(Value::as_f64)
+                .or(clip_start_s)
                 .unwrap_or(0.0);
             let from_beat = self.tempo.beat_at_seconds(from_s);
             let seconds = self.seconds_at_beat(from_beat + value) - from_s;
@@ -191,6 +212,9 @@ impl Maps {
         Ok(())
     }
 }
+
+/// The most segments a render analyzes.
+const MAX_SEGMENTS: usize = 10_000;
 
 /// How a render's range is cut into segments to analyze separately.
 #[derive(Debug, Clone, Default)]
@@ -228,15 +252,29 @@ impl Maps {
             );
         }
         let mut segments = Vec::new();
+        // Lengths and bars are counted as they're cut, so a tiny length
+        // can't make more than this many.
+        let too_many =
+            || format!("that's more than {MAX_SEGMENTS} segments; at most {MAX_SEGMENTS}");
         if let Some(length) = spec.length_s {
             if length.is_nan() || length <= 0.0 || !length.is_finite() {
                 return Err(format!(
                     "segment_length_s must be more than 0, got {length}"
                 ));
             }
+            if (end_s - start_s) / length > MAX_SEGMENTS as f64 {
+                return Err(too_many());
+            }
             let mut from = start_s;
             while from < end_s - 1e-9 {
                 let to = (from + length).min(end_s);
+                // Too short to move on from `from` at all.
+                if to <= from {
+                    break;
+                }
+                if segments.len() == MAX_SEGMENTS {
+                    return Err(too_many());
+                }
                 segments.push((from, to));
                 from = to;
             }
@@ -249,10 +287,13 @@ impl Maps {
                 .meter
                 .bar_at(self.tempo.beat_at_seconds(start_s) + 1e-9);
             while from < end_s - 1e-9 {
-                bar += bars;
+                bar = bar.saturating_add(bars);
                 let to = self.tempo.seconds_at(self.meter.bar_start(bar)).min(end_s);
                 if to <= from {
                     break;
+                }
+                if segments.len() == MAX_SEGMENTS {
+                    return Err(too_many());
                 }
                 segments.push((from, to));
                 from = to;
@@ -273,8 +314,11 @@ impl Maps {
                 segments.push((from, to));
             }
         }
-        if segments.len() > 10_000 {
-            return Err(format!("that's {} segments; at most 10000", segments.len()));
+        if segments.len() > MAX_SEGMENTS {
+            return Err(format!(
+                "that's {} segments; at most {MAX_SEGMENTS}",
+                segments.len()
+            ));
         }
         Ok(segments)
     }
@@ -379,25 +423,71 @@ mod tests {
             .map(str::to_owned)
             .into();
         let mut args = json!({ "start_beats": 4, "end_bar": 3.5, "length_beats": 2 });
-        maps.resolve(&mut args, &stems).unwrap();
+        maps.resolve(&mut args, &stems, None).unwrap();
         assert_eq!(
             args,
             json!({ "start_s": 2.0, "end_s": 5.0, "length_s": 1.0 })
         );
 
         let mut args = json!({ "position_s": 1.0, "position_beats": 2 });
-        let err = maps.resolve(&mut args, &stems).unwrap_err();
+        let err = maps.resolve(&mut args, &stems, None).unwrap_err();
         assert!(err.contains("not both"), "{err}");
         let mut args = json!({ "position_bar": 0 });
-        let err = maps.resolve(&mut args, &stems).unwrap_err();
+        let err = maps.resolve(&mut args, &stems, None).unwrap_err();
         assert!(err.contains("at least 1"), "{err}");
         let mut args = json!({ "position_s": 1.0, "position_beats": null });
-        maps.resolve(&mut args, &stems).unwrap();
+        maps.resolve(&mut args, &stems, None).unwrap();
         assert_eq!(args, json!({ "position_s": 1.0 }));
         // A tool's own `*_beats` (set_tempo's at_beats) is left alone.
         let mut args = json!({ "at_beats": 2 });
-        maps.resolve(&mut args, &stems).unwrap();
+        maps.resolve(&mut args, &stems, None).unwrap();
         assert_eq!(args, json!({ "at_beats": 2 }));
+    }
+
+    #[test]
+    fn refuses_too_many_segments() {
+        let mut project = Project::new("t");
+        project.tempo_bpm = 120.0; // a 4/4 bar is 2 s
+        let maps = Maps::of(&project);
+        let spec = |length_s, bars| SegmentSpec {
+            length_s,
+            bars,
+            ranges: None,
+        };
+        // A tiny length is refused before the segments are made, not after
+        // (which ran out of memory).
+        let err = maps
+            .segments(0.0, 1.0, &spec(Some(1e-12), None))
+            .unwrap_err();
+        assert!(err.contains("at most 10000"), "{err}");
+        assert_eq!(
+            maps.segments(0.0, 1.0, &spec(Some(1e-4), None))
+                .unwrap()
+                .len(),
+            10_000
+        );
+        // One too short to move on from a late start stops instead of
+        // looping.
+        let stuck = maps
+            .segments(1e9, 1e9 + 1e-6, &spec(Some(1e-10), None))
+            .unwrap();
+        assert!(stuck.len() <= 10_000, "{}", stuck.len());
+
+        // As many bars as a u32 holds don't overflow: one segment to the
+        // range's end.
+        assert_eq!(
+            maps.segments(2.5, 3.0, &spec(None, Some(u32::MAX)))
+                .unwrap(),
+            [(2.5, 3.0)]
+        );
+        let err = maps
+            .segments(0.0, 2.0 * 10_001.0, &spec(None, Some(1)))
+            .unwrap_err();
+        assert!(err.contains("at most 10000"), "{err}");
+        assert_eq!(
+            maps.segments(0.0, 8.0, &spec(None, Some(1))).unwrap().len(),
+            4
+        );
     }
 
     #[test]

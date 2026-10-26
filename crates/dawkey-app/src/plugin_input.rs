@@ -37,6 +37,7 @@ impl App {
                 self.close_overlays();
                 Ok(())
             }
+            ["plugin_picker"] | ["plugin_editor"] => Ok(()),
             ["track", track, "add_plugin"] => {
                 let track = TrackId(track.parse().ok()?);
                 self.close_overlays();
@@ -148,7 +149,7 @@ impl App {
             }
             ["auto", track, k, i] => {
                 let track = TrackId(track.parse().ok()?);
-                self.view.selected_point = Some((track, k.parse().ok()?, i.parse().ok()?));
+                self.select_point(track, k.parse().ok()?, i.parse().ok()?);
                 Ok(())
             }
             _ => return None,
@@ -280,13 +281,14 @@ impl App {
                     .get(lane)?
                     .points
                     .get(index)?;
-                self.view.selected_point = Some((track, lane, index));
+                let (time_s, value) = (project.frames_to_seconds(point.frame), point.value);
+                self.select_point(track, lane, index);
                 Some(Gesture::AutoPoint {
                     track,
                     lane,
                     index,
-                    time_s: project.frames_to_seconds(point.frame),
-                    value: point.value,
+                    time_s,
+                    value,
                 })
             }
             _ => return None,
@@ -461,6 +463,35 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    /// Selects point `index` of the track's automation lane `lane`.
+    fn select_point(&mut self, track: TrackId, lane: usize, index: usize) {
+        let project = self.studio.session().project();
+        self.view.point_anchor = project
+            .track(track)
+            .and_then(|t| t.automation.get(lane))
+            .and_then(|l| Some((l.target.clone(), l.points.get(index)?.frame)));
+        self.view.selected_point = Some((track, lane, index));
+    }
+
+    /// After the project changed (an undo, say), finds the selected
+    /// automation point again by its lane's target and frame, as its
+    /// indices may now be another's; or lets it go if it's gone.
+    pub(crate) fn refind_point(&mut self) {
+        let Some((track, ..)) = self.view.selected_point else {
+            return;
+        };
+        let project = self.studio.session().project();
+        self.view.selected_point = self.view.point_anchor.as_ref().and_then(|(target, frame)| {
+            let automation = &project.track(track)?.automation;
+            let lane = automation.iter().position(|l| l.target == *target)?;
+            let index = automation[lane]
+                .points
+                .iter()
+                .position(|p| p.frame == *frame)?;
+            Some((track, lane, index))
+        });
     }
 
     pub(crate) fn close_overlays(&mut self) {

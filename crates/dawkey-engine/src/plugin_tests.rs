@@ -152,7 +152,8 @@ impl PluginProcessor for Keys {
     }
 }
 
-/// A MIDI effect: sends each note an octave up, and no audio.
+/// A MIDI effect: sends each note an octave up, and no audio. It takes a
+/// sidechain (and ignores it).
 struct Octave;
 
 impl PluginProcessor for Octave {
@@ -262,7 +263,10 @@ impl PluginProvider for Provider {
             }
         };
         let midi_output = slot.plugin == "clap:octave";
-        let sidechain = slot.plugin == "clap:minus";
+        let sidechain = matches!(
+            slot.plugin.as_str(),
+            "clap:minus" | "clap:vocoder" | "clap:octave"
+        );
         let outputs = u32::from(slot.plugin == "clap:fork");
         let (processor, params, latency, instrument): (Box<dyn PluginProcessor>, _, _, _) =
             match slot.plugin.as_str() {
@@ -282,7 +286,7 @@ impl PluginProvider for Provider {
                     64,
                     false,
                 ),
-                "clap:keys" => (
+                "clap:keys" | "clap:vocoder" => (
                     Box::new(Keys {
                         held: [0.0; 128],
                         bend: 1.0,
@@ -523,6 +527,38 @@ fn latency_is_compensated_across_tracks() {
     assert!((out[100] - 2.0 * CENTER).abs() < 1e-6);
 }
 
+#[test]
+fn delay_lines_forget_what_played_before_a_stop() {
+    let mut f = Fixture::new();
+    // A track sounding for the first 0.1 s, to the master and through a
+    // send to a bus. A silent track with a 64-frame plugin goes to the
+    // bus too, so both of the first track's ways out are delayed.
+    let a = f.constant(1.0, 4800);
+    let late = f.constant(0.0, 48_000);
+    f.add(late, "clap:late");
+    let bus = f.bus();
+    f.send(late, Some(bus));
+    f.set(dawkey_core::SetTrackSend {
+        track: a,
+        bus,
+        gain_db: Some(0.0),
+        pre_fader: None,
+    });
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    assert!(process(&mut proc, 1024)[1000] != 0.0);
+    // Stopped a while, then playing where only silence is.
+    ctl.stop().unwrap();
+    for _ in 0..10 {
+        process(&mut proc, 1024);
+    }
+    ctl.locate(30_000).unwrap();
+    ctl.play().unwrap();
+    let out = process(&mut proc, 1024);
+    let loud: Vec<usize> = (0..1024).filter(|&i| out[i] != 0.0).collect();
+    assert!(loud.is_empty(), "old audio after playing again: {loud:?}");
+}
+
 impl Fixture {
     /// A new bus.
     fn bus(&mut self) -> TrackId {
@@ -646,7 +682,7 @@ fn latency_is_compensated_through_buses() {
     // and a third track goes straight to the master.
     let late = impulse(&mut f);
     let direct = impulse(&mut f);
-    impulse(&mut f);
+    let third = impulse(&mut f);
     let bus = f.bus();
     f.send(late, Some(bus));
     f.send(direct, Some(bus));
@@ -654,15 +690,38 @@ fn latency_is_compensated_through_buses() {
     f.add(bus, "clap:late");
     let graph = f.graph();
     assert_eq!(graph.latency(), 128);
+    let hits = |out: &[f32]| -> Vec<usize> {
+        out.iter()
+            .enumerate()
+            .filter(|(_, s)| s.abs() > 1e-6)
+            .map(|(i, _)| i)
+            .collect()
+    };
     let out = &render_offline(graph, RATE, 0, 400)[0];
-    let hits: Vec<usize> = out
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.abs() > 1e-6)
-        .map(|(i, _)| i)
-        .collect();
-    assert_eq!(hits, [100], "every impulse at frame 100: {hits:?}");
+    assert_eq!(
+        hits(out),
+        [100],
+        "every impulse at frame 100: {:?}",
+        hits(out)
+    );
     assert!((out[100] - 3.0 * CENTER).abs() < 1e-6);
+
+    // An aux send from the third track lines up too: it leaves before the
+    // track's own way out is delayed.
+    f.set(dawkey_core::SetTrackSend {
+        track: third,
+        bus,
+        gain_db: Some(0.0),
+        pre_fader: None,
+    });
+    let out = &render_offline(f.fresh_graph(), RATE, 0, 400)[0];
+    assert_eq!(
+        hits(out),
+        [100],
+        "every impulse at frame 100: {:?}",
+        hits(out)
+    );
+    assert!((out[100] - 4.0 * CENTER).abs() < 1e-6);
 }
 
 #[test]
@@ -768,6 +827,48 @@ fn a_late_sidechain_holds_its_plugin_back() {
     });
     let out = &render_offline(f.fresh_graph(), RATE, 0, 400)[0];
     assert!((out[100] - 2.0 * CENTER).abs() < 1e-6, "{}", out[100]);
+}
+
+#[test]
+fn a_late_sidechain_holds_its_instruments_notes_back() {
+    let mut f = Fixture::new();
+    // A vocoder (an instrument with a sidechain) plays beat 1 to 2 (frames
+    // 24 000 to 48 000).
+    let voice = f.constant(0.0, 48_000);
+    let midi = f
+        .session
+        .execute(
+            AddMidiClip {
+                notes: vec![NoteSpec {
+                    pitch: 60,
+                    start_beats: 1.0,
+                    length_beats: 1.0,
+                    velocity: 127,
+                }],
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap();
+    let vocoder = f.add(midi, "clap:vocoder");
+    let sounding = |out: &[f32]| {
+        let first = out.iter().position(|&s| s != 0.0);
+        (first, out.iter().rposition(|&s| s != 0.0).map(|i| i + 1))
+    };
+    let out = &f.render(60_000)[0];
+    assert_eq!(sounding(out), (Some(24_000), Some(48_000)));
+    // Its sidechain comes through a 64-frame plugin: the vocoder waits for
+    // it with its notes, and renders still line up.
+    f.add(voice, "clap:late");
+    f.set(dawkey_core::SetPluginSidechain {
+        plugin: vocoder,
+        source: Some(voice),
+    });
+    assert_eq!(f.graph().latency(), 64);
+    let out = &f.render(60_000)[0];
+    assert_eq!(sounding(out), (Some(24_000), Some(48_000)));
 }
 
 #[test]
@@ -1038,4 +1139,207 @@ fn midi_effects_play_a_device() {
     process(&mut proc, 512);
     let direct: Vec<[u8; 3]> = proc.midi_output().iter().map(|m| m.data).collect();
     assert_eq!(direct, [[0x91, 60, 127]]);
+}
+
+/// Plays `frames` from the start twice, with fresh processors: straight
+/// through, and with the same project recompiled and swapped in half way
+/// (as any edit during playback does). Returns the frames that differ.
+fn swap_differences(f: &mut Fixture, frames: usize) -> Vec<(usize, f32, f32)> {
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    let whole = process(&mut proc, frames);
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    let mut split = process(&mut proc, frames / 2);
+    ctl.set_graph(f.graph()).unwrap();
+    split.extend(process(&mut proc, frames - frames / 2));
+    (0..frames)
+        .filter(|&i| whole[i] != split[i])
+        .map(|i| (i, whole[i], split[i]))
+        .collect()
+}
+
+#[test]
+fn delay_lines_survive_graph_swaps() {
+    // A sends to a bus that also gets C through a 64-frame plugin, so A's
+    // send is delayed 64 frames to line up.
+    let mut f = Fixture::new();
+    let a = f.constant(1.0, 48_000);
+    let c = f.constant(0.0, 48_000);
+    f.add(c, "clap:late");
+    let bus = f.bus();
+    f.send(c, Some(bus));
+    f.set(dawkey_core::SetTrackSend {
+        track: a,
+        bus,
+        gain_db: Some(0.0),
+        pre_fader: None,
+    });
+    let differs = swap_differences(&mut f, 2048);
+    assert!(differs.is_empty(), "send: {:?}", &differs[..1]);
+
+    // A fork's other output to a bus, delayed to line up with a late
+    // track going there too.
+    let mut f = Fixture::new();
+    let a = f.constant(0.5, 48_000);
+    let c = f.constant(0.0, 48_000);
+    let fork = f.add(a, "clap:fork");
+    f.add(c, "clap:late");
+    let bus = f.bus();
+    f.send(c, Some(bus));
+    f.set(dawkey_core::SetPluginOutput {
+        plugin: fork,
+        output: 0,
+        bus: Some(bus),
+    });
+    let differs = swap_differences(&mut f, 2048);
+    assert!(differs.is_empty(), "other output: {:?}", &differs[..1]);
+
+    // A sidechain from a track that's earlier than the plugin it feeds,
+    // which comes after a late one.
+    let mut f = Fixture::new();
+    let kick = f.constant(0.25, 48_000);
+    let bass = f.constant(1.0, 48_000);
+    f.add(bass, "clap:late");
+    let minus = f.add(bass, "clap:minus");
+    f.set(dawkey_core::SetPluginSidechain {
+        plugin: minus,
+        source: Some(kick),
+    });
+    let differs = swap_differences(&mut f, 2048);
+    assert!(differs.is_empty(), "sidechain: {:?}", &differs[..1]);
+}
+
+#[test]
+fn note_offs_reach_instruments_across_graph_swaps() {
+    // Stopping, locating and looping release the notes an instrument
+    // plugin holds. When the graph is replaced before the audio thread
+    // runs again (Studio::stop does it to place takes), the note-offs
+    // must still get there.
+    let mut f = Fixture::new();
+    // A note over 36 000..72 000.
+    keys_clip(&mut f, (1.5, 3.0), vec![]);
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.locate(40_000).unwrap();
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 1.0, "the note plays");
+    ctl.stop().unwrap();
+    ctl.set_graph(f.graph()).unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 0.0, "stopped");
+
+    ctl.locate(40_000).unwrap();
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 1.0, "the note plays");
+    ctl.locate(0).unwrap();
+    ctl.set_graph(f.graph()).unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 0.0, "located");
+
+    // Wrapping at the end of a buffer, from inside the note to before it.
+    f.set(SetLoop {
+        start_s: Some(0.5),
+        end_s: Some(1.0),
+        enabled: Some(true),
+    });
+    ctl.set_graph(f.graph()).unwrap();
+    ctl.locate(40_000).unwrap();
+    let out = process(&mut proc, 8000);
+    assert_eq!(out[7999], 1.0, "the note plays");
+    ctl.set_graph(f.graph()).unwrap();
+    assert_eq!(process(&mut proc, 256)[100], 0.0, "wrapped");
+}
+
+#[test]
+fn an_instrument_that_stops_playing_the_notes_lets_go_of_them() {
+    // Each edit happens while the instrument holds the note (0..24 000),
+    // then playback goes on past its end.
+    let past_the_note = |proc: &mut crate::EngineProcessor| {
+        for _ in 0..30 {
+            process(proc, 1024);
+        }
+    };
+
+    // The track plays a device instead: the plugin stays in the chain.
+    let mut f = Fixture::new();
+    let track = keys_clip(&mut f, (0.0, 1.0), vec![]);
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 4800)[4000], 1.0, "the note plays");
+    f.set(dawkey_core::SetTrackMidiOutput {
+        track,
+        device: Some("Synth".into()),
+        channel: None,
+        latency_ms: None,
+    });
+    ctl.set_graph(f.graph()).unwrap();
+    past_the_note(&mut proc);
+    assert_eq!(process(&mut proc, 1024)[500], 0.0, "device");
+
+    // Bypassed (the synth plays the notes), and back on after the note.
+    let mut f = Fixture::new();
+    let track = keys_clip(&mut f, (0.0, 1.0), vec![]);
+    let keys = f.session.project().track(track).unwrap().plugins[0].id;
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 4800)[4000], 1.0, "the note plays");
+    for bypass in [true, false] {
+        f.set(SetPluginBypass {
+            plugin: keys,
+            bypass,
+        });
+        ctl.set_graph(f.graph()).unwrap();
+        past_the_note(&mut proc);
+    }
+    assert_eq!(process(&mut proc, 1024)[500], 0.0, "bypassed");
+
+    // Another instrument put before it plays them instead.
+    let mut f = Fixture::new();
+    let track = keys_clip(&mut f, (0.0, 1.0), vec![]);
+    let (mut ctl, mut proc) = new_engine(RATE, f.fresh_graph());
+    ctl.play().unwrap();
+    assert_eq!(process(&mut proc, 4800)[4000], 1.0, "the note plays");
+    f.set(AddPlugin {
+        track,
+        plugin: "clap:keys".into(),
+        index: Some(0),
+    });
+    ctl.set_graph(f.graph()).unwrap();
+    past_the_note(&mut proc);
+    assert_eq!(process(&mut proc, 1024)[500], 0.0, "moved down the chain");
+}
+
+#[test]
+fn a_midi_effect_waiting_for_its_sidechain_plays_a_device_in_time() {
+    let mut f = Fixture::new();
+    // The MIDI effect's sidechain comes through a 64-frame plugin: the
+    // notes wait for it on their way to the device, and the device still
+    // gets them 64 frames late, like the rest of the mix.
+    let voice = f.constant(0.0, 48_000);
+    f.add(voice, "clap:late");
+    let track = note_clip(&mut f);
+    let octave = f.add(track, "clap:octave");
+    f.set(dawkey_core::SetPluginSidechain {
+        plugin: octave,
+        source: Some(voice),
+    });
+    f.set(dawkey_core::SetTrackMidiOutput {
+        track,
+        device: Some("Synth".into()),
+        channel: None,
+        latency_ms: None,
+    });
+    let graph = f.graph();
+    assert_eq!(graph.latency(), 64);
+    let (mut ctl, mut proc) = new_engine(RATE, graph);
+    ctl.play().unwrap();
+    let mut sent = Vec::new();
+    for block in 0..40 {
+        process(&mut proc, 512);
+        sent.extend(
+            proc.midi_output()
+                .iter()
+                .map(|m| (block * 512 + m.offset, m.data)),
+        );
+        proc.clear_midi_output();
+    }
+    assert_eq!(sent, [(12_064, [0x90, 72, 127]), (18_064, [0x80, 72, 0])]);
 }

@@ -149,6 +149,18 @@ impl Session {
         self.revision
     }
 
+    /// Numbers this session's revisions on from `previous`, the revision of
+    /// the session it replaces (a new or opened project), so that a revision
+    /// a client saw of the old project never stands for one of this. The
+    /// replacement counts as a revision of its own that isn't in the log:
+    /// changes since an old project's revision are incomplete.
+    pub fn continue_revisions(&mut self, previous: u64) {
+        let offset = previous + 1;
+        self.revision += offset;
+        self.saved_revision += offset;
+        self.changes.shift(offset);
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision || self.states_changed
     }
@@ -832,6 +844,39 @@ mod tests {
     }
 
     #[test]
+    fn saving_over_another_projects_bundle_keeps_its_own_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("Song.dawkey");
+        let file = |folder: &str, bytes: &[u8]| {
+            let path = dir.path().join(folder).join("take 1.wav");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        // An earlier project saved here, with its own "take 1" as source 1.
+        let mut old = Session::default();
+        old.add_source("take 1", file("old", b"OLD AUDIO"), 1, 100);
+        old.save(Some(&bundle)).unwrap();
+        let old_copy = old.source_path(SourceId(1)).unwrap();
+
+        // Another project's source 1 of the same name is copied in beside
+        // it, not taken to be the file already there.
+        let mut s = Session::default();
+        let src = s.add_source("take 1", file("new", b"NEW AUDIO"), 1, 100);
+        s.save(Some(&bundle)).unwrap();
+        let saved = s.source_path(src).unwrap();
+        assert_ne!(saved, old_copy);
+        assert_eq!(std::fs::read(&saved).unwrap(), b"NEW AUDIO");
+        assert_eq!(std::fs::read(&old_copy).unwrap(), b"OLD AUDIO");
+
+        // A file there with the same audio is used as it is.
+        let mut again = Session::default();
+        again.add_source("take 1", file("again", b"OLD AUDIO"), 1, 100);
+        again.save(Some(&bundle)).unwrap();
+        assert_eq!(again.source_path(SourceId(1)).unwrap(), old_copy);
+    }
+
+    #[test]
     fn merging_commands_undo_in_one_step() {
         let mut s = Session::default();
         let id = add(&mut s, "A");
@@ -889,6 +934,52 @@ mod tests {
         .unwrap();
         s.undo().unwrap();
         assert_eq!(s.project().tracks[0].gain_db, -4.0);
+    }
+
+    #[test]
+    fn changes_of_a_merged_gesture_are_complete() {
+        // The first step is a fader drag: one change for revisions 1 to 3.
+        let mut s = Session::default();
+        for gain in [-1.0, -2.0, -3.0] {
+            s.execute_merging(
+                SetTrackGain {
+                    track: crate::model::MASTER,
+                    gain_db: gain,
+                }
+                .into(),
+                "fader",
+            )
+            .unwrap();
+        }
+        s.end_merge();
+        let changes = s.changes_since(0);
+        assert_eq!(changes.changes.len(), 1);
+        assert_eq!(changes.changes[0].revision, 3);
+        assert!(changes.complete, "{changes:?}");
+        assert!(s.changes_since(2).complete);
+    }
+
+    #[test]
+    fn revisions_carry_on_into_another_project() {
+        let mut old = Session::default();
+        for name in ["A", "B", "C"] {
+            add(&mut old, name);
+        }
+        let mut s = Session::default();
+        s.continue_revisions(old.revision());
+        assert_eq!(s.revision(), 4);
+        assert!(!s.is_dirty());
+        // A client that saw the old project hasn't seen the replacement.
+        assert!(!s.changes_since(3).complete);
+        assert!(s.changes_since(4).complete);
+        for name in ["D", "E", "F", "G", "H"] {
+            add(&mut s, name);
+        }
+        let since_old = s.changes_since(3);
+        assert_eq!(since_old.changes.len(), 5);
+        assert!(!since_old.complete, "{since_old:?}");
+        assert!(s.changes_since(4).complete);
+        assert!(s.is_dirty());
     }
 
     #[test]
@@ -1096,6 +1187,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.project().clip(clip).unwrap().1.length, 48_000);
+    }
+
+    #[test]
+    fn editing_a_note_in_a_big_clip_is_fast() {
+        use crate::command::{AddMidiClip, EditMidiNotes, NoteChange, NoteSpec};
+
+        // The change log compared the notes before and after each edit
+        // pairwise, which took seconds for a clip this big.
+        let mut s = Session::default();
+        let notes = (0..20_000)
+            .map(|i| NoteSpec {
+                pitch: (i % 128) as u8,
+                start_beats: f64::from(i / 128) * 0.25,
+                length_beats: 0.25,
+                velocity: 100,
+            })
+            .collect();
+        let out = s
+            .execute(
+                AddMidiClip {
+                    notes,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap();
+        let (clip, first) = (out.clip.unwrap(), out.notes[0]);
+        let revision = s.revision();
+        let started = std::time::Instant::now();
+        s.execute(
+            EditMidiNotes {
+                clip,
+                notes: vec![NoteChange {
+                    id: first,
+                    pitch: None,
+                    start_beats: None,
+                    length_beats: None,
+                    velocity: Some(1),
+                }],
+            }
+            .into(),
+        )
+        .unwrap();
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_millis(500),
+            "one velocity change took {took:?}"
+        );
+        assert_eq!(s.changes_since(revision).changes[0].notes, [first]);
     }
 
     #[test]
@@ -1777,6 +1917,55 @@ mod tests {
             assert!(s.execute(bad).is_err());
         }
         assert_eq!(s.revision(), revision);
+    }
+
+    #[test]
+    fn empty_midi_clips_are_a_bar_long() {
+        use crate::command::{AddMidiClip, ControlSpec};
+        use crate::model::Controller;
+
+        // With nothing to cover, a clip on a bar line came out 0 frames
+        // long.
+        for (bpm, position_s) in [(120.0, 0.0), (120.0, 2.0), (90.0, 0.0), (120.0, 0.5)] {
+            let mut s = Session::default();
+            s.execute(SetTempo::new(bpm).into()).unwrap();
+            let clip = s
+                .execute(
+                    AddMidiClip {
+                        position_s,
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .unwrap()
+                .clip
+                .unwrap();
+            let bar = (4.0 * 60.0 / bpm * 48_000.0) as u64;
+            let length = s.project().clip(clip).unwrap().1.length;
+            assert_eq!(length, bar, "at {bpm} BPM, {position_s} s");
+        }
+
+        // Controller changes count like notes.
+        let mut s = Session::default();
+        let control = |time_beats| ControlSpec {
+            controller: Controller::Cc { number: 7 },
+            time_beats,
+            value: 20,
+        };
+        for (controls, bars) in [(vec![control(1.0)], 1), (vec![control(5.0)], 2)] {
+            let clip = s
+                .execute(
+                    AddMidiClip {
+                        controls,
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .unwrap()
+                .clip
+                .unwrap();
+            assert_eq!(s.project().clip(clip).unwrap().1.length, bars * 96_000);
+        }
     }
 
     #[test]
@@ -2489,6 +2678,144 @@ mod tests {
         let loaded = Session::open(&path).unwrap();
         assert_eq!(loaded.project().master.gain_db, -3.0);
         assert_eq!(loaded.project().track(drums).unwrap().output, Some(all));
+    }
+
+    #[test]
+    fn removing_a_bus_removes_sends_to_it_and_their_automation() {
+        use crate::command::{PointSpec, SetAutomation, SetTrackSend};
+        use crate::model::AutomationTarget;
+        let mut s = Session::default();
+        let track = add(&mut s, "Vox");
+        let bus = s
+            .execute(
+                AddTrack {
+                    kind: TrackKind::Bus,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        s.execute(
+            SetTrackSend {
+                track,
+                bus,
+                gain_db: Some(-6.0),
+                pre_fader: None,
+            }
+            .into(),
+        )
+        .unwrap();
+        let target = AutomationTarget::Send { bus };
+        s.execute(
+            SetAutomation {
+                track,
+                target: target.clone(),
+                points: vec![PointSpec {
+                    time_s: 0.0,
+                    value: -3.0,
+                }],
+            }
+            .into(),
+        )
+        .unwrap();
+        s.execute(RemoveTrack { track: bus }.into()).unwrap();
+        let t = s.project().track(track).unwrap();
+        assert!(t.sends.is_empty());
+        assert!(t.automation.is_empty(), "{:?}", t.automation);
+        // Undo brings the lane back with the send.
+        s.undo().unwrap();
+        let t = s.project().track(track).unwrap();
+        assert_eq!((t.sends.len(), t.automation.len()), (1, 1));
+
+        // A file with a send lane but no send loses the lane.
+        let dir = tempfile::tempdir().unwrap();
+        let path = s.save(Some(&dir.path().join("Sends"))).unwrap();
+        let document = path.join(project_file::DOCUMENT_NAME);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&document).unwrap()).unwrap();
+        for t in json["project"]["tracks"].as_array_mut().unwrap() {
+            t["sends"] = serde_json::json!([]);
+        }
+        std::fs::write(&document, serde_json::to_vec(&json).unwrap()).unwrap();
+        let loaded = Session::open(&path).unwrap();
+        assert!(loaded.project().track(track).unwrap().automation.is_empty());
+    }
+
+    #[test]
+    fn sends_to_the_master_and_bad_sends_in_files_are_refused() {
+        use crate::command::{SetTrackOutput, SetTrackSend};
+        use crate::model::{MASTER, Send};
+        let mut s = Session::default();
+        let bus = |s: &mut Session| {
+            s.execute(
+                AddTrack {
+                    kind: TrackKind::Bus,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap()
+        };
+        let (a, b) = (bus(&mut s), bus(&mut s));
+        let audio = add(&mut s, "Vox");
+        // Every track reaches the master already.
+        let err = s
+            .execute(
+                SetTrackSend {
+                    track: audio,
+                    bus: MASTER,
+                    gain_db: None,
+                    pre_fader: None,
+                }
+                .into(),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("master"), "{err}");
+        s.execute(
+            SetTrackOutput {
+                track: b,
+                bus: Some(a),
+            }
+            .into(),
+        )
+        .unwrap();
+
+        // A damaged file: bus a sends to bus b (which goes to a), the audio
+        // track to a track that doesn't exist, to itself and to a twice, and
+        // the master to a.
+        let dir = tempfile::tempdir().unwrap();
+        let path = s.save(Some(&dir.path().join("Sends"))).unwrap();
+        let document = path.join(project_file::DOCUMENT_NAME);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&document).unwrap()).unwrap();
+        let send = |bus: TrackId| serde_json::json!({ "bus": bus.0, "gain_db": -1.0 });
+        for t in json["project"]["tracks"].as_array_mut().unwrap() {
+            if t["id"] == a.0 {
+                t["sends"] = serde_json::json!([send(b)]);
+            }
+            if t["id"] == audio.0 {
+                t["sends"] = serde_json::json!([a, TrackId(99), audio, a].map(send));
+            }
+        }
+        json["project"]["master"]["sends"] = serde_json::json!([send(a)]);
+        std::fs::write(&document, serde_json::to_vec(&json).unwrap()).unwrap();
+        let loaded = Session::open(&path).unwrap();
+        let p = loaded.project();
+        // The output that was there stays; the sends that can't be go.
+        assert_eq!(p.track(b).unwrap().output, Some(a));
+        assert!(p.track(a).unwrap().sends.is_empty());
+        assert!(p.master.sends.is_empty());
+        let kept = Send {
+            bus: a,
+            gain_db: -1.0,
+            pre_fader: false,
+        };
+        assert_eq!(p.track(audio).unwrap().sends, [kept]);
     }
 
     #[test]

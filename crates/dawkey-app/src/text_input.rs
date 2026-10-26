@@ -8,7 +8,8 @@
 //! choice's name). Backspace deletes, Return or
 //! Tab (or clicking elsewhere) sets it with one command, and Escape leaves
 //! it as it was. Tab from a numerator goes on to the denominator. While a
-//! field is being typed in, it gets every key.
+//! field is being typed in, it gets every key (keys with Ctrl or Alt held
+//! type nothing).
 
 use dawkey_core::{
     DEVICE_LATENCY_MS_MAX, RenameClip, RenameTrack, SetPluginParam, SetTempo, SetTimeSignature,
@@ -68,8 +69,13 @@ pub(crate) fn format_ms(ms: f64) -> String {
 }
 
 impl App {
-    /// Starts typing in `field`, with its current value selected.
+    /// Starts typing in `field`, with its current value selected. A field
+    /// already being typed in (clicked again, to put the caret there, say)
+    /// keeps what's been typed.
     pub(crate) fn start_text_edit(&mut self, field: TextField) -> Result<(), String> {
+        if self.editing(&field) {
+            return Ok(());
+        }
         let text = match &field {
             &TextField::Tempo(n) => {
                 let project = self.studio.session().project();
@@ -168,6 +174,9 @@ impl App {
                     edit.text.pop();
                 }
             }
+            // Shortcuts (Ctrl+S, Ctrl+Z, ...) type nothing, and don't
+            // get past the field either.
+            _ if m.ctrl || m.alt => {}
             _ if free_text(&edit.field) => {
                 // Any text (a plugin reads its parameters' text).
                 let c = match key {

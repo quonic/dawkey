@@ -351,6 +351,16 @@ impl App {
         self.redraw = false;
         theme::use_palette(self.theme.palette());
         let model = self.view_model();
+        // Points are selected by index, which any change to the project (an
+        // undo, say) can make point elsewhere: a controller point is let
+        // go, automation and tempo lane points are found again.
+        let revision = self.studio.session().revision();
+        if revision != self.seen_revision {
+            self.seen_revision = revision;
+            self.view.selected_control = None;
+            self.refind_point();
+            self.refind_marker();
+        }
         // Plugins, lanes and points may be gone (undo, removal).
         let project = self.studio.session().project();
         if self
@@ -375,13 +385,6 @@ impl App {
         {
             self.view.selected_point = None;
         }
-        // A controller point is selected by index, which any change to the
-        // project (an undo, say) can make point elsewhere.
-        let revision = self.studio.session().revision();
-        if revision != self.seen_revision {
-            self.seen_revision = revision;
-            self.view.selected_control = None;
-        }
         // The edited clip may be gone (undo, removal).
         if self.view.editing_clip.is_some() && view::edited(&model, &self.view).is_none() {
             self.view.editing_clip = None;
@@ -392,6 +395,13 @@ impl App {
         }
         let root = view::build(&model, &self.view, self.ui.state(), &self.zoomed);
         self.ui.set_root(root, self.zoomed.size, &mut self.text);
+        // A drag that will never end (its widget went away, or its release
+        // was lost) drops its gesture, or a preview, an undo merge or touch
+        // automation would hang on.
+        if self.ui.take_dropped_drag() && self.view.gesture.is_some() {
+            self.end_gesture();
+            self.rebuild();
+        }
     }
 
     /// Routes one input event from a device. Window-chrome requests are

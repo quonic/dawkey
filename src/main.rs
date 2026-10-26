@@ -204,9 +204,9 @@ fn main() -> ExitCode {
 }
 
 fn scan_plugin(file: &Path) -> anyhow::Result<()> {
-    let plugins = dawkey_plugins::scan_plugin_file(file)?;
-    // The only thing on stdout: the scanning process reads it.
-    serde_json::to_writer(std::io::stdout().lock(), &plugins)?;
+    // The only thing on stdout (the scanning process reads it); what the
+    // plugin prints goes to stderr.
+    dawkey_plugins::run_plugin_scanner(file)?;
     Ok(())
 }
 

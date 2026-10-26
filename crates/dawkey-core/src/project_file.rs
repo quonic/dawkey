@@ -110,19 +110,51 @@ pub fn store_in_bundle(current: &Path, bundle: &Path, id: SourceId) -> Result<Pa
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "audio".into());
-    let mut name = format!("{stem}-{id}");
-    if let Some(ext) = current.extension() {
-        name.push('.');
-        name.push_str(&ext.to_string_lossy());
+    let ext = current
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    // A file by that name may be another project's (saved here before;
+    // source IDs start at 1 in every project): it's used only if it has
+    // the same audio, and otherwise left alone for a name of its own.
+    for n in 1.. {
+        let name = match n {
+            1 => format!("{stem}-{id}{ext}"),
+            n => format!("{stem}-{id}-{n}{ext}"),
+        };
+        let relative = Path::new(AUDIO_DIR).join(name);
+        let dest = bundle.join(&relative);
+        if !dest.exists() {
+            let audio_dir = bundle.join(AUDIO_DIR);
+            fs::create_dir_all(&audio_dir).map_err(|e| CoreError::io(&audio_dir, e))?;
+            fs::copy(current, &dest).map_err(|e| CoreError::io(current, e))?;
+            return Ok(relative);
+        }
+        if same_contents(current, &dest).map_err(|e| CoreError::io(current, e))? {
+            return Ok(relative);
+        }
     }
-    let relative = Path::new(AUDIO_DIR).join(name);
-    let dest = bundle.join(&relative);
-    if !dest.exists() {
-        let audio_dir = bundle.join(AUDIO_DIR);
-        fs::create_dir_all(&audio_dir).map_err(|e| CoreError::io(&audio_dir, e))?;
-        fs::copy(current, &dest).map_err(|e| CoreError::io(current, e))?;
+    unreachable!("a free name is found")
+}
+
+/// Whether the files at `a` and `b` hold the same bytes.
+fn same_contents(a: &Path, b: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+    let (mut a, mut b) = (fs::File::open(a)?, fs::File::open(b)?);
+    if a.metadata()?.len() != b.metadata()?.len() {
+        return Ok(false);
     }
-    Ok(relative)
+    let (mut x, mut y) = (vec![0; 1 << 16], vec![0; 1 << 16]);
+    loop {
+        let n = a.read(&mut x)?;
+        if n == 0 {
+            return Ok(true);
+        }
+        b.read_exact(&mut y[..n])?;
+        if x[..n] != y[..n] {
+            return Ok(false);
+        }
+    }
 }
 
 /// Loads the bundle at `path` (or the bundle containing `path`, if it names

@@ -88,8 +88,9 @@ pub(crate) struct GetState {
 /// notes and plugin slots it touched, and `also` for the tempo, meter, loop,
 /// punch, name, plugin chains and automation. Use it to catch up with what
 /// the window or another client did. Every result also carries `instance`,
-/// which changes when Dawkey restarts; a new instance or another project
-/// starts the revisions over (`complete: false`; call get_state then).
+/// which changes when Dawkey restarts; a new instance starts the revisions
+/// over, and another project carries them on, so an earlier revision isn't
+/// covered (`complete: false`; call get_state then).
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct GetChanges {
@@ -105,7 +106,8 @@ pub(crate) struct NewProject {
     /// Project name. Defaults to "Untitled".
     #[serde(default)]
     pub(crate) name: Option<String>,
-    /// Required to replace a project with unsaved changes.
+    /// Required to replace a project with unsaved changes (or a recording
+    /// in progress).
     #[serde(default)]
     pub(crate) discard_changes: bool,
 }
@@ -119,7 +121,8 @@ pub(crate) struct NewProject {
 pub(crate) struct OpenProject {
     /// Path to the `.dawkey` bundle.
     pub(crate) path: PathBuf,
-    /// Required to replace a project with unsaved changes.
+    /// Required to replace a project with unsaved changes (or a recording
+    /// in progress).
     #[serde(default)]
     pub(crate) discard_changes: bool,
 }
@@ -503,7 +506,8 @@ pub(crate) struct SetRecordOffset {
 /// Render part of the project offline (independent of the transport) and
 /// analyze it: peak and RMS per channel in dBFS, integrated loudness (LUFS),
 /// levels in three bands (`bands`, a rough brightness), and a hash for
-/// comparing renders. Optionally write it to a WAV file. `tracks` renders
+/// comparing renders (`non_finite` counts NaN and infinite samples, which a
+/// broken plugin can make; they're measured as silence). Optionally write it to a WAV file. `tracks` renders
 /// only those tracks (as soloing them would: through their buses and the
 /// master); `stems: true` renders each track separately (one render per
 /// track, `stems` in the result, each with its analysis, and a file each in
@@ -554,7 +558,8 @@ pub(crate) struct SegmentRange {
 }
 
 /// Export the mix, or part of it, to an audio file, rendered offline: WAV
-/// (16 or 24-bit, or 32-bit float), FLAC (16 or 24-bit), Ogg Vorbis
+/// (16 or 24-bit, or 32-bit float; RF64 past 4 GiB), FLAC (16 or 24-bit, up
+/// to 96 kHz), Ogg Vorbis
 /// (`quality`, 0 to 10) or Opus (`bitrate_kbps`; always 48 kHz; games loop
 /// both without a gap). By default the whole song, from the start to where
 /// the last clip ends, in 24-bit at the project's sample rate. Reports the
@@ -591,7 +596,7 @@ pub(crate) struct ExportAudio {
     #[serde(default)]
     pub(crate) tags: Option<std::collections::BTreeMap<String, String>>,
     /// The file's sample rate in Hz; the mix is converted to it. Default:
-    /// the project's.
+    /// the project's. FLAC goes up to 96000.
     #[serde(default)]
     pub(crate) sample_rate: Option<u32>,
     /// Start in seconds. Default 0.

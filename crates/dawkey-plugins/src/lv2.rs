@@ -66,6 +66,10 @@ const ATOM_CAPACITY: usize = 16 * 1024;
 const ATOM_CAPACITY_MAX: usize = 64 * 1024 * 1024;
 /// Bytes of the rings between a plugin and its UI, at least.
 const UI_RING: usize = 256 * 1024;
+/// The sample rate the catalog gives the bounds and default of ports with
+/// `lv2:sampleRate` at (their values are absolute, so a frequency stays the
+/// same at any rate; only the bounds move).
+const NOMINAL_RATE: f32 = 48_000.0;
 
 /// The URID map shared by every LV2 plugin in the process.
 #[derive(Default)]
@@ -516,6 +520,10 @@ pub struct StateProperty {
     pub value: StateValue,
 }
 
+/// The size of an `atom:Literal`'s datatype and language URIDs
+/// (`LV2_Atom_Literal_Body`), which come before its text.
+const LITERAL_HEADER: usize = 8;
+
 /// A saved property's value, as far as its type is known.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(untagged)]
@@ -536,16 +544,20 @@ pub enum StateValue {
 /// isn't such state).
 pub fn lv2_state_properties(state: &[u8]) -> Option<Vec<StateProperty>> {
     let properties = decode_state(state)?;
+    let text = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes.strip_suffix(b"\0").unwrap_or(bytes)).into_owned()
+    };
     Some(
         properties
             .iter()
             .map(|p| {
                 let kind = p.kind.to_string_lossy().into_owned();
                 let value = match kind.strip_prefix(ATOM) {
-                    Some("String" | "Path" | "URI" | "Literal") => StateValue::Text(
-                        String::from_utf8_lossy(p.value.strip_suffix(b"\0").unwrap_or(&p.value))
-                            .into_owned(),
-                    ),
+                    Some("String" | "Path" | "URI") => StateValue::Text(text(&p.value)),
+                    // After its datatype and language (`LV2_Atom_Literal_Body`).
+                    Some("Literal") if p.value.len() >= LITERAL_HEADER => {
+                        StateValue::Text(text(&p.value[LITERAL_HEADER..]))
+                    }
                     Some("Int") if p.value.len() == 4 => StateValue::Int(i64::from(
                         i32::from_le_bytes(p.value[..4].try_into().expect("4 bytes")),
                     )),
@@ -618,12 +630,17 @@ pub fn lv2_state_set(
         },
     };
     let bytes: Vec<u8> = match kind.strip_prefix(ATOM) {
-        Some("String" | "Path" | "URI" | "Literal") => {
-            let text = match value {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
+        Some(text @ ("String" | "Path" | "URI" | "Literal")) => {
+            // A literal has no datatype or language (both 0) before its text.
+            let mut bytes = if text == "Literal" {
+                vec![0; LITERAL_HEADER]
+            } else {
+                Vec::new()
             };
-            let mut bytes = text.into_bytes();
+            match value {
+                serde_json::Value::String(s) => bytes.extend_from_slice(s.as_bytes()),
+                other => bytes.extend_from_slice(other.to_string().as_bytes()),
+            }
             bytes.push(0);
             bytes
         }
@@ -1208,7 +1225,7 @@ impl Lv2Host {
         if let Some(problem) = unreadable(&plugin) {
             return Err(PluginError::new(format!("{uri}: {problem}")));
         }
-        let layout = Layout::of(world, &plugin, info)?;
+        let layout = Layout::of(world, &plugin, info, sample_rate)?;
         let path_features = PathFeatures::new(paths.clone());
         // Offline, work is done as it's asked for, so renders come out the
         // same however long it takes.
@@ -1397,6 +1414,10 @@ struct Layout {
     params: Vec<usize>,
     /// Their default values.
     param_defaults: Vec<f32>,
+    /// The bounds each parameter is held to, in `params`' order: those a
+    /// port with `lv2:sampleRate` declares, at this sample rate (the
+    /// catalog's are at [`NOMINAL_RATE`]); none for other ports.
+    param_limits: Vec<(f32, f32)>,
     /// Other control ports, with their default value.
     other_controls: Vec<(usize, f32)>,
     /// The output control ports (meters and the like).
@@ -1496,7 +1517,12 @@ struct PortKind {
     min_size: usize,
     symbol: String,
     name: String,
+    /// Its bounds and default (at [`NOMINAL_RATE`] for a port with
+    /// `lv2:sampleRate`).
     range: (f32, f32, f32),
+    /// The bounds it declares as fractions of the sample rate
+    /// (`lv2:sampleRate`; infinite where it declares none), if it does.
+    per_rate: Option<(f32, f32)>,
     stepped: bool,
     /// The unit's symbol (`units:unit`).
     unit: Option<String>,
@@ -1544,6 +1570,29 @@ fn unit_symbol(world: &World, unit: &lilv::node::Node) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// A control port's range and default from its `lv2:minimum`,
+/// `lv2:maximum` and `lv2:default` (NaN where it leaves one out) and its
+/// scale points. The bounds are hints a port may leave out: a bound it
+/// leaves out (or both, if they're the wrong way round) is made up to hold
+/// its default and scale points, and 0 to 1 as well, so a declared default
+/// stays what it is. Only a declared bound moves the default.
+fn control_range(min: f32, max: f32, default: f32, points: &[f32]) -> (f32, f32, f32) {
+    let declared = |v: f32| v.is_finite().then_some(v);
+    let (min, max) = match (declared(min), declared(max)) {
+        (Some(min), Some(max)) if max <= min => (None, None),
+        bounds => bounds,
+    };
+    let default = declared(default);
+    let held = || default.into_iter().chain(points.iter().copied());
+    let lo = min.unwrap_or_else(|| {
+        let lowest = held().fold(0.0, f32::min);
+        // Below a declared maximum.
+        max.map_or(lowest, |max| lowest.min(max - 1.0))
+    });
+    let hi = max.unwrap_or_else(|| held().fold(1.0, f32::max).max(lo + 1.0));
+    (lo, hi, default.unwrap_or(lo).clamp(lo, hi))
+}
+
 fn port_kinds(world: &World, plugin: &Plugin) -> Vec<PortKind> {
     let uri = |s: &str| world.new_uri(s);
     let (input, audio, control, atom_port, optional, midi) = (
@@ -1561,24 +1610,43 @@ fn port_kinds(world: &World, plugin: &Plugin) -> Vec<PortKind> {
         uri(&format!("{LV2}enumeration")),
     ];
     let ranges = plugin.port_ranges_float();
+    let sample_rate = uri(&format!("{LV2}sampleRate"));
     let unit = uri(&format!("{UNITS}unit"));
     let min_size = uri(MINIMUM_SIZE);
     plugin
         .iter_ports()
         .map(|port| {
             let index = port.index();
+            let labels: Vec<ValueLabel> = port
+                .scale_points()
+                .iter()
+                .filter_map(|p| {
+                    let value = p.value();
+                    let value = value
+                        .as_float()
+                        .map(f64::from)
+                        .or_else(|| value.as_int().map(f64::from))?;
+                    Some(ValueLabel {
+                        value,
+                        label: p.label().as_str()?.to_owned(),
+                    })
+                })
+                .collect();
+            // Bounds and a default that are fractions of the sample rate
+            // ("hosts that support bounds at all must support this
+            // property", LV2 core).
+            let relative = port.has_property(&sample_rate);
+            let scale = if relative { NOMINAL_RATE } else { 1.0 };
             let range = ranges.get(index).map_or((0.0, 0.0, 1.0), |r| {
-                let (min, max) = if r.min.is_finite() && r.max.is_finite() && r.max > r.min {
-                    (r.min, r.max)
-                } else {
-                    (0.0, 1.0)
-                };
-                let default = if r.default.is_finite() {
-                    r.default
-                } else {
-                    min
-                };
-                (min, max, default.clamp(min, max))
+                let points: Vec<f32> = labels.iter().map(|l| l.value as f32).collect();
+                control_range(r.min * scale, r.max * scale, r.default * scale, &points)
+            });
+            let declared = |v: f32, otherwise: f32| if v.is_finite() { v } else { otherwise };
+            let per_rate = (ranges.get(index).filter(|_| relative)).map(|r| {
+                (
+                    declared(r.min, f32::NEG_INFINITY),
+                    declared(r.max, f32::INFINITY),
+                )
             });
             PortKind {
                 index,
@@ -1603,30 +1671,22 @@ fn port_kinds(world: &World, plugin: &Plugin) -> Vec<PortKind> {
                     .and_then(|s| s.as_str().map(str::to_owned))
                     .unwrap_or_default(),
                 range,
+                per_rate,
                 stepped: stepped.iter().any(|p| port.has_property(p)),
                 unit: port.get(&unit).and_then(|u| unit_symbol(world, &u)),
-                labels: port
-                    .scale_points()
-                    .iter()
-                    .filter_map(|p| {
-                        let value = p.value();
-                        let value = value
-                            .as_float()
-                            .map(f64::from)
-                            .or_else(|| value.as_int().map(f64::from))?;
-                        Some(ValueLabel {
-                            value,
-                            label: p.label().as_str()?.to_owned(),
-                        })
-                    })
-                    .collect(),
+                labels,
             }
         })
         .collect()
 }
 
 impl Layout {
-    fn of(world: &World, plugin: &Plugin, info: &PluginInfo) -> Result<Self, PluginError> {
+    fn of(
+        world: &World,
+        plugin: &Plugin,
+        info: &PluginInfo,
+        sample_rate: u32,
+    ) -> Result<Self, PluginError> {
         let kinds = port_kinds(world, plugin);
         let mut layout = Layout {
             port_count: plugin.ports_count(),
@@ -1692,7 +1752,21 @@ impl Layout {
                     .ok_or_else(|| PluginError::new(format!("no control port {}", p.id)))
             })
             .collect::<Result<_, _>>()?;
-        layout.param_defaults = info.params.iter().map(|p| p.default as f32).collect();
+        let rate = sample_rate as f32;
+        layout.param_limits = (layout.params.iter())
+            .map(|&port| {
+                kinds
+                    .iter()
+                    .find(|k| k.index == port)
+                    .and_then(|k| k.per_rate)
+                    .map_or((f32::NEG_INFINITY, f32::INFINITY), |(lo, hi)| {
+                        (lo * rate, hi * rate)
+                    })
+            })
+            .collect();
+        layout.param_defaults = (info.params.iter().zip(&layout.param_limits))
+            .map(|(p, &(lo, hi))| (p.default as f32).max(lo).min(hi))
+            .collect();
         Ok(layout)
     }
 }
@@ -2225,7 +2299,8 @@ impl PluginProcessor for Lv2Processor {
                 if let PluginEventKind::Param { index, value } = event.kind
                     && let Some(&port) = self.layout.params.get(index as usize)
                 {
-                    self.controls[port] = value as f32;
+                    let (lo, hi) = self.layout.param_limits[index as usize];
+                    self.controls[port] = (value as f32).max(lo).min(hi);
                 }
                 params += 1;
             }

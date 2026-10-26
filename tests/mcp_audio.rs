@@ -149,8 +149,7 @@ async fn import_resamples_to_project_rate() {
         .unwrap();
     assert_eq!(imported["source_sample_rate"], 44_100);
     assert_eq!(imported["channels"], 2);
-    let frames = imported["frames"].as_u64().unwrap();
-    assert!((47_990..=48_010).contains(&frames), "{frames}");
+    assert_eq!(imported["frames"], 48_000);
 
     let err = dawkey
         .call_err(

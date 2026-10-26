@@ -282,9 +282,10 @@ pub fn parse_midi1(bytes: &[u8], offset: u32, mut push: impl FnMut(MidiEvent)) {
 }
 
 /// Parses Universal MIDI Packets (32-bit words) into channel events at
-/// `offset`. MIDI 2.0 channel voice messages become MIDI 1.0 ones, except
-/// per-note controllers and pitch bend, which keep their 32-bit values;
-/// other message types are skipped.
+/// `offset`. MIDI 2.0 channel voice messages become MIDI 1.0 ones (RPNs and
+/// NRPNs their controller runs, a program change with a bank its bank
+/// select first), except per-note controllers and pitch bend, which keep
+/// their 32-bit values; other message types are skipped.
 pub fn parse_ump(words: &[u32], offset: u32, mut push: impl FnMut(MidiEvent)) {
     let mut i = 0;
     while i < words.len() {
@@ -329,6 +330,38 @@ pub fn parse_ump(words: &[u32], offset: u32, mut push: impl FnMut(MidiEvent)) {
                         value,
                     ));
                 }
+                // Messages MIDI 1.0 sends as a run of controller changes.
+                let control = 0xb0 | status & 0x0f;
+                match status & 0xf0 {
+                    // Bank select before a program change that has one.
+                    0xc0 if word & 1 != 0 => {
+                        for (controller, v) in [(0, value >> 8), (32, value)] {
+                            push(MidiEvent::midi1(
+                                offset,
+                                [control, controller, v as u8 & 0x7f],
+                            ));
+                        }
+                    }
+                    // Registered and assignable (NRPN) controllers: the
+                    // parameter number, then data entry MSB and LSB.
+                    0x20 | 0x30 => {
+                        let (msb, lsb) = if status & 0xf0 == 0x20 {
+                            (101, 100)
+                        } else {
+                            (99, 98)
+                        };
+                        let run = [
+                            (msb, index),
+                            (lsb, word as u8 & 0x7f),
+                            (6, (value >> 25) as u8),
+                            (38, (value >> 18) as u8 & 0x7f),
+                        ];
+                        for (controller, v) in run {
+                            push(MidiEvent::midi1(offset, [control, controller, v]));
+                        }
+                    }
+                    _ => {}
+                }
                 let data = match status & 0xf0 {
                     0x80 | 0x90 => {
                         let velocity = (value >> 25) as u8;
@@ -340,7 +373,8 @@ pub fn parse_ump(words: &[u32], offset: u32, mut push: impl FnMut(MidiEvent)) {
                         };
                         Some([status, index, velocity])
                     }
-                    0xb0 => Some([status, index, (value >> 25) as u8]),
+                    0xa0 | 0xb0 => Some([status, index, (value >> 25) as u8]),
+                    0xc0 => Some([status, (value >> 24) as u8 & 0x7f, 0]),
                     0xd0 => Some([status, (value >> 25) as u8, 0]),
                     0xe0 => {
                         let bend = (value >> 18) as u16;
@@ -405,6 +439,42 @@ mod tests {
                 [0x91, 64, 127],
                 [0x81, 64, 0],
                 [0xe0, 0, 64]
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_ump_pressure_programs_and_parameters() {
+        let mut out = Vec::new();
+        let words = [
+            0x40a0_3c00,
+            0x8000_0000, // poly pressure on key 60, half
+            0x40c2_0000,
+            0x0500_0000, // program 5 on ch 2
+            0x40c3_0001,
+            0x0700_0102, // program 7 on ch 3, bank 1/2
+            0x4021_0207,
+            0x8000_0000, // registered controller 2/7 on ch 1, half
+            0x4030_0103,
+            0xffff_ffff, // assignable controller 1/3 on ch 0, full
+        ];
+        parse_ump(&words, 0, |e| out.push(e.data));
+        assert_eq!(
+            out,
+            [
+                [0xa0, 60, 64],
+                [0xc2, 5, 0],
+                [0xb3, 0, 1],
+                [0xb3, 32, 2],
+                [0xc3, 7, 0],
+                [0xb1, 101, 2],
+                [0xb1, 100, 7],
+                [0xb1, 6, 64],
+                [0xb1, 38, 0],
+                [0xb0, 99, 1],
+                [0xb0, 98, 3],
+                [0xb0, 6, 127],
+                [0xb0, 38, 127],
             ]
         );
     }

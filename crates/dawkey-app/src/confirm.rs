@@ -9,7 +9,7 @@ impl App {
     /// Does `action`, or first opens the "save changes?" dialog when there
     /// are unsaved changes.
     pub(crate) fn request_action(&mut self, action: PendingAction) {
-        if self.studio.session().is_dirty() {
+        if self.has_unsaved_changes() {
             self.view.confirm = Some(action);
         } else {
             self.proceed(action);
@@ -20,12 +20,24 @@ impl App {
     /// true if it may close now, false if the "save changes?" dialog opened
     /// instead (its buttons close the window later, or don't).
     pub fn request_close(&mut self) -> bool {
-        if !self.studio.session().is_dirty() {
+        if !self.has_unsaved_changes() {
             return true;
         }
         self.view.confirm = Some(PendingAction::Close);
         self.rebuild();
         false
+    }
+
+    /// Whether the project has unsaved changes. A recording in progress is
+    /// stopped first, so its takes are in the project to save or discard
+    /// (not lost with it).
+    fn has_unsaved_changes(&mut self) -> bool {
+        if self.studio.is_recording()
+            && let Err(e) = self.studio.stop()
+        {
+            tracing::warn!("finishing the recording: {e}");
+        }
+        self.studio.session().is_dirty()
     }
 
     /// Carries out `action`, whatever happens to unsaved changes: once

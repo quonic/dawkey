@@ -200,19 +200,16 @@ impl App {
         })
     }
 
-    /// Keys while the panel is open: Escape closes it. `None` if it's
-    /// closed.
+    /// Keys while the panel is open: Escape closes it, and nothing else
+    /// gets through to the window behind it. `None` if it's closed.
     pub(crate) fn on_prefs_key(&mut self, key: &str) -> Option<Result<(), String>> {
         if !self.view.prefs_open {
             return None;
         }
-        match key {
-            "escape" => {
-                self.view.prefs_open = false;
-                Some(Ok(()))
-            }
-            _ => None,
+        if key == "escape" {
+            self.view.prefs_open = false;
         }
+        Some(Ok(()))
     }
 
     /// Looks for plugins of `kind` in `folder` too (from the folder dialog).

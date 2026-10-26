@@ -225,6 +225,29 @@ async fn a_crashing_plugin_only_fails_its_own_scan() {
 }
 
 #[tokio::test]
+async fn plugins_that_print_while_scanned_are_found() {
+    let setup = setup();
+    let dawkey = Harness::headless_with_env(
+        DAWKEY,
+        std::iter::empty::<&str>(),
+        [
+            ("CLAP_PATH", setup.clap.as_os_str()),
+            ("LV2_PATH", setup.lv2.as_os_str()),
+            ("VST3_PATH", setup.vst3.as_os_str()),
+            ("dawkey_TEST_PLUGIN_CHATTY", "1".as_ref()),
+        ],
+    )
+    .await
+    .unwrap();
+    // They print on stdout as they're loaded and as the scanner exits,
+    // which the scan reads its JSON from.
+    let rescanned = dawkey.call("rescan_plugins", json!({})).await.unwrap();
+    assert_eq!(rescanned["failures"], json!([]));
+    assert_eq!(rescanned["found"], 24);
+    dawkey.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn effects_process_tracks_and_take_parameters() {
     let setup = setup();
     let dawkey = start(&setup).await;
@@ -1477,6 +1500,27 @@ async fn batches_commands() {
             .unwrap();
         assert!(err.contains(expected), "{err}");
     }
+
+    // Strings that start with `$` but aren't references are taken as they
+    // are, and `$$` is a `$`.
+    dawkey
+        .call(
+            "batch",
+            json!({ "operations": [
+                { "tool": "add_track", "args": { "name": "$5 Synth" } },
+                { "tool": "add_track", "args": { "name": "$$0.track" } },
+            ] }),
+        )
+        .await
+        .unwrap();
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    let names: Vec<&str> = state["project"]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["$5 Synth", "$0.track"]);
     dawkey.shutdown().await.unwrap();
 }
 

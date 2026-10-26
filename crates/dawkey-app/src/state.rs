@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use dawkey_core::{ClipId, Controller, NoteId, PluginId, TrackId};
+use dawkey_core::{AutomationTarget, ClipId, Controller, NoteId, PluginId, TrackId};
 use serde::Serialize;
 
 /// Height of one track lane in the arrange view.
@@ -582,10 +582,18 @@ pub struct ViewState {
     pub takes_shown: Vec<TrackId>,
     /// The selected automation point: track, lane index, point index.
     pub selected_point: Option<(TrackId, usize, usize)>,
+    /// What the selected automation point is (its lane's target and its
+    /// frame), to find it again by when the project changes.
+    #[serde(skip)]
+    pub(crate) point_anchor: Option<(AutomationTarget, u64)>,
     /// The tempo and time signature lanes show under the ruler.
     pub tempo_shown: bool,
     /// The selected point in the tempo or time signature lane.
     pub selected_marker: Option<Marker>,
+    /// Where the selected tempo point (its beat) or time signature change
+    /// (its bar from 0) is, to find it again by when the project changes.
+    #[serde(skip)]
+    pub(crate) marker_anchor: f64,
     /// The "save changes?" dialog is open, before doing this.
     pub confirm: Option<PendingAction>,
     /// A field being typed in.
@@ -739,8 +747,10 @@ impl Default for ViewState {
             automation_shown: Vec::new(),
             takes_shown: Vec::new(),
             selected_point: None,
+            point_anchor: None,
             tempo_shown: false,
             selected_marker: None,
+            marker_anchor: 0.0,
             confirm: None,
             text_edit: None,
             recovery: None,

@@ -108,7 +108,7 @@ impl App {
             }
             ["tempo", n] => {
                 let n: usize = n.parse().ok()?;
-                self.view.selected_marker = Some(Marker::Tempo(n));
+                self.select_marker(Marker::Tempo(n));
                 self.view.selected_clip = None;
                 Ok(())
             }
@@ -136,7 +136,7 @@ impl App {
             }
             ["meter", n] => {
                 let n: usize = n.parse().ok()?;
-                self.view.selected_marker = Some(Marker::Meter(n));
+                self.select_marker(Marker::Meter(n));
                 self.view.selected_clip = None;
                 Ok(())
             }
@@ -156,7 +156,7 @@ impl App {
                 let index: usize = n.parse().ok()?;
                 let points = self.tempo_points();
                 let &(beat, bpm, _) = points.get(index)?;
-                self.view.selected_marker = Some(Marker::Tempo(index));
+                self.select_marker(Marker::Tempo(index));
                 let pointer = self.beat_at_x(origin.x);
                 Some(Ok(Some(Gesture::TempoPoint {
                     index,
@@ -170,7 +170,7 @@ impl App {
             ["meter", n] => {
                 let index: usize = n.parse().ok()?;
                 let &(bar, _) = self.meter_points().get(index)?;
-                self.view.selected_marker = Some(Marker::Meter(index));
+                self.select_marker(Marker::Meter(index));
                 let start = self.studio.session().project().meter_map().bar_start(bar);
                 Some(Ok(Some(Gesture::MeterChange {
                     index,
@@ -330,15 +330,49 @@ impl App {
             .beat_at_seconds(self.time_at(x))
     }
 
+    /// Selects a tempo point or time signature change.
+    fn select_marker(&mut self, marker: Marker) {
+        self.view.marker_anchor = match marker {
+            Marker::Tempo(n) => self.tempo_points().get(n).map_or(f64::NAN, |p| p.0),
+            Marker::Meter(n) => self
+                .meter_points()
+                .get(n)
+                .map_or(f64::NAN, |p| f64::from(p.0)),
+        };
+        self.view.selected_marker = Some(marker);
+    }
+
     fn select_tempo_at(&mut self, beat: f64) {
         let points = self.tempo_points();
         let found = points.iter().position(|p| (p.0 - beat).abs() < 1e-6);
+        self.view.marker_anchor = beat;
         self.view.selected_marker = found.map(Marker::Tempo);
     }
 
     fn select_meter_at(&mut self, bar: u32) {
         let found = self.meter_points().iter().position(|p| p.0 == bar);
+        self.view.marker_anchor = f64::from(bar);
         self.view.selected_marker = found.map(Marker::Meter);
+    }
+
+    /// After the project changed (an undo, say), finds the selected tempo
+    /// point or time signature change again by its beat or bar, as its
+    /// index may now be another's; or lets it go if it's gone.
+    pub(crate) fn refind_marker(&mut self) {
+        let at = self.view.marker_anchor;
+        self.view.selected_marker = match self.view.selected_marker {
+            Some(Marker::Tempo(_)) => self
+                .tempo_points()
+                .iter()
+                .position(|p| (p.0 - at).abs() < 1e-6)
+                .map(Marker::Tempo),
+            Some(Marker::Meter(_)) => self
+                .meter_points()
+                .iter()
+                .position(|p| f64::from(p.0) == at)
+                .map(Marker::Meter),
+            None => None,
+        };
     }
 
     /// Changes tempo point `n` by `by` BPM.
