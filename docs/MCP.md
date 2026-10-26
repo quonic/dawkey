@@ -75,6 +75,17 @@ Clients configured with JSON, such as Claude Desktop, take the same command:
 }
 ```
 
+### The Claude Code plugin
+
+The repository is also a Claude Code plugin marketplace. Its `dawkey` plugin connects Claude Code to the window (`dawkey mcp --attach`) and adds a skill that teaches Claude to work in Dawkey: checking each change by rendering it, writing MIDI, choosing among your installed plugins, mixing to a loudness target, recording and exporting.
+
+```text
+/plugin marketplace add quonic/dawkey
+/plugin install dawkey@dawkey
+```
+
+The skill itself is in [claude-plugin/skills/dawkey](../claude-plugin/skills/dawkey), and works in other clients that take Agent Skills. See [claude-plugin/README.md](../claude-plugin/README.md).
+
 ## Working with the tools
 
 The server's instructions give clients these rules too. In short:

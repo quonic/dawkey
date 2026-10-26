@@ -1,0 +1,14 @@
+{
+  "name": "dawkey",
+  "owner": {
+    "name": "quonic"
+  },
+  "description": "Claude Code plugins for Dawkey, the Linux DAW.",
+  "plugins": [
+    {
+      "name": "dawkey",
+      "source": "./claude-plugin",
+      "description": "Make, mix and export music in Dawkey from Claude Code: the MCP connection to the window plus a skill for composing, plugins, mixing and exporting."
+    }
+  ]
+}
