@@ -246,7 +246,9 @@ pub(crate) struct ListPlugins {
 
 /// Get a plugin slot on a track: which plugin, whether it's running, and
 /// its parameters (IDs, names, ranges, current values, whether automated).
-/// Some plugins have thousands of parameters: `param_count` says how many,
+/// A choice (a waveform, a filter type, ...) lists its options as
+/// `choices`, each a value and its name as the plugin shows it. Some
+/// plugins have thousands of parameters: `param_count` says how many,
 /// and `first`/`count` page through them. For LV2 plugins, `properties`
 /// lists what the plugin declares besides its parameters (a soundfont
 /// path, a file, a string: `patch:writable`/`patch:readable`), and `state`

@@ -328,7 +328,23 @@ pub struct ParamState {
     pub stepped: bool,
     /// An automation lane drives it.
     pub automated: bool,
+    /// A choice's options as the plugin shows them (a waveform, a filter
+    /// type, ...): a stepped parameter's values, when there are at most
+    /// [`MAX_CHOICES`] and they're more than their numbers.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<Choice>,
 }
+
+/// One option of a choice parameter.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Choice {
+    pub value: f64,
+    pub text: String,
+}
+
+/// The most options a parameter's `choices` lists: a parameter with more
+/// steps is a number to set rather than a list to pick from.
+pub const MAX_CHOICES: usize = 32;
 
 /// What an imported MIDI file became.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -2031,6 +2047,12 @@ impl Studio {
                             text: self.plugins.param_text(id, i, index, value),
                             stepped: p.stepped,
                             automated: lane.is_some(),
+                            choices: self
+                                .plugins
+                                .choices(id, i, index)
+                                .into_iter()
+                                .map(|(value, text)| Choice { value, text })
+                                .collect(),
                         }
                     })
                     .collect()

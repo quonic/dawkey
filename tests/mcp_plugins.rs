@@ -1149,6 +1149,79 @@ async fn missing_plugins_are_reported_and_pass_audio() {
 }
 
 #[tokio::test]
+async fn get_plugin_lists_a_choices_options() {
+    let setup = setup();
+    for args in [&[][..], &["--bridge-plugins"][..]] {
+        let dawkey = Harness::headless_with_env(
+            DAWKEY,
+            args.iter().copied(),
+            [
+                ("CLAP_PATH", &setup.clap),
+                ("LV2_PATH", &setup.lv2),
+                ("VST3_PATH", &setup.vst3),
+            ],
+        )
+        .await
+        .expect("dawkey starts");
+        let track = dawkey.call("add_track", json!({})).await.unwrap()["track"].clone();
+        let gain = add_plugin(&dawkey, &track, "clap:dawkey.test.gain").await;
+
+        // A choice lists its options, named as the plugin shows them, and
+        // takes one by name: an LV2 enumeration's scale points, and a CLAP
+        // parameter whose steps lie between 0 and 1 (as LSP's do), each at
+        // the value the plugin reads its name as, though none of the
+        // samples that find them lands on a third.
+        let cases = [
+            (
+                "lv2:urn:dawkey:test:tempo",
+                json!([{ "value": 0.0, "text": "Zero" }, { "value": 1.0, "text": "One" }]),
+                ("zero", 0.0),
+            ),
+            (
+                "clap:dawkey.test.tempo",
+                json!([
+                    { "value": 0.0, "text": "Zero" },
+                    { "value": 1.0 / 3.0, "text": "One" },
+                    { "value": 2.0 / 3.0, "text": "Two" },
+                    { "value": 1.0, "text": "Three" },
+                ]),
+                ("Two", 2.0 / 3.0),
+            ),
+        ];
+        for (plugin, choices, (text, value)) in cases {
+            let slot = add_plugin(&dawkey, &track, plugin).await;
+            let details = dawkey
+                .call("get_plugin", json!({ "plugin": slot }))
+                .await
+                .unwrap();
+            let param = details["params"][0].clone();
+            assert_eq!(param["text"], "One", "{plugin} {args:?}");
+            assert_eq!(param["choices"], choices, "{plugin} {args:?}");
+            dawkey
+                .call(
+                    "set_plugin_param",
+                    json!({ "plugin": slot, "param": param["id"], "text": text }),
+                )
+                .await
+                .unwrap();
+            let details = dawkey
+                .call("get_plugin", json!({ "plugin": slot }))
+                .await
+                .unwrap();
+            assert_eq!(details["params"][0]["value"], value, "{plugin} {args:?}");
+        }
+
+        // A continuous parameter has none.
+        let details = dawkey
+            .call("get_plugin", json!({ "plugin": gain }))
+            .await
+            .unwrap();
+        assert!(details["params"][0].get("choices").is_none(), "{args:?}");
+        dawkey.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn lv2_plugins_get_the_worker() {
     let setup = setup();
     for args in [&[][..], &["--bridge-plugins"][..]] {

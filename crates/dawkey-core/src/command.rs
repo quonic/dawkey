@@ -2746,7 +2746,8 @@ impl MovePlugin {
 /// Set a plugin parameter (get_plugin lists a plugin's parameters, with
 /// their IDs, ranges, and values as the plugin shows them). Give the new
 /// `value`, or `text` for the plugin to read the way it shows values
-/// (e.g. "-6 dB", "50 %", or a choice's name).
+/// (e.g. "-6 dB", "50 %", or one of the names in the parameter's
+/// `choices`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetPluginParam {

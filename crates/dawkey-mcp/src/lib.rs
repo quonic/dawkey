@@ -65,7 +65,7 @@ the notes). MIDI effects (midi_output in list_plugins) pass the MIDI they
 send to the next plugin that takes notes; on a track with a MIDI output
 device, what the effects at the start of the chain send goes to the device.
 get_plugin lists a slot's parameters (with their values as the plugin shows
-them); set_plugin_param (which also takes a value as text, e.g. `-6 dB`),
+them, and a choice's options as `choices`); set_plugin_param (which also takes a value as text, e.g. `-6 dB`),
 set_automation, add_automation_point and write_automation change them. An
 LV2 plugin's other settings (a soundfont path, a file, a choice: its
 `properties` and the keys in its saved `state`) are set with
