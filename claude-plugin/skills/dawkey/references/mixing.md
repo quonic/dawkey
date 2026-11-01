@@ -11,6 +11,14 @@ render_range { start_bar: 1, end_bar: <end> }
 
 The stems show each track's own `lufs`, `rms_dbfs`, `peak_dbfs` and `bands`. The mix shows where the total sits. Use the loudest section (the chorus) for balance decisions, and the whole song for loudness.
 
+**Keep results small on long songs.** Stems with segments multiply: `render_range { start_s: 0, end_s: 300, stems: true, segment_bars: 8 }` on 13 tracks took over two minutes and returned about 94,000 characters, more than a tool result can hold (it was saved to a file instead, which then needs a script to read). Instead:
+
+1. Check the mix over time first: `stems: false` with `segment_bars: 8`.
+2. Render stems without segments (one set of numbers per track) to compare levels, over the loudest section rather than the whole song.
+3. Then render only the tracks (`tracks` with `stems: true`) or the bars in question with segments, or use larger segments (`segment_bars: 16` or more).
+
+A stem includes what reaches it through sidechains, so a ducked track's stem is ducked (see "Sidechain ducking").
+
 ## Balance
 
 - **Leave headroom.** Before mastering, keep the mix's peaks below about −3 dBFS and don't chase loudness with the faders; the limiter does that last. If the mix peaks higher, lower every track by the same amount rather than limiting it on the master. Its loudness then lands wherever the material puts it, often −22 to −16 LUFS (dense dance mixes have less distance between peak and loudness than sparse acoustic ones).
@@ -50,7 +58,24 @@ Before you EQ, look at where things are: `view_audio { ..., stems: true, kind: "
 - **High-pass** everything that isn't bass or kick, at about 80 to 150 Hz for chords, pads and leads. Check that the stem's `low_dbfs` drops and its `mid_dbfs` barely moves. The low band reaches up to 250 Hz, so a part whose lowest notes are above the cutoff (chords in the middle register) drops only a fraction of a dB; that's expected, and the `hash` changing shows the filter is working.
 - **Cut before boosting.** Use 2 to 4 dB cuts, and boosts of 3 dB at most unless asked.
 - **Compression:** a ratio of 2:1 to 4:1, a threshold that gives 2 to 6 dB of gain reduction, and makeup gain to match the bypassed loudness. Then compare the stem's `peak_dbfs` minus its `rms_dbfs` (crest factor) with the bypassed render's: it should shrink by a few dB, and the loudness should stay about the same.
-- **Sidechain ducking:** a compressor on the bass with `set_plugin_sidechain` from the kick track.
+- **Sidechain ducking:** a compressor on the bass (or the bus it goes through) with `set_plugin_sidechain` from the kick track. See below.
+
+### Sidechain ducking
+
+1. Add a compressor that has a sidechain input (`sidechain` in `list_plugins`) and connect the kick with `set_plugin_sidechain { plugin, source: <kick> }`.
+2. **Switch the compressor to listen to it.** Connecting the key signal isn't always enough: many compressors have a setting that picks their key. Calf Sidechain Compressor ignores the sidechain until `sc_route` (S/C Route) is 1; at its default of 0 it compresses on its own input, which only turns the bass down. Look through `get_plugin` for a parameter named like "sidechain", "S/C", "key", "external" or "route".
+3. **Prove it ducks from the kick.** Render the bass alone (`tracks: [<bass>]`) three ways over the same bars, and compare `hash` and `lufs`:
+
+   | Render | What you should see |
+   | --- | --- |
+   | Compressor bypassed | The bass's own level |
+   | Sidechain disconnected (`set_plugin_sidechain` with no `source`) | The same hash as bypassed, if the threshold sits above the bass's own level |
+   | Sidechain connected | A different hash and lower loudness: the ducking |
+
+   In one song (Calf Sidechain Compressor, threshold 0.05, ratio 8), the bass measured −14.0 LUFS bypassed and disconnected (same hash), −17.1 LUFS ducked by the kick, and −25.2 LUFS with `sc_route` left at 0, compressing on itself. A disconnected render that already differs from the bypassed one means the compressor is acting on the bass's own signal. Undo the disconnect afterwards.
+4. Set the threshold and ratio for 3 to 6 dB of ducking on the kick's hits, and a release short enough to come back before the next one. `render_range { ..., segment_bars: 1 }` on the bass shows the loudness drop.
+
+**The sidechain keeps feeding while its source is muted or left out by solo.** It's taken after the kick's fader, but before mute and solo, so a muted kick still ducks the bass (a silent "ghost" kick that only drives the ducking is a known trick). It also means `render_range { tracks: [<bass>] }` and the bass's stem include the ducking, which is what you want for measuring the mix. To hear or measure the bass un-ducked, muting the kick won't do: disconnect the sidechain (`set_plugin_sidechain` with no `source`) or bypass the compressor, then undo.
 
 ## Automation
 

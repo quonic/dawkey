@@ -2824,7 +2824,10 @@ impl SetPluginBypass {
 /// Feed a track's (or bus's) signal, after its fader, into a plugin's
 /// sidechain input, e.g. a kick into a compressor on the bass; or stop
 /// (source left out). list_plugins says which plugins have one
-/// (`sidechain`). The source is heard as usual too.
+/// (`sidechain`). The source is heard as usual too, and it feeds the
+/// sidechain even while it's muted or left out by solo (so a muted kick
+/// still ducks the bass, and a render of the bass alone includes the
+/// ducking); leave the source out or bypass the plugin to hear it without.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetPluginSidechain {

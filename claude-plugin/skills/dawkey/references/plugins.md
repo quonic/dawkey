@@ -41,7 +41,7 @@ For LV2 plugins you can load the file yourself. `get_plugin` lists `properties`.
 { "plugin": 4, "key": "http://samplv1.sourceforge.net/lv2#P101_SAMPLE_FILE", "value": "/home/me/samples/piano-c4.wav" }
 ```
 
-That's `set_plugin_property`. It reloads the plugin with the file, and it's not an undo step.
+That's `set_plugin_property`. It reloads the plugin with the file, and it's not an undo step, so it can't go in a `batch`. Dawkey 0.1.5 and earlier return the plugin's whole parameter list with it (samplv1 has 81), which adds up when you load several samples; later versions leave the parameters out (`get_plugin` lists them).
 
 Where files come from: plugins often ship factory samples, kits or impulse responses inside their bundles (an LV2 bundle such as `/usr/lib64/lv2/fabla808.lv2/`, or `/usr/share/<plugin>/`), and those are fair to use. Say which you used. For the user's own sample library, ask which folder or file they want rather than searching their home folder. CLAP and VST3 plugins load files only in their own GUI: `show_plugin_gui` opens it for the user (when `get_plugin` says `has_gui`; only in the window, where plugins run in their own processes).
 
@@ -54,8 +54,14 @@ Where files come from: plugins often ship factory samples, kits or impulse respo
 - **On a bus fed by sends, set the effect fully wet** (mix 100 %, or dry off). A send bus that returns dry signal makes tracks louder instead of adding reverb. As an insert on a track, use the plugin's mix control instead.
 - Parameter names aren't promises. A "Reverb time" of 4 may not mean 4 seconds. Measure what it does (below).
 - `set_plugin_bypass`, `move_plugin` and `remove_plugin` do what they say. Plugin latency is compensated automatically.
-- `set_plugin_sidechain { plugin, source: <track> }` feeds a track into a plugin's sidechain input (when `list_plugins` shows `sidechain`), for ducking a bass under the kick, for example.
+- `set_plugin_sidechain { plugin, source: <track> }` feeds a track into a plugin's sidechain input (when `list_plugins` shows `sidechain`), for ducking a bass under the kick, for example. Many compressors also need their own setting switched to listen to it; see "Sidechain ducking" in mixing.md.
 - `set_plugin_output { plugin, output, bus }` sends a multi-out instrument's other outputs to buses.
+
+## Notes on particular plugins
+
+- **synthv1** has two synth layers, and both play every note. For a one-layer patch, set `OUT2_VOLUME` and `DCA2_VOLUME` to 0. Layer 2's oscillator starts two octaves down (`DCO2_OCTAVE` −2), so a layer 2 left on adds a voice two octaves below, which is easy to miss when a bass or pad sounds muddy. A spectrum (`view_audio { ..., kind: "spectrum" }`) shows it as energy two octaves below the notes you wrote.
+- **samplv1** plays one sample, set with `set_plugin_property` (key `http://samplv1.sourceforge.net/lv2#P101_SAMPLE_FILE`), at its own pitch at note 60 (`GEN1_SAMPLE`). See composing.md for drums made this way.
+- **Calf Sidechain Compressor** ignores its sidechain input until `sc_route` (S/C Route) is 1. See "Sidechain ducking" in mixing.md.
 
 ## Proving a plugin works
 
