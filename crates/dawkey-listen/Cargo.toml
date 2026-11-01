@@ -1,0 +1,25 @@
+[package]
+name = "dawkey-listen"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Dawkey's descriptions of audio for agents that can't hear it: spectra, pitch, rhythm, reports and pictures"
+repository.workspace = true
+license.workspace = true
+
+[lib]
+name = "dawkey_listen"
+
+[dependencies]
+dawkey-text.workspace = true
+dawkey-ui.workspace = true
+ebur128.workspace = true
+png.workspace = true
+realfft.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

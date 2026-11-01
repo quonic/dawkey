@@ -119,6 +119,7 @@ Every mutation of the project is a serializable `Command` (serde plus `schemars`
 - **tracks/clips:** add_track, remove_track, import_audio, add_clip, move_clip, split, write_midi_notes
 - **mixer/routing:** set_gain, pan, mute, solo, sends, insert_plugin, set_param, list_pw_ports, connect
 - **render:** `render_range`. Runs offline and returns peak, RMS, LUFS, a content hash and coarse spectrum bins. It can also return the WAV as a resource.
+- **listen:** `describe_audio` and `view_audio` (`dawkey-listen`). A model can't hear, so these render a range (or read a file) and describe it: notes from pitch tracking, chords and key from chroma, onsets against the beat grid, the octave spectrum and its peaks, stereo, dynamics and true peak, and observations in words; or draw it as a spectrogram, a spectrum with a curve per stem, or a chromagram, returned as an image.
 - **engine:** dsp_load, xruns, latency, `advance_clock` (virtual audio backend only)
 - **ui:**
   - `ui_tree`

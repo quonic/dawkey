@@ -14,6 +14,7 @@
 
 mod batch;
 pub mod http;
+mod listen;
 mod state;
 mod times;
 mod tools;
@@ -107,6 +108,13 @@ of the project offline and reports levels, loudness and band levels, so you
 can check a mix without listening: `tracks` hears only some tracks (as
 soloing would), `stems: true` renders each track on its own, and
 segment_length_s / segment_bars / segments analyze it over time.
+describe_audio listens for you: the key and the chord of each bar, the
+notes a line plays (pitch, bar, cents off), onsets against the beat grid
+(in ms), the octave spectrum and its peaks, stereo width and phase,
+dynamics and true peak, and observations in plain words; view_audio
+draws it as an image (a spectrogram with bars numbered, a spectrum with a
+curve per stem, or a chromagram with chords). Both take a range, `tracks`
+or `stems: true`, or an audio file (`path`).
 export_audio writes the mix (the whole song by default) to a WAV, FLAC,
 Ogg Vorbis (`quality`) or Opus (`bitrate_kbps`) file (with `tags`), or
 stems with `stems: true`, or a seamless loop with `loop: true` (the tail
@@ -225,20 +233,9 @@ impl DawkeyMcp {
         // Positions in beats or bars become seconds, through the tempo map
         // as it is now (import_midi's once it knows whether it takes the
         // file's).
-        let stems = self
-            .tools
-            .iter()
-            .find(|t| t.name == name)
-            .map(|t| times::position_stems(&Value::Object((*t.input_schema).clone())))
-            .unwrap_or_default();
-        if name != IMPORT_MIDI && times::has_beats(&args, &stems) {
-            let stems = stems.clone();
-            args = tool_try!(
-                run(studio, move |s| {
-                    times::resolve(s.session().project(), &mut args, &stems).map(|()| args)
-                })
-                .await
-            );
+        let stems = self.position_stems(name);
+        if name != IMPORT_MIDI {
+            args = tool_try!(self.in_seconds(name, args).await);
         }
         let result = match name {
             GET_STATE => {
@@ -537,6 +534,7 @@ impl DawkeyMcp {
             }
             RENDER_RANGE => self.render_range(try_args!(parse(args))).await,
             EXPORT_AUDIO => self.export_audio(try_args!(parse(args))).await,
+            DESCRIBE_AUDIO => self.describe_audio(try_args!(parse(args))).await,
             UI_TREE => {
                 let NoArgs {} = try_args!(parse(args));
                 run_app(studio, |a| {
@@ -835,6 +833,29 @@ impl DawkeyMcp {
             }
         };
         Ok(result)
+    }
+
+    /// The positions tool `name` takes in seconds (`start` for `start_s`),
+    /// which it also takes in beats and bars.
+    fn position_stems(&self, name: &str) -> Vec<String> {
+        self.tools
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| times::position_stems(&Value::Object((*t.input_schema).clone())))
+            .unwrap_or_default()
+    }
+
+    /// `args` with positions in beats or bars turned into seconds, through
+    /// the tempo map as it is now.
+    async fn in_seconds(&self, name: &str, mut args: Value) -> Result<Value, String> {
+        let stems = self.position_stems(name);
+        if !times::has_beats(&args, &stems) {
+            return Ok(args);
+        }
+        run(&self.app, move |s| {
+            times::resolve(s.session().project(), &mut args, &stems).map(|()| args)
+        })
+        .await
     }
 
     /// Checks a batch's operations are commands, and finds their specs.
@@ -1460,6 +1481,9 @@ impl ServerHandler for DawkeyMcp {
         tracing::debug!(tool = %request.name, %args, "tool call");
         if request.name == UI_SCREENSHOT {
             return Ok(self.screenshot(args).await.into());
+        }
+        if request.name == VIEW_AUDIO {
+            return Ok(self.view_audio(args).await.into());
         }
         let result = match self.dispatch(&request.name, args).await? {
             Ok(value) => {

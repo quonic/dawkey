@@ -25,6 +25,10 @@ use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioC
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde_json::Value;
 
+/// What [`Harness::call_raw`] returns: content blocks (text, images) and
+/// whether the tool failed.
+pub use rmcp::model::CallToolResult as ToolResult;
+
 /// The test client: remembers the resource-updated notifications it gets.
 #[derive(Debug, Clone, Default)]
 struct Client {
