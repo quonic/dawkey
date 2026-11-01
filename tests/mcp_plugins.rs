@@ -1798,6 +1798,9 @@ async fn plugin_properties() {
         }])
     );
     assert!(set["revision"].is_u64());
+    // Without the parameter list, which get_plugin has.
+    assert!(set.get("params").is_none(), "{set}");
+    assert!(set["param_count"].is_u64(), "{set}");
     let louder = peak(&dawkey, 0.0, 0.5).await.unwrap();
     // 0.5 + 0.25 at center pan.
     assert!(

@@ -275,7 +275,9 @@ pub(crate) struct GetPlugin {
 /// saved state is rewritten with the value and the plugin is loaded again
 /// from it, so it starts over with the new value (its other state stays).
 /// Saved with the project; not an undo step (plugin state isn't). Only LV2
-/// plugins have properties a host can see.
+/// plugins have properties a host can see. Returns the slot as get_plugin
+/// does, without its parameters (`param_count` says how many; get_plugin
+/// lists them).
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetPluginProperty {

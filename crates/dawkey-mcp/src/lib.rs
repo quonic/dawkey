@@ -769,9 +769,15 @@ impl DawkeyMcp {
                 } = try_args!(parse(args));
                 run(studio, move |s| {
                     s.set_plugin_property(plugin, &key, kind.as_deref(), &value)?;
-                    s.plugin_details(plugin)
+                    // Without the parameters, which a property doesn't
+                    // change (get_plugin lists them): loading a few samples
+                    // shouldn't cost a full parameter list each.
+                    s.plugin_details_window(plugin, 0, 0)
                         .map(|d| {
                             let mut result = to_json(&d);
+                            if let Some(fields) = result.as_object_mut() {
+                                fields.remove("params");
+                            }
                             result["revision"] = json!(revision(s));
                             result["instance"] = json!(*INSTANCE_ID);
                             result
