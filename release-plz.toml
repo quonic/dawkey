@@ -24,6 +24,7 @@ changelog_include = [
   "dawkey-core",
   "dawkey-dsp",
   "dawkey-engine",
+  "dawkey-listen",
   "dawkey-mcp",
   "dawkey-media",
   "dawkey-plugins",

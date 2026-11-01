@@ -135,4 +135,6 @@ Contrast is what makes sections distinct: change the density (which tracks play)
 
 - `render_range { start_bar, end_bar, stems: true, segment_bars: 4 }` shows each track's level in each 4-bar segment. A part that's `silent` where it should play, or loud where it should rest, is placed wrong.
 - `get_state { tracks: [id] }` lists the notes with `start_beats` and `pitch`. Re-read them when an edit is involved.
+- `describe_audio { start_bar, end_bar, tracks: [<bass or lead>] }` lists the notes the track actually plays (after its instrument and effects), with their bars and how many cents off they are: check they're the notes you wrote, in the octave you meant. For chords, `describe_audio { ..., tracks: [<chords>] }` gives each bar's chord in `timeline`, and `view_audio { ..., kind: "chroma" }` draws the harmony with the chords named.
+- `describe_audio { ..., tracks: [<drums>], onsets: true }` lists every hit with its bar and its offset from the 16th-note grid; `rhythm.timing` sums it up.
 - `ui_screenshot` shows the arrangement as the user sees it, which is a good final check of the layout.

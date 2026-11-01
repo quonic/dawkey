@@ -356,6 +356,53 @@ impl Maps {
     }
 }
 
+impl dawkey_listen::Timing for Maps {
+    fn beat_at(&self, seconds: f64) -> f64 {
+        self.tempo.beat_at_seconds(seconds)
+    }
+
+    fn seconds_at(&self, beat: f64) -> f64 {
+        self.tempo.seconds_at(beat)
+    }
+
+    fn bar_of_beat(&self, beat: f64) -> f64 {
+        bar_of_beat(&self.meter, beat)
+    }
+
+    fn bar_start(&self, bar: u32) -> f64 {
+        self.meter.bar_start(bar.saturating_sub(1))
+    }
+}
+
+/// The most segments a description's timeline gets unless asked for more.
+const TIMELINE_SEGMENTS: f64 = 16.0;
+
+impl Maps {
+    /// The bars a default timeline's segments span over `[start_s,
+    /// end_s)`: 1, 2, 4, ... so there are at most 16.
+    pub(crate) fn timeline_bars(&self, start_s: f64, end_s: f64) -> u32 {
+        let first = self
+            .meter
+            .bar_at(self.tempo.beat_at_seconds(start_s) + 1e-9);
+        let last = self.meter.bar_at(self.tempo.beat_at_seconds(end_s) - 1e-9);
+        let bars = f64::from(last.saturating_sub(first) + 1);
+        let mut every = 1u32;
+        while bars / f64::from(every) > TIMELINE_SEGMENTS && every < 1 << 16 {
+            every *= 2;
+        }
+        every
+    }
+}
+
+/// A default timeline's segment length for audio off the grid: a round
+/// number of seconds, so there are at most 16.
+pub(crate) fn timeline_seconds(duration_s: f64) -> f64 {
+    [0.5, 1.0, 2.0, 4.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0]
+        .into_iter()
+        .find(|s| duration_s / s <= TIMELINE_SEGMENTS)
+        .unwrap_or(60.0)
+}
+
 /// Removes `key` from `args`, checking it's a number and that its `*_s`
 /// isn't given as well. Returns the stem and the value (`None` for null).
 fn take_number(args: &mut Map<String, Value>, key: &str) -> Result<(String, Option<f64>), String> {

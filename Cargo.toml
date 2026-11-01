@@ -71,6 +71,7 @@ dawkey-backend-pipewire = { package = "dawkey-backend-pipewire", path = "crates/
 dawkey-core = { package = "dawkey-core", path = "crates/dawkey-core", version = "0.4.1" }
 dawkey-dsp = { package = "dawkey-dsp", path = "crates/dawkey-dsp", version = "0.1.4" }
 dawkey-engine = { package = "dawkey-engine", path = "crates/dawkey-engine", version = "0.1.4" }
+dawkey-listen = { package = "dawkey-listen", path = "crates/dawkey-listen", version = "0.1.0" }
 dawkey-mcp = { package = "dawkey-mcp", path = "crates/dawkey-mcp", version = "0.1.5" }
 dawkey-media = { package = "dawkey-media", path = "crates/dawkey-media", version = "0.3.0" }
 dawkey-plugins = { package = "dawkey-plugins", path = "crates/dawkey-plugins", version = "0.2.2" }
@@ -112,6 +113,7 @@ pipewire = "0.10"
 pipewire-sys = "0.10"
 png = "0.18"
 pollster = "1"
+realfft = "3.5"
 raw-window-handle = "0.6"
 reqwest = { version = "0.13", default-features = false }
 rmcp = { version = "3.5", default-features = false }
@@ -138,6 +140,21 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wgpu = "30"
 x11rb = "0.14"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# Debug builds (`cargo run`, the dev MCP servers, tests) analyze audio for
+# render_range, describe_audio and view_audio; unoptimized FFTs and
+# loudness meters make that slow.
+[profile.dev.package.rustfft]
+opt-level = 3
+
+[profile.dev.package.realfft]
+opt-level = 3
+
+[profile.dev.package.dawkey-listen]
+opt-level = 2
+
+[profile.dev.package.ebur128]
+opt-level = 3
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

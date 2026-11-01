@@ -112,14 +112,16 @@ There are 84 tools. Each one's description says exactly what it takes and return
 | MIDI              | `add_midi_clip`, `add_midi_notes`, `edit_midi_notes`, `remove_midi_notes`, `quantize_midi_notes`, `set_midi_controls`, `set_synth`, `set_track_midi_input`, `set_track_midi_output`                                    |
 | Plugins           | `list_plugins`, `rescan_plugins`, `add_plugin`, `remove_plugin`, `move_plugin`, `get_plugin`, `set_plugin_param`, `set_plugin_bypass`, `set_plugin_sidechain`, `set_plugin_output`, `reload_plugin`, `show_plugin_gui` |
 | Automation        | `set_automation`, `add_automation_point`, `remove_automation_points`, `write_automation`                                                                                                                               |
-| Engine and output | `get_engine_status`, `get_meters`, `advance_clock`, `render_range`, `export_audio`                                                                                                                                     |
+| Engine and output | `get_engine_status`, `get_meters`, `advance_clock`, `render_range`, `describe_audio`, `view_audio`, `export_audio`                                                                                                     |
 | User interface    | `ui_tree`, `ui_screenshot`, `ui_click`, `ui_drag`, `ui_scroll`, `ui_hover`, `ui_key`, `ui_type`, `ui_drop_files`, `ui_resize`                                                                                          |
 
 ### Listening without speakers
 
-Two tools let a client check what the project sounds like:
+These tools let a client check what the project sounds like:
 
 - `render_range` renders part of the project offline and returns peak and RMS levels per channel, integrated loudness (LUFS) and a hash of the audio. It doesn't depend on the transport.
+- `describe_audio` renders part of the project (the mix, some tracks, or each track as a stem), or reads an audio file, and describes it the way an engineer would hear it: the notes a single line plays (pitch tracking, with bars and cents), the chord of each bar and the key, onsets and how far they sit from the 16th-note grid, the octave spectrum with its tilt and prominent peaks, stereo correlation and width, true peak, loudness range and crest factor, and `observations`, sentences about what stands out.
+- `view_audio` draws the same as a PNG image for clients whose models read images: a spectrogram (a panel per stem, bars numbered), the average spectrum (a curve per stem) or a chromagram (with each bar's chord). A text block with it explains the axes and colors.
 - `advance_clock` (virtual audio backend only) runs the engine for a stretch of time, as if a sound card had played it, and returns the same analysis of what came out. It can also feed audio from a WAV file into the inputs and MIDI into the MIDI input, so recording can be tested without a microphone or keyboard.
 
 ### The window

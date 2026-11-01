@@ -1,12 +1,12 @@
 ---
 name: dawkey
-description: Make, edit, mix and export music in Dawkey, the Linux DAW, through its MCP tools (get_state, add_midi_clip, add_plugin, render_range, export_audio, ...). Use whenever the user mentions Dawkey or a .dawkey project, or asks to write or arrange music (a beat, chords, a bassline, a melody, a song), add instruments or effects, mix, master, record, or export audio while Dawkey's tools are connected.
+description: Make, edit, mix and export music in Dawkey, the Linux DAW, through its MCP tools (get_state, add_midi_clip, add_plugin, render_range, describe_audio, view_audio, export_audio, ...). Use whenever the user mentions Dawkey or a .dawkey project, or asks to write or arrange music (a beat, chords, a bassline, a melody, a song), add instruments or effects, mix, master, record, or export audio while Dawkey's tools are connected.
 license: AGPL-3.0-or-later
 ---
 
 # Working in Dawkey
 
-Dawkey is a DAW. Its MCP tools do everything the window does: tracks, clips, MIDI, plugins, mixing, automation, recording, rendering and exporting. You can't hear, but you can measure: `render_range` renders any part of the project offline and reports levels, loudness and a hash. Most of doing this job well is checking every change that way instead of assuming it worked.
+Dawkey is a DAW. Its MCP tools do everything the window does: tracks, clips, MIDI, plugins, mixing, automation, recording, rendering and exporting. You can't hear, but you can measure and look: `render_range` renders any part of the project offline and reports levels, loudness and a hash; `describe_audio` tells you what it sounds like (notes, chords, key, timing, tone, stereo, problems); `view_audio` shows it as an image. Most of doing this job well is checking every change that way instead of assuming it worked.
 
 Tool names below are bare (`get_state`). In your tool list they carry the server's prefix, such as `mcp__dawkey__get_state` or `mcp__plugin_dawkey_dawkey__get_state`.
 
@@ -73,7 +73,31 @@ render_range { start_bar: 1, end_bar: 7, tracks: [<source track>], segments: [{ 
 
 The segment should be quiet but not silent. If it's silent, the reverb or delay adds nothing: it's bypassed, fully dry, needs a file, or the send is off.
 
-When taste matters (a melody, a mix balance), measurements aren't enough. Say what you measured, then offer the user a way to listen: `play` in their window, or `render_range { ..., output_path: "/tmp/preview.wav" }` for a file.
+### Hearing what it sounds like
+
+`render_range` says how loud; `describe_audio` says what you'd hear, and `view_audio` lets you see it. They take the same range, `tracks`, `stems` and (for a reference track or a sample) `path` to an audio file:
+
+```text
+describe_audio { start_bar: 1, end_bar: 9, tracks: [<bass>] }   # the notes it plays, in tune?, on the grid?
+describe_audio { start_bar: 1, end_bar: 9, stems: true }        # every part: its register, chords, timing, tone
+view_audio { start_bar: 1, end_bar: 9, stems: true }            # spectrograms of the mix and each stem
+view_audio { end_bar: 9, stems: true, kind: "spectrum", min_hz: 20, max_hz: 500 }   # who owns the low end
+view_audio { end_bar: 9, kind: "chroma" }                       # the harmony, with each bar's chord
+```
+
+What describe_audio reports (read `observations` first; they're the numbers that stand out, in words):
+
+- `notes`: the notes of a single line (bass, lead, voice) from pitch tracking, with `bar`, `length_beats` and `cents` off pitch. Compare them with the notes you wrote: a wrong octave, a missing note or a note 30 cents flat shows up here. `voiced` near 1 means one line; for chords or a mix it's low and nothing is listed, so describe the stems.
+- `timeline`: per bar by default (`segment_bars` for more): level, `centroid_hz` (brightness), the `chord` heard (when one fits), how many onsets, and the notes starting. An empty bar where a part should play, or a chord you didn't write, is a mistake to fix.
+- `tonality`: the key and the `pitch_classes` heard. A pitch class you didn't mean (a G# in A minor) is a wrong note somewhere.
+- `rhythm`: onsets, the pulse heard against the project's tempo, and `timing` against the 16th-note grid (`median_offset_ms`: positive is late). A part consistently 10 to 30 ms late is usually a slow attack or a plugin's latency.
+- `spectrum`: octave band levels and `tilt_db_per_octave` (a mix usually falls about 3 to 5 dB an octave; flatter is brighter), and `peaks` that stand out (a resonance, or a note held through the range).
+- `stereo`: `correlation` below 0 means parts cancel in mono; `side_to_mid_db` is the width.
+- `levels`: true peak, loudness range and crest factor on top of render_range's numbers.
+
+Pictures: a spectrogram shows where each part plays (time) and in which register (frequency up, log scale; brighter is louder; bars numbered along the bottom), so you can see a part start in the wrong bar, two parts piling up in the same frequencies, a filter sweep, or a reverb tail. The text that comes with an image explains its axes and colors.
+
+The analysis is good at facts (pitches, timing, levels, which frequencies), not taste. When taste matters (a melody, a mix balance), say what you measured and saw, then offer the user a way to listen: `play` in their window, or `render_range { ..., output_path: "/tmp/preview.wav" }` for a file.
 
 ## 5. Which reference to read
 

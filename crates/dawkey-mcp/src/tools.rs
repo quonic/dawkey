@@ -29,6 +29,8 @@ pub(crate) const GET_METERS: &str = "get_meters";
 pub(crate) const ADVANCE_CLOCK: &str = "advance_clock";
 pub(crate) const RENDER_RANGE: &str = "render_range";
 pub(crate) const EXPORT_AUDIO: &str = "export_audio";
+pub(crate) const DESCRIBE_AUDIO: &str = "describe_audio";
+pub(crate) const VIEW_AUDIO: &str = "view_audio";
 pub(crate) const UI_TREE: &str = "ui_tree";
 pub(crate) const UI_CLICK: &str = "ui_click";
 pub(crate) const UI_SCREENSHOT: &str = "ui_screenshot";
@@ -559,6 +561,162 @@ pub(crate) struct SegmentRange {
     pub(crate) end_s: f64,
 }
 
+/// Listen to part of the project (or an audio file) and describe how it
+/// sounds, since you can't hear it: rendered offline like render_range,
+/// then measured as a mix engineer would listen. `levels` (peak, true peak,
+/// RMS, LUFS, loudness range, crest factor, clipped samples, where the
+/// sound starts and ends), `stereo` (correlation, width, balance),
+/// `spectrum` (octave band levels, tilt, brightness as centroid and
+/// rolloff, flatness, and the narrow `peaks` that stand out, with their
+/// notes), `tonality` (the key and pitch classes heard), `rhythm` (onsets,
+/// the tempo heard against the project's, and how tightly onsets sit on the
+/// 16th-note grid, in ms), `notes` (the notes of a single line, from pitch
+/// tracking: pitch, bar, length in beats, cents off; for a bass, lead or
+/// voice, not chords), a `timeline` (per bar by default: level,
+/// brightness, the chord heard, onsets, notes starting) and
+/// `observations`, sentences about what stands out. Describe stems
+/// (`stems: true`) to hear each part; `tracks` hears only some. Pair with
+/// view_audio to see it.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DescribeAudio {
+    /// Start in seconds (in a file: from its start). Default 0.
+    #[serde(default)]
+    pub(crate) start_s: Option<f64>,
+    /// End in seconds (in a file: from its start). Default: where the last
+    /// clip ends (a file's end). At most 600 s after the start.
+    #[serde(default)]
+    pub(crate) end_s: Option<f64>,
+    /// Only these tracks (and the buses and master they go through), as
+    /// if they were soloed. With `stems`, the tracks to take one by one.
+    #[serde(default)]
+    pub(crate) tracks: Option<Vec<TrackId>>,
+    /// Each track on its own, soloed in turn (every audio and MIDI track
+    /// that isn't muted, or `tracks`), as `stems` in the result.
+    #[serde(default)]
+    pub(crate) stems: bool,
+    /// An audio file to listen to instead of the project (a reference
+    /// track, a sample before importing it). Its times aren't on the
+    /// project's grid.
+    #[serde(default)]
+    pub(crate) path: Option<PathBuf>,
+    /// Analyze in segments this long (seconds) for the timeline.
+    #[serde(default)]
+    pub(crate) segment_length_s: Option<f64>,
+    /// Timeline segments of this many bars. By default 1, or more so
+    /// there are at most 16 segments (a file: a few seconds each).
+    #[serde(default)]
+    pub(crate) segment_bars: Option<u32>,
+    /// Describe these parts of the range in the timeline (absolute
+    /// seconds).
+    #[serde(default)]
+    pub(crate) segments: Option<Vec<SegmentRange>>,
+    /// Track the pitch and list the notes heard. Default true.
+    #[serde(default = "yes")]
+    pub(crate) notes: bool,
+    /// List every onset (its time, bar and offset from the 16th-note
+    /// grid) under `rhythm.list`. Default false: they're counted, and their
+    /// timing summarized.
+    #[serde(default)]
+    pub(crate) onsets: bool,
+}
+
+/// What describe_audio and view_audio listen to: part of the project, or a
+/// file.
+#[derive(Debug, Clone)]
+pub(crate) struct AudioSource {
+    pub(crate) start_s: Option<f64>,
+    pub(crate) end_s: Option<f64>,
+    pub(crate) tracks: Option<Vec<TrackId>>,
+    pub(crate) stems: bool,
+    pub(crate) path: Option<PathBuf>,
+}
+
+macro_rules! audio_source {
+    ($($t:ty),*) => {$(
+        impl $t {
+            pub(crate) fn source(&self) -> AudioSource {
+                AudioSource {
+                    start_s: self.start_s,
+                    end_s: self.end_s,
+                    tracks: self.tracks.clone(),
+                    stems: self.stems,
+                    path: self.path.clone(),
+                }
+            }
+        }
+    )*};
+}
+audio_source!(DescribeAudio, ViewAudio);
+
+/// Draw part of the project (or an audio file) as a picture, to see what
+/// you can't hear. `kind`: `spectrogram` (default: frequency against time,
+/// level as color, with a level strip and the bars numbered; see where
+/// parts play, their register, transients, masking, a filter sweep),
+/// `spectrum` (the average spectrum, one curve per stem on one plot: EQ
+/// balance, which parts crowd the same frequencies), or `chroma` (pitch
+/// classes against time with the chord each bar sounds like: harmony and
+/// wrong notes). `stems: true` draws each track (a panel or a curve each,
+/// after the mix, one color scale for all so they compare), `tracks`
+/// only some. `min_hz`/`max_hz` zoom in on a register (e.g. 20 to 300 Hz
+/// for kick and bass). Returns a PNG image and a caption that explains its
+/// axes and colors.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ViewAudio {
+    /// Start in seconds (in a file: from its start). Default 0.
+    #[serde(default)]
+    pub(crate) start_s: Option<f64>,
+    /// End in seconds (in a file: from its start). Default: where the last
+    /// clip ends (a file's end). At most 600 s after the start.
+    #[serde(default)]
+    pub(crate) end_s: Option<f64>,
+    /// Only these tracks (and the buses and master they go through), as
+    /// if they were soloed. With `stems`, the tracks to take one by one.
+    #[serde(default)]
+    pub(crate) tracks: Option<Vec<TrackId>>,
+    /// Each track on its own, soloed in turn (every audio and MIDI track
+    /// that isn't muted, or `tracks`), as `stems` in the result.
+    #[serde(default)]
+    pub(crate) stems: bool,
+    /// An audio file to listen to instead of the project (a reference
+    /// track, a sample before importing it). Its times aren't on the
+    /// project's grid.
+    #[serde(default)]
+    pub(crate) path: Option<PathBuf>,
+    #[serde(default)]
+    pub(crate) kind: Option<ViewKind>,
+    /// With `stems`, draw the mix first too. Default true.
+    #[serde(default = "yes")]
+    pub(crate) with_mix: bool,
+    /// The lowest frequency shown, in Hz. Default 20.
+    #[serde(default)]
+    pub(crate) min_hz: Option<f64>,
+    /// The highest frequency shown, in Hz. Default 20000 (or half the
+    /// sample rate).
+    #[serde(default)]
+    pub(crate) max_hz: Option<f64>,
+    /// The picture's width in pixels, 400 to 1600. Default 1200.
+    #[serde(default)]
+    pub(crate) width: Option<u32>,
+    /// The height of each panel's plot (or the spectrum's) in pixels, 60
+    /// to 800.
+    #[serde(default)]
+    pub(crate) height: Option<u32>,
+    /// How many dB below the loudest are shown, 20 to 140. Default 90 (the
+    /// spectrum 80).
+    #[serde(default)]
+    pub(crate) range_db: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ViewKind {
+    Spectrogram,
+    Spectrum,
+    Chroma,
+}
+
 /// Export the mix, or part of it, to an audio file, rendered offline: WAV
 /// (16 or 24-bit, or 32-bit float; RF64 past 4 GiB), FLAC (16 or 24-bit, up
 /// to 96 kHz), Ogg Vorbis
@@ -889,6 +1047,8 @@ pub(crate) fn build_tools() -> Vec<Tool> {
         tool::<AdvanceClock>(ADVANCE_CLOCK, "", mutating.clone()),
         tool::<RenderRange>(RENDER_RANGE, "", mutating.clone().idempotent(true)),
         tool::<ExportAudio>(EXPORT_AUDIO, "", mutating.clone().idempotent(true)),
+        tool::<DescribeAudio>(DESCRIBE_AUDIO, "", read_only.clone()),
+        tool::<ViewAudio>(VIEW_AUDIO, "", read_only.clone()),
         tool::<NoArgs>(
             UI_TREE,
             "Get the window state (size, scale, maximized, client-side decorations) and its \

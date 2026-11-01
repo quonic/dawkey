@@ -16,6 +16,7 @@ base64.workspace = true
 bytes.workspace = true
 dawkey-app.workspace = true
 dawkey-core.workspace = true
+dawkey-listen.workspace = true
 dawkey-media.workspace = true
 dawkey-studio.workspace = true
 dawkey-ui.workspace = true

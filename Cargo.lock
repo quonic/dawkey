@@ -782,6 +782,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dawkey-listen"
+version = "0.1.0"
+dependencies = [
+ "dawkey-text",
+ "dawkey-ui",
+ "ebur128",
+ "png",
+ "realfft",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dawkey-mcp"
 version = "0.1.5"
 dependencies = [
@@ -790,6 +803,7 @@ dependencies = [
  "bytes",
  "dawkey-app",
  "dawkey-core",
+ "dawkey-listen",
  "dawkey-media",
  "dawkey-studio",
  "dawkey-ui",

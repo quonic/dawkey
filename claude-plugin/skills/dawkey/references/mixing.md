@@ -45,7 +45,7 @@ Then check what it adds with the bus-mute comparison in SKILL.md. A fully wet re
 
 ## EQ and compression
 
-Your rendered numbers can't hear tone. Use them to check that a move did what you meant (the band level changed, the peaks came down), and keep moves modest:
+Before you EQ, look at where things are: `view_audio { ..., stems: true, kind: "spectrum" }` puts every stem's spectrum on one plot (add `min_hz: 20, max_hz: 500` for the low end), so you can see which parts pile up in the same range and where each one's energy is. `describe_audio` gives each stem's octave levels, `tilt_db_per_octave` and the narrow `peaks` that stand out (a resonance to cut, or a held note). Check that a move did what you meant (the band level changed, the peak came down, the hash changed), and keep moves modest:
 
 - **High-pass** everything that isn't bass or kick, at about 80 to 150 Hz for chords, pads and leads. Check that the stem's `low_dbfs` drops and its `mid_dbfs` barely moves. The low band reaches up to 250 Hz, so a part whose lowest notes are above the cutoff (chords in the middle register) drops only a fraction of a dB; that's expected, and the `hash` changing shows the filter is working.
 - **Cut before boosting.** Use 2 to 4 dB cuts, and boosts of 3 dB at most unless asked.
@@ -91,7 +91,7 @@ Loudness targets (integrated, whole song):
 | Club, DJ use, SoundCloud | −9 to −6 | −1 dBTP |
 | Unknown | ask; −14 is the usual default | −1 dBTP |
 
-`peak_dbfs` is a sample peak, and the true peak can be up to about 0.5 dB higher (more after lossy encoding). For Ogg or Opus without a true-peak limiter, keep sample peaks at −1.5 dBFS or lower.
+`peak_dbfs` is a sample peak, and the true peak can be up to about 0.5 dB higher (more after lossy encoding); `describe_audio` measures it as `levels.true_peak_dbtp`, with the loudness range and the loudest 3 seconds. For Ogg or Opus without a true-peak limiter, keep sample peaks at −1.5 dBFS or lower.
 
 A render of an excerpt with silence or a tail reads quieter than the song does. Measure loudness over the whole song.
 
