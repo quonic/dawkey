@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/quonic/dawkey/compare/v0.1.5...v0.1.6) - 2026-11-01
+
+### Added
+
+- *(mcp)* leave the parameter list out of set_plugin_property's result
+- *(mcp)* add describe_audio and view_audio so agents can hear the project
+
+### Other
+
+- *(skill)* add samplv1 drums, synthv1 layers, sidechain checks and long-song renders
+
 ## [0.1.5](https://github.com/quonic/dawkey/compare/v0.1.4...v0.1.5) - 2026-10-26
 
 ### Added

@@ -691,7 +691,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "dawkey"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "assert_no_alloc",
@@ -718,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "dawkey-app"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "dawkey-core",
  "dawkey-media",
@@ -736,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "dawkey-backend-pipewire"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "dawkey-engine",
  "libspa-sys",
@@ -750,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "dawkey-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64",
  "schemars",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "dawkey-dsp"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "assert_no_alloc",
  "dawkey-core",
@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "dawkey-engine"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "assert_no_alloc",
  "dawkey-core",
@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "dawkey-mcp"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "base64",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "dawkey-plugins"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "assert_no_alloc",
  "clack-extensions",
@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "dawkey-studio"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "dawkey-backend-pipewire",
  "dawkey-core",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "dawkey-wayland"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "ashpd",
  "dawkey-app",
