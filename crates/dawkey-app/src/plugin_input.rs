@@ -390,7 +390,11 @@ impl App {
 
     /// Sends a plugin's other output to the next bus that can take it, or
     /// nowhere after the last.
-    fn cycle_plugin_output(&mut self, plugin: PluginId, output: u32) -> Result<(), String> {
+    pub(crate) fn cycle_plugin_output(
+        &mut self,
+        plugin: PluginId,
+        output: u32,
+    ) -> Result<(), String> {
         let project = self.studio.session().project();
         let (track, slot) = project.plugin(plugin).ok_or("no such plugin")?;
         let mut choices = vec![None];

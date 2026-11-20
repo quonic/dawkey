@@ -4024,6 +4024,60 @@ fn the_drum_kits_rack_unit_pages_its_params_instead_of_overflowing() {
 }
 
 #[test]
+fn the_pad_patch_button_cycles_master_then_a_bus_then_back() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .clip(ClipId(clip))
+        .unwrap()
+        .0
+        .plugins[0]
+        .id;
+    let bus = app
+        .studio
+        .execute(
+            dawkey_core::AddTrack {
+                name: Some("Kick Bus".into()),
+                kind: dawkey_core::TrackKind::Bus,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+
+    assert!(
+        app.studio
+            .plugin_details(plugin)
+            .unwrap()
+            .outputs
+            .iter()
+            .all(|o| o.bus.is_none()),
+        "every pad defaults to Master"
+    );
+
+    click(&mut app, "step_seq/pad/0/output").unwrap();
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().outputs[0].bus,
+        Some(TrackId(bus))
+    );
+
+    click(&mut app, "step_seq/pad/0/output").unwrap();
+    assert!(
+        app.studio.plugin_details(plugin).unwrap().outputs[0]
+            .bus
+            .is_none(),
+        "cycling past the only bus returns to Master"
+    );
+}
+
+#[test]
 fn saving_and_loading_a_drum_pattern_in_the_step_sequencer() {
     let mut app = app();
     let (_, clip) = add_drum_clip(&mut app);

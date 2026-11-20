@@ -201,3 +201,112 @@ async fn set_drum_sample_kit_refuses_a_non_drum_plugin() {
         .unwrap();
     assert!(err.contains("drum"), "{err}");
 }
+
+#[tokio::test]
+async fn patching_one_pad_leaves_a_lower_indexed_unpatched_pad_on_master() {
+    // A regression test for the "gap": routing only the Snare (output 1)
+    // still allocates an aux buffer for the Kick (output 0) to size the
+    // array, which must NOT make the Kick's audio go there too (silently
+    // dropped) instead of staying on the track's own output to Master.
+    let dawkey = start().await;
+    let added = dawkey.call("add_drum_track", json!({})).await.unwrap();
+    let track = added["track"].as_u64().unwrap();
+    let clip = added["clip"].as_u64().unwrap();
+    let plugin = dawkey
+        .call("get_state", json!({ "summary": true }))
+        .await
+        .unwrap()["project"]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"].as_u64() == Some(track))
+        .unwrap()["plugins"][0]["id"]
+        .as_u64()
+        .unwrap();
+
+    // Create the bus *before* the reference render, so the graph's
+    // topology (and so its compensation delays) stay identical across
+    // every render in this test — only the output routing changes. A
+    // render taken before vs. after adding an unrelated track isn't
+    // guaranteed bit-identical even for unrelated audio, since adding a
+    // track can shift cross-track latency compensation.
+    let bus = dawkey
+        .call("add_track", json!({ "kind": "bus", "name": "Snare Bus" }))
+        .await
+        .unwrap()["track"]
+        .as_u64()
+        .unwrap();
+
+    // The Kick alone, rendered on the track directly: the reference tone.
+    dawkey
+        .call(
+            "add_midi_notes",
+            json!({
+                "clip": clip,
+                "notes": [{ "pitch": 36, "start_beats": 0.0, "length_beats": 0.25 }],
+            }),
+        )
+        .await
+        .unwrap();
+    let kick_alone = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0.0, "end_s": 1.0, "tracks": [track] }),
+        )
+        .await
+        .unwrap()["analysis"]
+        .clone();
+    assert!(!kick_alone["silent"].as_bool().unwrap());
+
+    // Add the Snare and patch only it (output 1) to its own bus.
+    dawkey
+        .call(
+            "add_midi_notes",
+            json!({
+                "clip": clip,
+                "notes": [{ "pitch": 38, "start_beats": 0.0, "length_beats": 0.25 }],
+            }),
+        )
+        .await
+        .unwrap();
+    dawkey
+        .call(
+            "set_plugin_output",
+            json!({ "plugin": plugin, "output": 1, "bus": bus }),
+        )
+        .await
+        .unwrap();
+
+    // The track's own output must still sound like the Kick alone: the
+    // Snare left, and the Kick (output 0, below the Snare's index) must
+    // not have been swept away with it. A fresh aux route can shift
+    // overall graph latency compensation by a sample or two (unrelated to
+    // this feature), so compare levels with a tolerance rather than
+    // requiring a bit-exact hash.
+    let track_after = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0.0, "end_s": 1.0, "tracks": [track] }),
+        )
+        .await
+        .unwrap()["analysis"]
+        .clone();
+    assert!(!track_after["silent"].as_bool().unwrap(), "{track_after}");
+    let before = kick_alone["peak_dbfs"][0].as_f64().unwrap();
+    let after = track_after["peak_dbfs"][0].as_f64().unwrap();
+    assert!(
+        (before - after).abs() < 0.1,
+        "the Kick's level should be unaffected by patching the Snare away: {before} vs {after}"
+    );
+
+    // And the Snare actually arrived at its bus.
+    let bus_out = dawkey
+        .call(
+            "render_range",
+            json!({ "start_s": 0.0, "end_s": 1.0, "tracks": [bus] }),
+        )
+        .await
+        .unwrap()["analysis"]
+        .clone();
+    assert!(!bus_out["silent"].as_bool().unwrap(), "{bus_out}");
+}

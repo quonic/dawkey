@@ -206,6 +206,10 @@ pub(crate) struct SlotView {
     pub(crate) error: bool,
     /// `builtin:drums` only: the sample kit its pads play back from, if any.
     pub(crate) sample_kit: Option<dawkey_studio::SampleKit>,
+    /// `builtin:drums` only: each pad's output, patched to a bus instead
+    /// of the track's own output (`None`: Master, the default), by pad
+    /// index.
+    pub(crate) pad_outputs: Vec<Option<TrackId>>,
 }
 
 /// An automation lane.

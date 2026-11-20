@@ -869,6 +869,14 @@ impl App {
                         .flatten()
                         .and_then(|s| std::str::from_utf8(s.bytes()).ok())
                         .and_then(dawkey_studio::SampleKit::from_id),
+                    pad_outputs: if slot.plugin == dawkey_studio::DRUMS_ID {
+                        let count = plugin_info(&slot.plugin).map_or(0, |i| i.outputs.len());
+                        (0..count as u32)
+                            .map(|output| slot.outputs.get(&output).copied())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                 })
                 .collect(),
             automation: t

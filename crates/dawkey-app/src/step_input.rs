@@ -129,6 +129,20 @@ impl App {
                     .clone();
                 self.execute(dawkey_core::RemoveSavedDrumPattern { name }.into())
             }
+            ["step_seq", "pad", pad, "output"] => {
+                let pad_index: usize = pad.parse().ok()?;
+                let clip = self.view.editing_clip?;
+                let plugin = self
+                    .studio
+                    .session()
+                    .project()
+                    .clip(clip)?
+                    .0
+                    .plugins
+                    .first()?
+                    .id;
+                self.cycle_plugin_output(plugin, pad_index as u32)
+            }
             ["step", pad, n] => {
                 let pad_index: usize = pad.parse().ok()?;
                 let step: u8 = n.parse().ok()?;

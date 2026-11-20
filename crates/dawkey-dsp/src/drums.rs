@@ -164,6 +164,16 @@ struct Voice {
 /// [`DrumEngine::load_samples`].
 pub type SampleKitData = [Option<Vec<f32>>; 8];
 
+/// Where a patched pad's block goes instead of the engine's mix (see
+/// [`DrumEngine::process`]). Engine-agnostic (plain slices) so
+/// `dawkey-dsp` doesn't need to depend on `dawkey-engine`'s `AuxBuffer`;
+/// the caller (the builtin plugin host) bridges the two.
+#[derive(Debug)]
+pub struct PadOutput<'a> {
+    pub left: &'a mut [f32],
+    pub right: &'a mut [f32],
+}
+
 /// Eight percussion voices, parameterized per pad: synthesized unless a
 /// sample kit is loaded, in which case pads it covers play that recording
 /// back instead (pads it doesn't cover keep synthesizing).
@@ -241,8 +251,18 @@ impl DrumEngine {
     /// Renders one block, applying `events` (sorted by offset) as it goes.
     /// `left`/`right` carry the mix on the way out; the caller is expected
     /// to have cleared or not care about their input (the kit is an
-    /// instrument: it replaces, not adds to, its input).
-    pub fn process(&mut self, left: &mut [f32], right: &mut [f32], events: &[DrumEvent]) {
+    /// instrument: it replaces, not adds to, its input). A pad patched to
+    /// its own output (`pad_outputs[pad.index()] = Some(..)`) is written
+    /// there instead of summed into `left`/`right`; an unpatched pad
+    /// (`None`, every pad by default) behaves exactly as if `pad_outputs`
+    /// didn't exist.
+    pub fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        events: &[DrumEvent],
+        pad_outputs: &mut [Option<PadOutput>],
+    ) {
         let frames = left.len().min(right.len());
         let click_coeff = decay_coeff(4.0, self.sample_rate);
         let mut ei = 0usize;
@@ -265,18 +285,25 @@ impl DrumEngine {
                 // Disjoint field borrows: voices/noise/samples are
                 // independent fields, so this doesn't need `&mut self`.
                 let v = &mut self.voices[i];
-                let n = &mut self.noise[i];
+                let n_ = &mut self.noise[i];
                 let sample = self.samples.as_deref().and_then(|k| k[i].as_deref());
-                out += render_pad(
+                let rendered = render_pad(
                     pad,
                     v,
-                    n,
+                    n_,
                     sample,
                     self.sample_rate,
                     tone,
                     level_db,
                     click_coeff,
                 );
+                match pad_outputs.get_mut(i) {
+                    Some(Some(po)) => {
+                        po.left[n] = rendered;
+                        po.right[n] = rendered;
+                    }
+                    _ => out += rendered,
+                }
             }
             left[n] = out;
             right[n] = out;
@@ -420,7 +447,7 @@ mod tests {
         }];
         let mut left = vec![0.0; 48_000];
         let mut right = vec![0.0; 48_000];
-        engine.process(&mut left, &mut right, &events);
+        engine.process(&mut left, &mut right, &events, &mut []);
         assert!(left.iter().any(|&s| s.abs() > 0.01));
         // A one-shot's amplitude decays well below its initial peak.
         let peak = left[..200].iter().fold(0.0f32, |m, &s| m.max(s.abs()));
@@ -451,8 +478,8 @@ mod tests {
         let mut kr = vec![0.0; 2048];
         let mut hl = vec![0.0; 2048];
         let mut hr = vec![0.0; 2048];
-        kick.process(&mut kl, &mut kr, &kick_on);
-        hat.process(&mut hl, &mut hr, &hat_on);
+        kick.process(&mut kl, &mut kr, &kick_on, &mut []);
+        hat.process(&mut hl, &mut hr, &hat_on, &mut []);
         assert_ne!(kl, hl);
     }
 
@@ -471,8 +498,8 @@ mod tests {
         let mut ar = vec![0.0; 4096];
         let mut bl = vec![0.0; 4096];
         let mut br = vec![0.0; 4096];
-        a.process(&mut al, &mut ar, &events);
-        b.process(&mut bl, &mut br, &events);
+        a.process(&mut al, &mut ar, &events, &mut []);
+        b.process(&mut bl, &mut br, &events, &mut []);
         assert_eq!(al, bl);
     }
 
@@ -496,7 +523,7 @@ mod tests {
         }];
         let mut left = vec![0.0; 8];
         let mut right = vec![0.0; 8];
-        engine.process(&mut left, &mut right, &events);
+        engine.process(&mut left, &mut right, &events, &mut []);
         assert_eq!(&left[..buf.len()], buf.as_slice());
         // Past the buffer's end, the voice is silent (not still synthesizing).
         assert_eq!(&left[buf.len()..], &[0.0; 4]);
@@ -519,11 +546,112 @@ mod tests {
         let mut ar = vec![0.0; 2048];
         let mut bl = vec![0.0; 2048];
         let mut br = vec![0.0; 2048];
-        with_kit.process(&mut al, &mut ar, &events);
-        without_kit.process(&mut bl, &mut br, &events);
+        with_kit.process(&mut al, &mut ar, &events, &mut []);
+        without_kit.process(&mut bl, &mut br, &events, &mut []);
         assert_eq!(
             al, bl,
             "snare has no sample, so it should synthesize unchanged"
         );
+    }
+
+    #[test]
+    fn an_unpatched_pad_is_unaffected_by_an_empty_pad_outputs_slice() {
+        // Passing a pad_outputs slice at all (even one with room for other
+        // pads) must not change a pad's behavior unless ITS entry is
+        // `Some`: the default (and the common case, since most pads stay
+        // on the main mix) is indistinguishable from not patching at all.
+        let mut baseline = DrumEngine::new(48_000);
+        let mut patched_elsewhere = DrumEngine::new(48_000);
+        let events = [DrumEvent {
+            offset: 0,
+            kind: DrumEventKind::NoteOn {
+                key: Pad::Kick.note(),
+                velocity: 1.0,
+            },
+        }];
+        let mut bl = vec![0.0; 2048];
+        let mut br = vec![0.0; 2048];
+        baseline.process(&mut bl, &mut br, &events, &mut []);
+
+        let mut pl = vec![0.0; 2048];
+        let mut pr = vec![0.0; 2048];
+        let mut snare_l = vec![0.0; 2048];
+        let mut snare_r = vec![0.0; 2048];
+        let mut pad_outputs: [Option<PadOutput>; 8] = std::array::from_fn(|_| None);
+        pad_outputs[Pad::Snare.index()] = Some(PadOutput {
+            left: &mut snare_l,
+            right: &mut snare_r,
+        });
+        patched_elsewhere.process(&mut pl, &mut pr, &events, &mut pad_outputs);
+        assert_eq!(bl, pl);
+        assert_eq!(br, pr);
+    }
+
+    #[test]
+    fn a_patched_pad_plays_only_in_its_own_output_not_the_main_mix() {
+        let mut engine = DrumEngine::new(48_000);
+        let events = [DrumEvent {
+            offset: 0,
+            kind: DrumEventKind::NoteOn {
+                key: Pad::Kick.note(),
+                velocity: 1.0,
+            },
+        }];
+        let mut left = vec![0.0; 2048];
+        let mut right = vec![0.0; 2048];
+        let mut kick_l = vec![0.0; 2048];
+        let mut kick_r = vec![0.0; 2048];
+        let mut pad_outputs: [Option<PadOutput>; 8] = std::array::from_fn(|_| None);
+        pad_outputs[Pad::Kick.index()] = Some(PadOutput {
+            left: &mut kick_l,
+            right: &mut kick_r,
+        });
+        engine.process(&mut left, &mut right, &events, &mut pad_outputs);
+
+        assert!(left.iter().all(|&s| s == 0.0), "main mix should be silent");
+        assert!(kick_l.iter().any(|&s| s.abs() > 0.01), "{kick_l:?}");
+        assert_eq!(kick_l, kick_r);
+    }
+
+    #[test]
+    fn two_pads_patched_to_different_outputs_dont_bleed_into_each_other() {
+        let mut engine = DrumEngine::new(48_000);
+        let events = [
+            DrumEvent {
+                offset: 0,
+                kind: DrumEventKind::NoteOn {
+                    key: Pad::Kick.note(),
+                    velocity: 1.0,
+                },
+            },
+            DrumEvent {
+                offset: 0,
+                kind: DrumEventKind::NoteOn {
+                    key: Pad::Snare.note(),
+                    velocity: 1.0,
+                },
+            },
+        ];
+        let mut left = vec![0.0; 2048];
+        let mut right = vec![0.0; 2048];
+        let mut kick_l = vec![0.0; 2048];
+        let mut kick_r = vec![0.0; 2048];
+        let mut snare_l = vec![0.0; 2048];
+        let mut snare_r = vec![0.0; 2048];
+        let mut pad_outputs: [Option<PadOutput>; 8] = std::array::from_fn(|_| None);
+        pad_outputs[Pad::Kick.index()] = Some(PadOutput {
+            left: &mut kick_l,
+            right: &mut kick_r,
+        });
+        pad_outputs[Pad::Snare.index()] = Some(PadOutput {
+            left: &mut snare_l,
+            right: &mut snare_r,
+        });
+        engine.process(&mut left, &mut right, &events, &mut pad_outputs);
+
+        assert!(left.iter().all(|&s| s == 0.0), "main mix should be silent");
+        assert!(kick_l.iter().any(|&s| s.abs() > 0.01));
+        assert!(snare_l.iter().any(|&s| s.abs() > 0.01));
+        assert_ne!(kick_l, snare_l, "each pad only hears itself");
     }
 }

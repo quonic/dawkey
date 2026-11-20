@@ -23,6 +23,7 @@ pub(crate) const STEPS: u8 = 16;
 pub(crate) const STEP_BEATS: f64 = 0.25;
 
 const ROW_LABEL_W: f32 = 48.0;
+const PATCH_W: f32 = 56.0;
 const CELL: f32 = 26.0;
 const GAP: f32 = 3.0;
 const SIDEBAR_W: f32 = 212.0;
@@ -65,8 +66,15 @@ pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
             .fill()
             .clip()
             .child(header(track, clip, ui))
-            .child(grid(notes, playhead_step)),
+            .child(grid(model, track, notes, playhead_step, ui)),
     )
+}
+
+/// The bus a patched pad's output goes to, or "Master" when it isn't
+/// patched — the same fallback a track's own `output_name` uses.
+fn bus_name(model: &ViewModel, bus: Option<dawkey_core::TrackId>) -> String {
+    bus.and_then(|b| model.tracks.iter().find(|t| t.id == b))
+        .map_or_else(|| "Master".to_owned(), |t| t.name.clone())
 }
 
 fn header(track: &TrackView, clip: &ClipView, ui: &UiState) -> Node {
@@ -96,7 +104,18 @@ fn header(track: &TrackView, clip: &ClipView, ui: &UiState) -> Node {
         )
 }
 
-fn grid(notes: &[NoteView], playhead_step: Option<u8>) -> Node {
+fn grid(
+    model: &ViewModel,
+    track: &TrackView,
+    notes: &[NoteView],
+    playhead_step: Option<u8>,
+    ui: &UiState,
+) -> Node {
+    let pad_outputs = track
+        .plugins
+        .first()
+        .map(|p| p.pad_outputs.as_slice())
+        .unwrap_or(&[]);
     let mut rows = Node::column().padding(Insets::all(10.0)).gap(GAP);
     for (pad_index, name) in PAD_NAMES.iter().enumerate() {
         let pad_note = PAD_NOTES[pad_index];
@@ -109,6 +128,22 @@ fn grid(notes: &[NoteView], playhead_step: Option<u8>) -> Node {
                     s.color = pal().text_dim;
                     s.text_align = TextAlign::Start;
                 }),
+        );
+        let bus = pad_outputs.get(pad_index).copied().flatten();
+        let name_text = bus_name(model, bus);
+        row = row.child(
+            button(
+                &format!("step_seq/pad/{pad_index}/output"),
+                &format!("Patch {name} to a bus"),
+                ui,
+                bus.is_some().then_some(pal().accent),
+            )
+            .text(name_text)
+            .clip()
+            .width(Sizing::Fixed(PATCH_W))
+            .height(Sizing::Fixed(CELL))
+            .padding(Insets::xy(6.0, 0.0))
+            .style(|s| s.font_size = 9.0),
         );
         for step in 0..STEPS {
             let hit = notes.iter().find(|n| {

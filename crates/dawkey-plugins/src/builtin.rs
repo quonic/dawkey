@@ -17,7 +17,7 @@ use dawkey_engine::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{ParamInfo, PluginError, PluginFormat, PluginInfo, ValueLabel};
+use crate::{OutputInfo, ParamInfo, PluginError, PluginFormat, PluginInfo, ValueLabel};
 
 /// A real hand-clap (`assets/drums/shared/README.md`), shared by every
 /// VCSL-sourced kit below instead of each embedding its own copy.
@@ -283,7 +283,17 @@ fn drum_plugin_info() -> PluginInfo {
         audio_inputs: 0,
         audio_outputs: 2,
         sidechain: false,
-        outputs: Vec::new(),
+        // One per pad, so each can be patched to its own bus (a kick in
+        // one bus with its own compressor, a snare in another) instead of
+        // always going through the main stereo output; unpatched (the
+        // default) plays through it exactly as before.
+        outputs: PAD_NAMES
+            .iter()
+            .map(|name| OutputInfo {
+                name: (*name).to_owned(),
+                channels: 1,
+            })
+            .collect(),
         params,
         properties: Vec::new(),
     }
@@ -395,7 +405,23 @@ impl PluginProcessor for BuiltinProcessor {
                         n += 1;
                     }
                 }
-                dsp.process(&mut left[..frames], &mut right[..frames], &buf[..n]);
+                let mut pad_outputs: [Option<dawkey_dsp::PadOutput>; 8] =
+                    core::array::from_fn(|_| None);
+                for (i, aux) in context.aux.iter_mut().enumerate().take(8) {
+                    if aux.routed {
+                        let [l, r] = &mut aux.channels;
+                        pad_outputs[i] = Some(dawkey_dsp::PadOutput {
+                            left: &mut l[..frames],
+                            right: &mut r[..frames],
+                        });
+                    }
+                }
+                dsp.process(
+                    &mut left[..frames],
+                    &mut right[..frames],
+                    &buf[..n],
+                    &mut pad_outputs,
+                );
             }
         }
     }
@@ -415,6 +441,14 @@ mod tests {
 
     fn drum_info() -> PluginInfo {
         builtin_plugin(DRUMS_ID).cloned().expect("registered")
+    }
+
+    #[test]
+    fn each_pad_declares_its_own_output_for_patching() {
+        let info = drum_info();
+        assert_eq!(info.outputs.len(), 8);
+        assert_eq!(info.outputs[Pad::Kick.index()].name, "Kick");
+        assert_eq!(info.outputs[Pad::Ride.index()].name, "Ride");
     }
 
     #[test]
