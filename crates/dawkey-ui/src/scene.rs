@@ -4,7 +4,7 @@
 use serde::Serialize;
 
 use crate::geometry::{Color, Point, Rect, Size};
-use crate::node::{Icon, Node, Paint, TextAlign};
+use crate::node::{Direction, Icon, Node, Paint, TextAlign};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +39,16 @@ pub enum Primitive {
         /// Corner radii: top-left, top-right, bottom-right, bottom-left.
         radius: [f32; 4],
         border: Option<(f32, Color)>,
+        clip: Option<Rect>,
+    },
+    /// A linear two-color fill, `start` to `end` along `direction` (`Row`:
+    /// left to right, `Column`: top to bottom). No border.
+    Gradient {
+        rect: Rect,
+        start: Color,
+        end: Color,
+        direction: Direction,
+        radius: [f32; 4],
         clip: Option<Rect>,
     },
     /// A soft drop shadow around `rect`.
@@ -100,7 +110,16 @@ impl Scene {
                 color,
             });
         }
-        if let Some(bg) = style.background {
+        if let (Some(bg), Some((end, direction))) = (style.background, style.gradient) {
+            self.primitives.push(Primitive::Gradient {
+                rect,
+                start: bg,
+                end,
+                direction,
+                radius: style.radius,
+                clip,
+            });
+        } else if let Some(bg) = style.background {
             self.primitives.push(Primitive::Rect {
                 rect,
                 color: bg,
@@ -124,7 +143,17 @@ impl Scene {
                 levels,
                 vertical,
                 background,
-            }) => self.meter(*levels, *vertical, *background, content, clip),
+                low,
+                mid,
+                high,
+            }) => self.meter(
+                *levels,
+                *vertical,
+                *background,
+                (*low, *mid, *high),
+                content,
+                clip,
+            ),
             Some(Paint::Waveform { columns, color }) => {
                 self.waveform(columns, *color, content, clip)
             }
@@ -264,6 +293,7 @@ impl Scene {
         levels: [f32; 2],
         vertical: bool,
         background: Color,
+        (low, mid, high): (Color, Color, Color),
         area: Rect,
         clip: Option<Rect>,
     ) {
@@ -286,11 +316,11 @@ impl Scene {
             let level = level.clamp(0.0, 1.0);
             if level > 0.0 {
                 let color = if level > 0.95 {
-                    Color::hex(0xe5484d)
+                    high
                 } else if level > 0.8 {
-                    Color::hex(0xf0b429)
+                    mid
                 } else {
-                    Color::hex(0x3dd68c)
+                    low
                 };
                 let fill = if vertical {
                     let h = track.h * level;

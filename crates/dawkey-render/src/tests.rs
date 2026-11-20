@@ -106,6 +106,53 @@ fn rounded_corners_and_shapes_are_antialiased() {
 }
 
 #[test]
+fn draws_gradients_along_their_direction() {
+    use dawkey_ui::Direction;
+
+    let black = Color::hex(0x000000);
+    let white = Color::hex(0xffffff);
+    let scene = Scene {
+        size: Size::new(20.0, 20.0),
+        primitives: vec![
+            // Top to bottom, black to white.
+            Primitive::Gradient {
+                rect: Rect::new(0.0, 0.0, 10.0, 20.0),
+                start: black,
+                end: white,
+                direction: Direction::Column,
+                radius: [0.0; 4],
+                clip: None,
+            },
+            // Left to right, black to white.
+            Primitive::Gradient {
+                rect: Rect::new(10.0, 0.0, 10.0, 20.0),
+                start: black,
+                end: white,
+                direction: Direction::Row,
+                radius: [0.0; 4],
+                clip: None,
+            },
+        ],
+    };
+    let img = render(&scene, 1.0);
+    // Vertical: darker at the top, lighter at the bottom, opaque throughout,
+    // flat across each row.
+    assert!(img.pixel(5, 0)[0] < 20);
+    assert!(img.pixel(5, 19)[0] > 235);
+    assert_eq!(img.pixel(5, 0)[3], 255);
+    assert!(img.pixel(5, 0)[0] < img.pixel(5, 10)[0]);
+    assert!(img.pixel(5, 10)[0] < img.pixel(5, 19)[0]);
+    assert_eq!(img.pixel(2, 10), img.pixel(7, 10));
+    // Horizontal: darker on the left, lighter on the right, flat down each
+    // column.
+    assert!(img.pixel(10, 5)[0] < 20);
+    assert!(img.pixel(19, 5)[0] > 235);
+    assert!(img.pixel(10, 5)[0] < img.pixel(15, 5)[0]);
+    assert!(img.pixel(15, 5)[0] < img.pixel(19, 5)[0]);
+    assert_eq!(img.pixel(15, 2), img.pixel(15, 17));
+}
+
+#[test]
 fn draws_text() {
     let scene = Scene {
         size: Size::new(100.0, 30.0),

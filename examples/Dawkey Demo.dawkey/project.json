@@ -1,0 +1,644 @@
+{
+  "format": "dawkey-project",
+  "version": 2,
+  "project": {
+    "name": "Dawkey Demo",
+    "sample_rate": 48000,
+    "tempo_bpm": 120.0,
+    "time_signature": {
+      "numerator": 4,
+      "denominator": 4
+    },
+    "tracks": [
+      {
+        "id": 1,
+        "name": "Bass",
+        "kind": "midi",
+        "gain_db": 0.0,
+        "pan": 0.0,
+        "mute": false,
+        "solo": false,
+        "armed": false,
+        "input": "stereo",
+        "synth": {
+          "waveform": "saw",
+          "attack_ms": 5.0,
+          "decay_ms": 120.0,
+          "sustain": 0.7,
+          "release_ms": 150.0,
+          "cutoff_hz": 500.0,
+          "resonance": 0.25,
+          "filter_env_octaves": 2.0
+        },
+        "clips": [
+          {
+            "id": 1,
+            "start": 0,
+            "length": 768000,
+            "gain_db": 0.0,
+            "muted": false,
+            "kind": "midi",
+            "notes": [
+              {
+                "id": 1,
+                "pitch": 36,
+                "velocity": 95,
+                "start": 0,
+                "length": 48000
+              },
+              {
+                "id": 2,
+                "pitch": 36,
+                "velocity": 95,
+                "start": 48000,
+                "length": 48000
+              },
+              {
+                "id": 3,
+                "pitch": 36,
+                "velocity": 95,
+                "start": 96000,
+                "length": 48000
+              },
+              {
+                "id": 4,
+                "pitch": 36,
+                "velocity": 95,
+                "start": 144000,
+                "length": 48000
+              },
+              {
+                "id": 5,
+                "pitch": 45,
+                "velocity": 95,
+                "start": 192000,
+                "length": 48000
+              },
+              {
+                "id": 6,
+                "pitch": 45,
+                "velocity": 95,
+                "start": 240000,
+                "length": 48000
+              },
+              {
+                "id": 7,
+                "pitch": 45,
+                "velocity": 95,
+                "start": 288000,
+                "length": 48000
+              },
+              {
+                "id": 8,
+                "pitch": 45,
+                "velocity": 95,
+                "start": 336000,
+                "length": 48000
+              },
+              {
+                "id": 9,
+                "pitch": 41,
+                "velocity": 95,
+                "start": 384000,
+                "length": 48000
+              },
+              {
+                "id": 10,
+                "pitch": 41,
+                "velocity": 95,
+                "start": 432000,
+                "length": 48000
+              },
+              {
+                "id": 11,
+                "pitch": 41,
+                "velocity": 95,
+                "start": 480000,
+                "length": 48000
+              },
+              {
+                "id": 12,
+                "pitch": 41,
+                "velocity": 95,
+                "start": 528000,
+                "length": 48000
+              },
+              {
+                "id": 13,
+                "pitch": 43,
+                "velocity": 95,
+                "start": 576000,
+                "length": 48000
+              },
+              {
+                "id": 14,
+                "pitch": 43,
+                "velocity": 95,
+                "start": 624000,
+                "length": 48000
+              },
+              {
+                "id": 15,
+                "pitch": 43,
+                "velocity": 95,
+                "start": 672000,
+                "length": 48000
+              },
+              {
+                "id": 16,
+                "pitch": 43,
+                "velocity": 95,
+                "start": 720000,
+                "length": 48000
+              }
+            ]
+          }
+        ],
+        "plugins": [
+          {
+            "id": 2,
+            "plugin": "vst3:2046504473616C63434D4D5A00000000",
+            "params": {},
+            "bypass": false
+          }
+        ],
+        "sends": [
+          {
+            "bus": 4,
+            "gain_db": -20.0
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "name": "Lead",
+        "kind": "midi",
+        "gain_db": 0.0,
+        "pan": 0.0,
+        "mute": false,
+        "solo": false,
+        "armed": false,
+        "input": "stereo",
+        "synth": {
+          "waveform": "square",
+          "attack_ms": 8.0,
+          "decay_ms": 80.0,
+          "sustain": 0.6,
+          "release_ms": 180.0,
+          "cutoff_hz": 3200.0,
+          "resonance": 0.15,
+          "filter_env_octaves": 2.0
+        },
+        "clips": [
+          {
+            "id": 3,
+            "start": 0,
+            "length": 768000,
+            "gain_db": 0.0,
+            "muted": false,
+            "kind": "midi",
+            "notes": [
+              {
+                "id": 29,
+                "pitch": 60,
+                "velocity": 85,
+                "start": 0,
+                "length": 21600
+              },
+              {
+                "id": 30,
+                "pitch": 64,
+                "velocity": 85,
+                "start": 24000,
+                "length": 21600
+              },
+              {
+                "id": 31,
+                "pitch": 67,
+                "velocity": 85,
+                "start": 48000,
+                "length": 21600
+              },
+              {
+                "id": 32,
+                "pitch": 72,
+                "velocity": 85,
+                "start": 72000,
+                "length": 21600
+              },
+              {
+                "id": 33,
+                "pitch": 67,
+                "velocity": 85,
+                "start": 96000,
+                "length": 21600
+              },
+              {
+                "id": 34,
+                "pitch": 64,
+                "velocity": 85,
+                "start": 120000,
+                "length": 21600
+              },
+              {
+                "id": 35,
+                "pitch": 60,
+                "velocity": 85,
+                "start": 144000,
+                "length": 21600
+              },
+              {
+                "id": 36,
+                "pitch": 64,
+                "velocity": 85,
+                "start": 168000,
+                "length": 21600
+              },
+              {
+                "id": 37,
+                "pitch": 57,
+                "velocity": 85,
+                "start": 192000,
+                "length": 21600
+              },
+              {
+                "id": 38,
+                "pitch": 60,
+                "velocity": 85,
+                "start": 216000,
+                "length": 21600
+              },
+              {
+                "id": 39,
+                "pitch": 64,
+                "velocity": 85,
+                "start": 240000,
+                "length": 21600
+              },
+              {
+                "id": 40,
+                "pitch": 69,
+                "velocity": 85,
+                "start": 264000,
+                "length": 21600
+              },
+              {
+                "id": 41,
+                "pitch": 64,
+                "velocity": 85,
+                "start": 288000,
+                "length": 21600
+              },
+              {
+                "id": 42,
+                "pitch": 60,
+                "velocity": 85,
+                "start": 312000,
+                "length": 21600
+              },
+              {
+                "id": 43,
+                "pitch": 57,
+                "velocity": 85,
+                "start": 336000,
+                "length": 21600
+              },
+              {
+                "id": 44,
+                "pitch": 60,
+                "velocity": 85,
+                "start": 360000,
+                "length": 21600
+              },
+              {
+                "id": 45,
+                "pitch": 53,
+                "velocity": 85,
+                "start": 384000,
+                "length": 21600
+              },
+              {
+                "id": 46,
+                "pitch": 57,
+                "velocity": 85,
+                "start": 408000,
+                "length": 21600
+              },
+              {
+                "id": 47,
+                "pitch": 60,
+                "velocity": 85,
+                "start": 432000,
+                "length": 21600
+              },
+              {
+                "id": 48,
+                "pitch": 65,
+                "velocity": 85,
+                "start": 456000,
+                "length": 21600
+              },
+              {
+                "id": 49,
+                "pitch": 60,
+                "velocity": 85,
+                "start": 480000,
+                "length": 21600
+              },
+              {
+                "id": 50,
+                "pitch": 57,
+                "velocity": 85,
+                "start": 504000,
+                "length": 21600
+              },
+              {
+                "id": 51,
+                "pitch": 53,
+                "velocity": 85,
+                "start": 528000,
+                "length": 21600
+              },
+              {
+                "id": 52,
+                "pitch": 57,
+                "velocity": 85,
+                "start": 552000,
+                "length": 21600
+              },
+              {
+                "id": 53,
+                "pitch": 55,
+                "velocity": 85,
+                "start": 576000,
+                "length": 21600
+              },
+              {
+                "id": 54,
+                "pitch": 59,
+                "velocity": 85,
+                "start": 600000,
+                "length": 21600
+              },
+              {
+                "id": 55,
+                "pitch": 62,
+                "velocity": 85,
+                "start": 624000,
+                "length": 21600
+              },
+              {
+                "id": 56,
+                "pitch": 67,
+                "velocity": 85,
+                "start": 648000,
+                "length": 21600
+              },
+              {
+                "id": 57,
+                "pitch": 62,
+                "velocity": 85,
+                "start": 672000,
+                "length": 21600
+              },
+              {
+                "id": 58,
+                "pitch": 59,
+                "velocity": 85,
+                "start": 696000,
+                "length": 21600
+              },
+              {
+                "id": 59,
+                "pitch": 55,
+                "velocity": 85,
+                "start": 720000,
+                "length": 21600
+              },
+              {
+                "id": 60,
+                "pitch": 59,
+                "velocity": 85,
+                "start": 744000,
+                "length": 21600
+              }
+            ]
+          }
+        ],
+        "plugins": [
+          {
+            "id": 3,
+            "plugin": "vst3:2046504473616C633133475A00000000",
+            "params": {},
+            "bypass": false
+          }
+        ],
+        "automation": [
+          {
+            "target": {
+              "kind": "gain"
+            },
+            "points": [
+              {
+                "frame": 0,
+                "value": -24.0
+              },
+              {
+                "frame": 192000,
+                "value": 0.0
+              },
+              {
+                "frame": 576000,
+                "value": 0.0
+              },
+              {
+                "frame": 768000,
+                "value": -12.0
+              }
+            ]
+          }
+        ],
+        "sends": [
+          {
+            "bus": 4,
+            "gain_db": -14.0
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "name": "Pads",
+        "kind": "midi",
+        "gain_db": 0.0,
+        "pan": 0.0,
+        "mute": false,
+        "solo": false,
+        "armed": false,
+        "input": "stereo",
+        "synth": {
+          "waveform": "triangle",
+          "attack_ms": 800.0,
+          "decay_ms": 400.0,
+          "sustain": 0.8,
+          "release_ms": 1200.0,
+          "cutoff_hz": 2000.0,
+          "resonance": 0.1,
+          "filter_env_octaves": 2.0
+        },
+        "clips": [
+          {
+            "id": 2,
+            "start": 0,
+            "length": 768000,
+            "gain_db": 0.0,
+            "muted": false,
+            "kind": "midi",
+            "notes": [
+              {
+                "id": 17,
+                "pitch": 60,
+                "velocity": 65,
+                "start": 0,
+                "length": 192000
+              },
+              {
+                "id": 18,
+                "pitch": 64,
+                "velocity": 65,
+                "start": 0,
+                "length": 192000
+              },
+              {
+                "id": 19,
+                "pitch": 67,
+                "velocity": 65,
+                "start": 0,
+                "length": 192000
+              },
+              {
+                "id": 20,
+                "pitch": 57,
+                "velocity": 65,
+                "start": 192000,
+                "length": 192000
+              },
+              {
+                "id": 21,
+                "pitch": 60,
+                "velocity": 65,
+                "start": 192000,
+                "length": 192000
+              },
+              {
+                "id": 22,
+                "pitch": 64,
+                "velocity": 65,
+                "start": 192000,
+                "length": 192000
+              },
+              {
+                "id": 23,
+                "pitch": 53,
+                "velocity": 65,
+                "start": 384000,
+                "length": 192000
+              },
+              {
+                "id": 24,
+                "pitch": 57,
+                "velocity": 65,
+                "start": 384000,
+                "length": 192000
+              },
+              {
+                "id": 25,
+                "pitch": 60,
+                "velocity": 65,
+                "start": 384000,
+                "length": 192000
+              },
+              {
+                "id": 26,
+                "pitch": 55,
+                "velocity": 65,
+                "start": 576000,
+                "length": 192000
+              },
+              {
+                "id": 27,
+                "pitch": 59,
+                "velocity": 65,
+                "start": 576000,
+                "length": 192000
+              },
+              {
+                "id": 28,
+                "pitch": 62,
+                "velocity": 65,
+                "start": 576000,
+                "length": 192000
+              }
+            ]
+          }
+        ],
+        "sends": [
+          {
+            "bus": 4,
+            "gain_db": -10.0
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "name": "Reverb",
+        "kind": "bus",
+        "gain_db": 0.0,
+        "pan": 0.0,
+        "mute": false,
+        "solo": false,
+        "armed": false,
+        "input": "stereo",
+        "clips": [],
+        "plugins": [
+          {
+            "id": 1,
+            "plugin": "vst3:2046504473616C633172666400000000",
+            "params": {},
+            "bypass": false
+          }
+        ]
+      }
+    ],
+    "master": {
+      "id": 0,
+      "name": "Master",
+      "kind": "bus",
+      "gain_db": 0.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "armed": false,
+      "input": "stereo",
+      "clips": []
+    },
+    "sources": [],
+    "loop": {
+      "range": null,
+      "enabled": false
+    },
+    "punch": {
+      "range": null,
+      "enabled": false
+    },
+    "plugin_states": {
+      "1": "REtWM2EBAABfX2RwZl9zdGF0ZV9iZWdpbl9fAHByZXNldABTbWFsbCBDbGVhciBIYWxsAF9fZHBmX3N0YXRlX2VuZF9fAF9fZHBmX3BhcmFtZXRlcnNfYmVnaW5fXwBkcnlfbGV2ZWwAODAAZWFybHlfbGV2ZWwAMTAAbGF0ZV9sZXZlbAAyMABzaXplADI0AHdpZHRoADEwMABkZWxheQA0AGRpZmZ1c2UAOTAAbG93X2N1dAA0AGxvd194bwA1MDAAbG93X211bHQAMS4yOTk5OTk5NTIzMgBoaWdoX2N1dAA3NjAwAGhpZ2hfeG8ANTUwMABoaWdoX211bHQAMC41AHNwaW4AMy4yOTk5OTk5NTIzMgB3YW5kZXIAMTUAZGVjYXkAMS4yOTk5OTk5NTIzMgBlYXJseV9zZW5kADIwAG1vZHVsYXRpb24AMTUAX19kcGZfcGFyYW1ldGVyc19lbmRfXwD+AAAAAAA=",
+      "2": "REtWMysBAABfX2RwZl9wcm9ncmFtX18AMABfX2RwZl9wYXJhbWV0ZXJzX2JlZ2luX18AYXR0MQAxMABhdHQyADEwAGF0dDMAMTAAcmVsMQA4MAByZWwyADgwAHJlbDMAODAAa24xADAAa24yADAAa24zADAAcmF0MQA0AHJhdDIANAByYXQzADQAdGhyMQAtMjAAdGhyMgAtMTgAdGhyMwAtMTYAbWFrMQAwAG1hazIAMABtYWszADAAeG92ZXIxADE2MAB4b3ZlcjIAMTQwMAB0b2dnbGUxADAAdG9nZ2xlMgAwAHRvZ2dsZTMAMABsaXN0ZW4xADAAbGlzdGVuMgAwAGxpc3RlbjMAMABnbG9iYWxnYWluADAAX19kcGZfcGFyYW1ldGVyc19lbmRfXwD+AAAAAAA=",
+      "3": "REtWM0kBAABfX2RwZl9wcm9ncmFtX18AMABfX2RwZl9wYXJhbWV0ZXJzX2JlZ2luX18AbWFzdGVyADAAYmFuZDEAMABiYW5kMgAwAGJhbmQzADAAYmFuZDQAMABiYW5kNQAwAGJhbmQ2ADAAYmFuZDcAMABiYW5kOAAwAGJhbmQ5ADAAYmFuZDEwADAAYmFuZDExADAAYmFuZDEyADAAYmFuZDEzADAAYmFuZDE0ADAAYmFuZDE1ADAAYmFuZDE2ADAAYmFuZDE3ADAAYmFuZDE4ADAAYmFuZDE5ADAAYmFuZDIwADAAYmFuZDIxADAAYmFuZDIyADAAYmFuZDIzADAAYmFuZDI0ADAAYmFuZDI1ADAAYmFuZDI2ADAAYmFuZDI3ADAAYmFuZDI4ADAAYmFuZDI5ADAAX19kcGZfcGFyYW1ldGVyc19lbmRfXwD+AAAAAAA="
+    },
+    "next_track_id": 5,
+    "next_source_id": 1,
+    "next_clip_id": 4,
+    "next_note_id": 61,
+    "next_plugin_id": 4
+  }
+}
