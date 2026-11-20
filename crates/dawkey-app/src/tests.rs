@@ -3770,6 +3770,21 @@ fn more_rack_presets_and_saving_your_own() {
     assert!(app.access_tree().find("rack/saved/0").is_none());
 }
 
+#[test]
+fn the_add_drum_track_button_works() {
+    let mut app = app();
+    click(&mut app, "arrange/add_drum_track").unwrap();
+    let track = app.studio.session().project().tracks[0].id;
+    let project = app.studio.session().project();
+    let track = project.track(track).unwrap();
+    assert_eq!(track.plugins[0].plugin, "builtin:drums");
+    assert_eq!(
+        app.studio.undo().unwrap().as_deref(),
+        Some("add_drum_track")
+    );
+    assert!(app.studio.session().project().tracks.is_empty());
+}
+
 /// A MIDI track with builtin:drums as its first plugin, and an empty
 /// one-bar clip, as add_drum_track would make.
 fn add_drum_clip(app: &mut App) -> (u64, u64) {
