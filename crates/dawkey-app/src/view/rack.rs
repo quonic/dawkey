@@ -594,6 +594,13 @@ fn unit_theme(unit: &PluginDetails) -> UnitTheme {
             badge: "VERB-480",
             subtitle: "STUDIO REVERBERATOR",
         },
+        "builtin:drums" => UnitTheme {
+            faceplate: pal().rack_drums,
+            accent: pal().record_on,
+            led: pal().record_on,
+            badge: "DK-8",
+            subtitle: "SYNTHESIZED DRUM KIT",
+        },
         _ => UnitTheme {
             faceplate: pal().rack_ext,
             accent: pal().accent,
@@ -1168,7 +1175,10 @@ fn knob_row(
     faceplate_w: f32,
 ) -> Node {
     let id = unit.plugin;
-    let params: &[ParamState] = if unit.id.starts_with("builtin:") {
+    // builtin:drums has 24 (8 pads x 3), far more than the rack units other
+    // builtins have; it needs the same paging an external plugin's params
+    // get, not the single unpaged row every other builtin's handful fits.
+    let params: &[ParamState] = if unit.id.starts_with("builtin:") && unit.id != "builtin:drums" {
         &unit.params
     } else {
         let pages = unit.param_count.div_ceil(EXT_PAGE_SIZE).max(1);

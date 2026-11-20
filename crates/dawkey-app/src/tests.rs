@@ -3901,6 +3901,49 @@ fn the_sound_source_toggle_switches_a_pad_between_synth_and_samples() {
 }
 
 #[test]
+fn the_drum_kits_rack_unit_pages_its_params_instead_of_overflowing() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .clip(ClipId(clip))
+        .unwrap()
+        .0
+        .plugins[0]
+        .id;
+
+    click(&mut app, "view/rack").unwrap();
+    click(&mut app, &format!("rack/track/{track}")).unwrap();
+
+    // The first page shows the first 8 of its 24 params...
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/kick_tone"))
+            .is_some()
+    );
+    // ...not every pad's, which is what overflowed the rack's width.
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/open_hat_level"))
+            .is_none()
+    );
+
+    click(&mut app, &format!("plugin/{plugin}/page_next")).unwrap();
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/kick_tone"))
+            .is_none()
+    );
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/closed_hat_level"))
+            .is_some()
+    );
+}
+
+#[test]
 fn saving_and_loading_a_drum_pattern_in_the_step_sequencer() {
     let mut app = app();
     let (_, clip) = add_drum_clip(&mut app);
