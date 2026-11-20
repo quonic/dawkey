@@ -143,7 +143,17 @@ impl Scene {
                 levels,
                 vertical,
                 background,
-            }) => self.meter(*levels, *vertical, *background, content, clip),
+                low,
+                mid,
+                high,
+            }) => self.meter(
+                *levels,
+                *vertical,
+                *background,
+                (*low, *mid, *high),
+                content,
+                clip,
+            ),
             Some(Paint::Waveform { columns, color }) => {
                 self.waveform(columns, *color, content, clip)
             }
@@ -283,6 +293,7 @@ impl Scene {
         levels: [f32; 2],
         vertical: bool,
         background: Color,
+        (low, mid, high): (Color, Color, Color),
         area: Rect,
         clip: Option<Rect>,
     ) {
@@ -305,11 +316,11 @@ impl Scene {
             let level = level.clamp(0.0, 1.0);
             if level > 0.0 {
                 let color = if level > 0.95 {
-                    Color::hex(0xe5484d)
+                    high
                 } else if level > 0.8 {
-                    Color::hex(0xf0b429)
+                    mid
                 } else {
-                    Color::hex(0x3dd68c)
+                    low
                 };
                 let fill = if vertical {
                     let h = track.h * level;

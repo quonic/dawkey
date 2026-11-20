@@ -951,6 +951,9 @@ pub(crate) fn meter(
             levels: display,
             vertical,
             background: pal().meter,
+            low: pal().solo_on,
+            mid: pal().mute_on,
+            high: pal().record_on,
         })
 }
 

@@ -160,11 +160,15 @@ pub enum Icon {
 pub enum Paint {
     Icon(Icon),
     /// A stereo peak meter; levels are 0..=1 of the meter's length, over
-    /// `background`.
+    /// `background`. The fill is `low` up to 80%, `mid` to 95%, `high`
+    /// above that (the theme's colors, so it reads right in either theme).
     Meter {
         levels: [f32; 2],
         vertical: bool,
         background: Color,
+        low: Color,
+        mid: Color,
+        high: Color,
     },
     /// A waveform: one (min, max) sample range per logical pixel column,
     /// -1..=1, drawn around the vertical center.
