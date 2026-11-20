@@ -160,6 +160,7 @@ impl Change {
             Edit::SetMeter { .. } => self.also.push("meter"),
             Edit::SetLoop(_) => self.also.push("loop"),
             Edit::SetPunch(_) => self.also.push("punch"),
+            Edit::SetRackPresets(_) => self.also.push("rack_presets"),
         }
     }
 

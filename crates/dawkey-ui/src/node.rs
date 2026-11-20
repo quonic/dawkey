@@ -185,6 +185,16 @@ pub enum Paint {
         width: f32,
         color: Color,
     },
+    /// A studio rotary potentiometer knob; `value` and `default` are 0..=1.
+    Knob {
+        value: f32,
+        default: f32,
+        bipolar: bool,
+        accent: Color,
+        body: Color,
+        rim: Color,
+        tick: Color,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

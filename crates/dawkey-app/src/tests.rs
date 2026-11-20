@@ -3437,3 +3437,335 @@ fn sends_in_the_mixer() {
             .is_some()
     );
 }
+
+#[test]
+fn guitar_effects_rack() {
+    let (mut app, _dir) = app_with_plugins();
+    let guitar = add_track(&mut app, "Guitar");
+    let lead_bus = add_track(&mut app, "Lead Aux");
+
+    // Switch via toolbar button and keyboard shortcuts (F4 to Rack, Tab back).
+    assert_eq!(app.view_state().page, Page::Arrange);
+    click(&mut app, "view/rack").unwrap();
+    assert_eq!(app.view_state().page, Page::Rack);
+    app.key("tab", Modifiers::default()).unwrap();
+    assert_eq!(app.view_state().page, Page::Arrange);
+    app.key("f4", Modifiers::default()).unwrap();
+    assert_eq!(app.view_state().page, Page::Rack);
+
+    // Track selection includes regular tracks and Master (track 0).
+    assert_eq!(app.rack_track(), TrackId(guitar));
+    assert_eq!(
+        app.access_tree()
+            .find(&format!("rack/track/{guitar}"))
+            .unwrap()
+            .value
+            .as_deref(),
+        Some("selected")
+    );
+    assert!(app.ui.find("rack/blank").is_some());
+    click(&mut app, &format!("rack/track/{lead_bus}")).unwrap();
+    assert_eq!(app.view_state().rack_track, Some(TrackId(lead_bus)));
+    click(&mut app, "rack/track/0").unwrap();
+    assert_eq!(app.view_state().rack_track, Some(dawkey_core::MASTER));
+    click(&mut app, &format!("rack/track/{guitar}")).unwrap();
+
+    // Presets mount a full studio signal chain in one undo step.
+    click(&mut app, "rack/preset/lead").unwrap();
+    let mounted: Vec<String> = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(guitar))
+        .unwrap()
+        .plugins
+        .iter()
+        .map(|s| s.plugin.clone())
+        .collect();
+    assert_eq!(
+        mounted,
+        [
+            "builtin:gate",
+            "builtin:drive",
+            "builtin:amp",
+            "builtin:eq",
+            "builtin:cab",
+            "builtin:delay",
+            "builtin:reverb",
+        ]
+    );
+    app.studio.undo().unwrap();
+    assert!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(guitar))
+            .unwrap()
+            .plugins
+            .is_empty()
+    );
+    app.studio.redo().unwrap();
+    assert_eq!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(guitar))
+            .unwrap()
+            .plugins
+            .len(),
+        7
+    );
+
+    // Stepped knob click cycles OD-808 voicing (`tight`: 1.0 Tight -> 0.0 Fat).
+    let drive = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(guitar))
+        .unwrap()
+        .plugins[1]
+        .id;
+    let tight_id = format!("plugin/{}/param/tight", drive.0);
+    click(&mut app, &tight_id).unwrap();
+    assert_eq!(app.studio.plugin_param(drive, "tight").unwrap().value, 0.0);
+    click(&mut app, &tight_id).unwrap();
+    assert_eq!(app.studio.plugin_param(drive, "tight").unwrap().value, 1.0);
+
+    // Scrolling the rack bay moves rack_scroll within bounds.
+    let bay_before = app.view_state().rack_scroll;
+    let bay_pos = app.ui.find("rack/bay").unwrap().rect().center();
+    app.scroll(bay_pos, Point::new(0.0, 240.0), Modifiers::default());
+    assert!(app.view_state().rack_scroll > bay_before);
+
+    // Mount units individually on the second track and test unit hardware controls.
+    click(&mut app, &format!("rack/track/{lead_bus}")).unwrap();
+    click(&mut app, "rack/add/amp").unwrap();
+    let amp = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(lead_bus))
+        .unwrap()
+        .plugins[0]
+        .id;
+    assert_eq!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(lead_bus))
+            .unwrap()
+            .plugins[0]
+            .plugin,
+        "builtin:amp"
+    );
+
+    // Toggle bypass & switch channel.
+    click(&mut app, &format!("plugin/{}/bypass", amp.0)).unwrap();
+    assert!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(lead_bus))
+            .unwrap()
+            .plugins[0]
+            .bypass
+    );
+    click(&mut app, &format!("plugin/{}/bypass", amp.0)).unwrap();
+    click(&mut app, &format!("plugin/{}/choice/channel/1", amp.0)).unwrap();
+    assert_eq!(app.studio.plugin_param(amp, "channel").unwrap().value, 1.0);
+
+    // Rotary knob drag up raises Gain as one undo step; CTRL drag moves at fine resolution.
+    let gain_id = format!("plugin/{}/param/gain", amp.0);
+    let initial_gain = app.studio.plugin_param(amp, "gain").unwrap().value;
+    app.drag(
+        DragFrom::Widget(gain_id.clone()),
+        Point::new(0.0, -crate::state::KNOB_SPAN * 0.25),
+        5,
+        Modifiers::default(),
+    )
+    .unwrap();
+    let coarse_gain = app.studio.plugin_param(amp, "gain").unwrap().value;
+    let coarse_delta = coarse_gain - initial_gain;
+    assert!(
+        coarse_delta > 2.0,
+        "expected >2.0 delta, got {coarse_delta}"
+    );
+    app.studio.undo().unwrap();
+    assert!((app.studio.plugin_param(amp, "gain").unwrap().value - initial_gain).abs() < 1e-6);
+
+    app.drag(
+        DragFrom::Widget(gain_id.clone()),
+        Point::new(0.0, -crate::state::KNOB_SPAN * 0.25),
+        5,
+        CTRL,
+    )
+    .unwrap();
+    let fine_delta = app.studio.plugin_param(amp, "gain").unwrap().value - initial_gain;
+    assert!(
+        fine_delta > 0.2 && fine_delta < coarse_delta * 0.5,
+        "expected fine delta < coarse*0.5, fine={fine_delta} coarse={coarse_delta}"
+    );
+
+    // Double-click turns the knob readout into a text field; Enter sets the value.
+    app.double_click(&gain_id, Modifiers::default()).unwrap();
+    assert_eq!(
+        app.access_tree().find(&gain_id).unwrap().role,
+        Role::TextField
+    );
+    type_keys(&mut app, &["3", ".", "5", "return"]);
+    assert!((app.studio.plugin_param(amp, "gain").unwrap().value - 3.5).abs() < 0.05);
+    assert_eq!(app.view_state().text_edit, None);
+
+    // Ctrl-click resets knob to its default (6.0).
+    app.click(&gain_id, MouseButton::Left, CTRL).unwrap();
+    assert!((app.studio.plugin_param(amp, "gain").unwrap().value - 6.0).abs() < 1e-6);
+
+    // Reorder mounted rack units using ▲ / ▼ hardware buttons.
+    click(&mut app, "rack/add/eq").unwrap();
+    let eq = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(lead_bus))
+        .unwrap()
+        .plugins[1]
+        .id;
+    click(&mut app, &format!("plugin/{}/up", eq.0)).unwrap();
+    let ids: Vec<_> = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(lead_bus))
+        .unwrap()
+        .plugins
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(ids, [eq, amp]);
+    click(&mut app, &format!("plugin/{}/down", eq.0)).unwrap();
+    let ids: Vec<_> = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(lead_bus))
+        .unwrap()
+        .plugins
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(ids, [amp, eq]);
+
+    // External CLAP/LV2/VST3 plugins mount directly into the 19" rack without popping
+    // the floating editor open, and can be popped out on demand via "Edit…".
+    click(&mut app, "rack/add_plugin").unwrap();
+    click(&mut app, "plugin_picker/filter/effects").unwrap();
+    click(&mut app, "plugin_picker/item/2").unwrap();
+    let ext = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(lead_bus))
+        .unwrap()
+        .plugins[2]
+        .id;
+    assert_eq!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(lead_bus))
+            .unwrap()
+            .plugins[2]
+            .plugin,
+        "clap:dawkey.test.gain"
+    );
+    assert!(app.view_state().plugin_editor.is_none());
+    click(&mut app, &format!("plugin/{}/edit", ext.0)).unwrap();
+    assert_eq!(app.view_state().plugin_editor, Some(ext));
+}
+
+#[test]
+fn more_rack_presets_and_saving_your_own() {
+    let (mut app, _dir) = app_with_plugins();
+    let guitar = add_track(&mut app, "Guitar");
+    click(&mut app, "view/rack").unwrap();
+    click(&mut app, &format!("rack/track/{guitar}")).unwrap();
+
+    // The newer curated presets mount too.
+    for (id, expect_first) in [
+        ("blues", "builtin:gate"),
+        ("metal", "builtin:gate"),
+        ("jazz", "builtin:gate"),
+        ("acoustic", "builtin:gate"),
+        ("bass", "builtin:gate"),
+        ("bass_drive", "builtin:gate"),
+    ] {
+        click(&mut app, &format!("rack/preset/{id}")).unwrap();
+        let plugins = &app
+            .studio
+            .session()
+            .project()
+            .track(TrackId(guitar))
+            .unwrap()
+            .plugins;
+        assert!(!plugins.is_empty(), "{id}");
+        assert_eq!(plugins[0].plugin, expect_first, "{id}");
+    }
+
+    // Tweak the mounted (acoustic) chain, then save it as your own preset.
+    click(&mut app, "rack/preset/crunch").unwrap();
+    let plugins = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(guitar))
+        .unwrap()
+        .plugins
+        .clone();
+    let gate = plugins[0].id;
+    app.studio
+        .execute(dawkey_core::SetPluginParam::new(gate, "threshold", -33.0).into())
+        .unwrap();
+
+    assert!(app.access_tree().find("rack/saved/0").is_none());
+    click(&mut app, "rack/save_as").unwrap();
+    let field = app.access_tree().find("rack/save_name").unwrap().clone();
+    assert_eq!(field.role, Role::TextField);
+    type_keys(&mut app, &["m", "y", "space", "t", "o", "n", "e", "return"]);
+    assert_eq!(
+        app.studio.session().project().rack_presets.len(),
+        1,
+        "{:?}",
+        app.studio.session().project().rack_presets
+    );
+    assert_eq!(
+        app.studio.session().project().rack_presets[0].name,
+        "my tone"
+    );
+    assert_eq!(
+        app.access_tree()
+            .find("rack/saved/0")
+            .and_then(|n| n.name.clone()),
+        Some("Mount \"my tone\"".to_owned())
+    );
+
+    // Mounting it onto another track reproduces the saved chain, including
+    // the tweak.
+    let other = add_track(&mut app, "Other");
+    click(&mut app, &format!("rack/track/{other}")).unwrap();
+    click(&mut app, "rack/saved/0").unwrap();
+    let mounted = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(other))
+        .unwrap()
+        .plugins
+        .clone();
+    assert_eq!(mounted[0].plugin, "builtin:gate");
+    assert_eq!(mounted[0].params["threshold"], -33.0);
+
+    // Removing it clears the list.
+    click(&mut app, "rack/remove_saved/0").unwrap();
+    assert!(app.studio.session().project().rack_presets.is_empty());
+    assert!(app.access_tree().find("rack/saved/0").is_none());
+}

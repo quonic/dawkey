@@ -512,10 +512,10 @@ fn resolve_source_path(bundle: Option<&Path>, path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::command::{
-        AddClip, AddTrack, MoveClip, RemoveClip, RemoveTrack, RenameClip, RenameTrack, SetClipGain,
-        SetTempo, SetTrackGain,
+        AddClip, AddGuitarTrack, AddTrack, MoveClip, RemoveClip, RemoveTrack, RenameClip,
+        RenameTrack, SetClipGain, SetTempo, SetTrackGain,
     };
-    use crate::model::TrackKind;
+    use crate::model::{InputChannels, TrackKind};
 
     fn add(session: &mut Session, name: &str) -> TrackId {
         session
@@ -543,6 +543,53 @@ mod tests {
         assert_eq!(s.redo().unwrap().as_deref(), Some("add_track"));
         assert_eq!(s.project().tracks[0].id, id);
         assert_eq!(s.project().tracks[0].name, "Drums");
+    }
+
+    #[test]
+    fn add_guitar_track_is_armed_monitoring_and_mono_in_one_undo_step() {
+        let mut s = Session::default();
+        let id = s
+            .execute(AddGuitarTrack::default().into())
+            .unwrap()
+            .track
+            .unwrap();
+        let track = s.project().track(id).unwrap();
+        assert_eq!(track.name, "Guitar 1");
+        assert_eq!(track.kind, TrackKind::Audio);
+        assert!(track.armed);
+        assert!(track.monitor);
+        assert_eq!(track.input, InputChannels::Left);
+
+        // One undo step undoes the whole thing, not just the last field.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("add_guitar_track"));
+        assert!(s.project().tracks.is_empty());
+
+        // A second, unrelated session: a second default one gets its own
+        // number, and an explicit name and channel are honored.
+        let mut s = Session::default();
+        s.execute(AddGuitarTrack::default().into()).unwrap();
+        let second = s
+            .execute(
+                AddGuitarTrack {
+                    name: Some("Bass".into()),
+                    input: Some(InputChannels::Right),
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        assert_eq!(s.project().tracks[0].name, "Guitar 1");
+        let second = s.project().track(second).unwrap();
+        assert_eq!(second.name, "Bass");
+        assert_eq!(second.input, InputChannels::Right);
+        // A third default one skips the taken "Guitar 1".
+        let third = s
+            .execute(AddGuitarTrack::default().into())
+            .unwrap()
+            .track
+            .unwrap();
+        assert_eq!(s.project().track(third).unwrap().name, "Guitar 2");
     }
 
     #[test]
@@ -2469,6 +2516,147 @@ mod tests {
         s.undo().unwrap();
         assert_eq!(order(&s), [eq, comp]);
         assert!(s.project().tracks[0].lane(&param).is_some());
+    }
+
+    #[test]
+    fn saving_and_loading_a_rack_preset() {
+        use crate::command::{
+            AddPlugin, LoadSavedRackPreset, RemoveSavedRackPreset, SaveRackPreset, SetPluginParam,
+        };
+
+        let mut s = Session::default();
+        let gtr = add(&mut s, "Guitar");
+        let gate = s
+            .execute(
+                AddPlugin {
+                    track: gtr,
+                    plugin: "builtin:gate".into(),
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .plugin
+            .unwrap();
+        s.execute(SetPluginParam::new(gate, "threshold", -40.0).into())
+            .unwrap();
+        s.execute(
+            AddPlugin {
+                track: gtr,
+                plugin: "builtin:drive".into(),
+                index: None,
+            }
+            .into(),
+        )
+        .unwrap();
+        // An external plugin in the chain isn't part of what's saved.
+        s.execute(
+            AddPlugin {
+                track: gtr,
+                plugin: "clap:reverb".into(),
+                index: None,
+            }
+            .into(),
+        )
+        .unwrap();
+
+        // Saving with no builtin units at all is refused.
+        let empty = add(&mut s, "Empty");
+        assert!(
+            s.execute(
+                SaveRackPreset {
+                    track: empty,
+                    name: "Nothing".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+
+        s.execute(
+            SaveRackPreset {
+                track: gtr,
+                name: "My Tone".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().rack_presets.len(), 1);
+        assert_eq!(s.project().rack_presets[0].chain.len(), 2);
+        assert_eq!(s.project().rack_presets[0].chain[0].plugin, "builtin:gate");
+        assert_eq!(
+            s.project().rack_presets[0].chain[0].params["threshold"],
+            -40.0
+        );
+
+        // Saving again under the same name replaces it, not duplicates it.
+        s.execute(SetPluginParam::new(gate, "threshold", -30.0).into())
+            .unwrap();
+        s.execute(
+            SaveRackPreset {
+                track: gtr,
+                name: "My Tone".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().rack_presets.len(), 1);
+        assert_eq!(
+            s.project().rack_presets[0].chain[0].params["threshold"],
+            -30.0
+        );
+
+        // Loading it onto another track mounts the same builtin chain.
+        let other = add(&mut s, "Other");
+        s.execute(
+            LoadSavedRackPreset {
+                track: other,
+                name: "My Tone".into(),
+                replace: None,
+            }
+            .into(),
+        )
+        .unwrap();
+        let loaded = &s.project().track(other).unwrap().plugins;
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].plugin, "builtin:gate");
+        assert_eq!(loaded[0].params["threshold"], -30.0);
+        assert_eq!(loaded[1].plugin, "builtin:drive");
+
+        // One undo step undoes the whole load.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("load_saved_rack_preset"));
+        assert!(s.project().track(other).unwrap().plugins.is_empty());
+
+        // An unknown name is refused, for both loading and removing.
+        assert!(
+            s.execute(
+                LoadSavedRackPreset {
+                    track: other,
+                    name: "Nope".into(),
+                    replace: None,
+                }
+                .into(),
+            )
+            .is_err()
+        );
+        assert!(
+            s.execute(
+                RemoveSavedRackPreset {
+                    name: "Nope".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+
+        s.execute(
+            RemoveSavedRackPreset {
+                name: "My Tone".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert!(s.project().rack_presets.is_empty());
     }
 
     #[test]
