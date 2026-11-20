@@ -3946,6 +3946,41 @@ fn the_sound_source_toggle_switches_a_pad_between_synth_and_samples() {
 }
 
 #[test]
+fn clicking_a_drum_effect_preset_keeps_the_chosen_kit() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins[0]
+        .id;
+
+    click(&mut app, "step_seq/sound/acoustic_vcsl").unwrap();
+    click(&mut app, "step_seq/kit/metal").unwrap();
+
+    // The instrument's slot ID didn't change, so its sample kit survived.
+    assert_eq!(
+        plugin,
+        app.studio
+            .session()
+            .project()
+            .clip(ClipId(clip))
+            .unwrap()
+            .0
+            .plugins[0]
+            .id
+    );
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().sample_kit,
+        Some(dawkey_studio::SampleKit::AcousticVcsl)
+    );
+}
+
+#[test]
 fn the_drum_kits_rack_unit_pages_its_params_instead_of_overflowing() {
     let mut app = app();
     let (track, clip) = add_drum_clip(&mut app);

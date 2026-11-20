@@ -3646,7 +3646,63 @@ impl ApplyDrumKit {
                 self.track
             )));
         }
-        mount_chain(project, self.track, drum_kit_chain(self.kit), true)
+        let chain = drum_kit_chain(self.kit);
+        if chain.len() > MAX_PLUGINS {
+            return Err(CoreError::invalid(format!(
+                "a track can hold at most {MAX_PLUGINS} plugins"
+            )));
+        }
+        // Keep the instrument's existing slot ID, so a sample kit chosen
+        // for it (plugin_states, outside this Edit) survives a kit
+        // change; only the processing chain after it gets fresh IDs.
+        let existing_drums = track
+            .plugins
+            .first()
+            .filter(|p| p.plugin == DRUMS_PLUGIN_ID)
+            .map(|p| p.id);
+        let removed: Vec<PluginId> = track
+            .plugins
+            .iter()
+            .filter(|p| Some(p.id) != existing_drums)
+            .map(|p| p.id)
+            .collect();
+        let old_lanes = track.automation.clone();
+
+        let mut plugins = Vec::with_capacity(chain.len());
+        for (i, (plugin, params)) in chain.into_iter().enumerate() {
+            let id = if i == 0 {
+                existing_drums.unwrap_or_else(|| project.alloc_plugin_id())
+            } else {
+                project.alloc_plugin_id()
+            };
+            plugins.push(PluginSlot {
+                id,
+                plugin,
+                params,
+                bypass: false,
+                sidechain: None,
+                outputs: Default::default(),
+            });
+        }
+
+        let mut edits = vec![Edit::SetTrack {
+            id: self.track,
+            prop: TrackProp::Plugins(plugins),
+        }];
+        if !removed.is_empty() {
+            let lanes: Vec<AutomationLane> = old_lanes
+                .iter()
+                .filter(|l| !removed.iter().any(|id| targets_plugin(&l.target, *id)))
+                .cloned()
+                .collect();
+            if lanes.len() != old_lanes.len() {
+                edits.push(Edit::SetTrack {
+                    id: self.track,
+                    prop: TrackProp::Automation(lanes),
+                });
+            }
+        }
+        Ok((edits, Outcome::track(self.track)))
     }
 }
 

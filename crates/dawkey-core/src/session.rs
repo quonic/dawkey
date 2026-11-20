@@ -2721,6 +2721,48 @@ mod tests {
     }
 
     #[test]
+    fn applying_a_drum_kit_keeps_the_instruments_plugin_id() {
+        // A kit change replaces the processing chain, but must not give
+        // the instrument itself a new ID: the sample kit a client picked
+        // for it (set_drum_sample_kit) is keyed by that ID, outside this
+        // Edit entirely, and would silently fall back to synthesis if the
+        // instrument's slot were recreated.
+        use crate::command::{AddDrumTrack, ApplyDrumKit, DrumKit};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let track = outcome.track.unwrap();
+        let drums_id = s.project().track(track).unwrap().plugins[0].id;
+
+        s.execute(
+            ApplyDrumKit {
+                track,
+                kit: DrumKit::Metal,
+            }
+            .into(),
+        )
+        .unwrap();
+        let after = s.project().track(track).unwrap();
+        assert_eq!(after.plugins[0].id, drums_id);
+        assert_eq!(after.plugins[0].plugin, "builtin:drums");
+        // The processing chain itself is still fully replaced.
+        assert_eq!(
+            after
+                .plugins
+                .iter()
+                .map(|p| p.plugin.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "builtin:drums",
+                "builtin:gate",
+                "builtin:comp",
+                "builtin:eq",
+                "builtin:drive"
+            ]
+        );
+    }
+
+    #[test]
     fn applying_a_curated_drum_pattern_writes_sixteen_steps() {
         use crate::command::{AddDrumTrack, ApplyDrumPattern, DrumPattern};
 
