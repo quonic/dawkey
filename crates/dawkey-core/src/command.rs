@@ -3336,8 +3336,12 @@ fn drum_kit_params(pads: [(f64, f64, f64); 8]) -> BTreeMap<String, f64> {
 pub enum DrumKit {
     Kit808,
     Kit909,
-    Acoustic,
-    LoFi,
+    /// A clean, natural-sounding synthesized character (not to be
+    /// confused with the `acoustic_vcsl` *sample* kit, a real recording).
+    Natural,
+    /// A darkened, saturated synthesized character (not to be confused
+    /// with the `lofi_virtuosity` *sample* kit, a real recording).
+    Tape,
     Trap,
     Metal,
 }
@@ -3399,7 +3403,7 @@ fn drum_kit_spec(
                 ),
             ],
         ),
-        DrumKit::Acoustic => (
+        DrumKit::Natural => (
             [
                 (0.4, 280.0, 0.0),
                 (0.3, 220.0, 0.0),
@@ -3425,7 +3429,7 @@ fn drum_kit_spec(
                 ),
             ],
         ),
-        DrumKit::LoFi => (
+        DrumKit::Tape => (
             [
                 (0.3, 300.0, -1.0),
                 (0.2, 160.0, -2.0),

@@ -58,8 +58,8 @@ impl App {
                 let kit = match *name {
                     "808" => DrumKit::Kit808,
                     "909" => DrumKit::Kit909,
-                    "acoustic" => DrumKit::Acoustic,
-                    "lofi" => DrumKit::LoFi,
+                    "natural" => DrumKit::Natural,
+                    "tape" => DrumKit::Tape,
                     "trap" => DrumKit::Trap,
                     "metal" => DrumKit::Metal,
                     _ => return None,

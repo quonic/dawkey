@@ -317,8 +317,8 @@ fn sidebar(
             Node::row()
                 .width(Sizing::Fill(1.0))
                 .gap(4.0)
-                .child(kit_btn("acoustic", "Acoustic"))
-                .child(kit_btn("lofi", "LoFi")),
+                .child(kit_btn("natural", "Natural"))
+                .child(kit_btn("tape", "Tape")),
         )
         .child(
             Node::row()
@@ -359,9 +359,9 @@ fn sidebar(
             s.background = Some(pal().panel);
             s.border = Some((1.0, pal().border));
         })
-        .child(section("SOUND SOURCE"))
-        .child(sound)
         .child(section("KITS"))
+        .child(sound)
+        .child(section("DRUM EFFECT PRESETS"))
         .child(kits)
         .child(section("PATTERNS"))
         .child(patterns)
