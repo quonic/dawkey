@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use dawkey_core::{AddTrack, Project, SetTrackArm};
+use dawkey_core::{AddPlugin, AddTrack, Project, SetPluginParam, SetTrackArm, SetTrackMonitor};
 use dawkey_media::AudioData;
 
 use crate::{AudioBackend, LoadedProject, Studio, StudioOptions};
@@ -470,4 +470,98 @@ fn reimport_onto_several_targets_replaces_each_clip() {
             .collect();
         assert_eq!(clips, [clip]);
     }
+}
+
+/// An armed, monitoring track plays its rack through live input, not just
+/// recorded takes: the question "can you hear the effects without
+/// recording?" asks exactly this.
+#[test]
+fn monitoring_hears_the_racks_effects_without_recording() {
+    let mut studio = Studio::new(
+        LoadedProject::new(Project::default()),
+        AudioBackend::Virtual,
+    )
+    .unwrap();
+    // Each `execute` queues a new engine graph; a real session has the
+    // audio thread continuously draining that queue between user actions,
+    // but nothing drives it here, so a tiny `advance` after each `execute`
+    // stands in for that passage of time and lets the graph swap land
+    // before the next command queues another one.
+    let flush = |studio: &mut Studio| {
+        studio.advance(0.001).unwrap();
+    };
+    let track = studio
+        .execute(AddTrack::default().into())
+        .unwrap()
+        .track
+        .unwrap();
+    flush(&mut studio);
+    studio
+        .execute(SetTrackArm { track, armed: true }.into())
+        .unwrap();
+    flush(&mut studio);
+    studio
+        .execute(
+            SetTrackMonitor {
+                track,
+                monitor: true,
+            }
+            .into(),
+        )
+        .unwrap();
+    flush(&mut studio);
+
+    // Not playing, not recording, nothing on the timeline: this is
+    // monitoring live input, not playback of a take.
+    studio
+        .set_virtual_input(Some(AudioData::new(vec![vec![0.5; 480_000]])))
+        .unwrap();
+    let dry = studio.advance(0.1).unwrap();
+    assert!(!dry.silent);
+
+    let plugin = studio
+        .execute(
+            AddPlugin {
+                track,
+                plugin: "builtin:gate".to_owned(),
+                index: None,
+            }
+            .into(),
+        )
+        .unwrap()
+        .plugin
+        .unwrap();
+    flush(&mut studio);
+    // At its default threshold (-45 dB), well under the monitored -6 dBFS
+    // signal, the gate stays open and barely touches it.
+    let with_defaults = studio.advance(0.1).unwrap();
+
+    // Threshold at its max (0 dBFS), well above the monitored -6 dBFS
+    // signal, so the gate now stays shut.
+    studio
+        .execute(
+            SetPluginParam {
+                plugin,
+                param: "threshold".to_owned(),
+                value: Some(0.0),
+                text: None,
+            }
+            .into(),
+        )
+        .unwrap();
+    flush(&mut studio);
+    // With its default hold (40 ms) and release (120 ms), it needs some
+    // real time to close; let it settle, then measure the steady,
+    // fully-closed state (not the moment it's still on its way down).
+    studio.advance(0.5).unwrap();
+    let gated = studio.advance(0.1).unwrap();
+
+    assert!(
+        gated.rms_dbfs[0].unwrap() < with_defaults.rms_dbfs[0].unwrap() - 20.0,
+        "monitoring should hear the mounted gate close once its threshold is \
+         turned up: dry {:?}, with_defaults {:?}, gated {:?}",
+        dry.rms_dbfs,
+        with_defaults.rms_dbfs,
+        gated.rms_dbfs
+    );
 }
