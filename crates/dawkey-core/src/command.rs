@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 use crate::edit::{ClipProp, Edit, TrackProp};
 use crate::error::CoreError;
 use crate::model::{
-    AutomationLane, AutomationPoint, AutomationTarget, CC_MAX, Clip, ClipContent, ClipId,
-    ControlPoint, Controller, DEVICE_LATENCY_MS_MAX, DrumStep, GAIN_DB_MAX, GAIN_DB_MIN, MASTER,
-    MIDI_MAX, MidiOutput, Note, NoteId, PluginId, PluginSlot, Project, SavedDrumPattern,
-    SavedRackPreset, SavedRackUnit, Send, SourceId, SynthParams, TEMPO_BPM_MAX, TEMPO_BPM_MIN,
+    ArchivedTrack, AutomationLane, AutomationPoint, AutomationTarget, CC_MAX, Clip, ClipContent,
+    ClipId, ControlPoint, Controller, DEVICE_LATENCY_MS_MAX, DeletedTrackArchive,
+    DetachedTrackRoutes, DrumStep, GAIN_DB_MAX, GAIN_DB_MIN, MASTER, MIDI_MAX, MidiOutput,
+    MixdownArchive, Note, NoteId, PluginId, PluginSlot, Project, SavedDrumPattern, SavedRackPreset,
+    SavedRackUnit, Send, Source, SourceId, SynthParams, TEMPO_BPM_MAX, TEMPO_BPM_MIN,
     TimeSignature, Track, TrackId, TrackKind, Waveform,
 };
 use crate::model::{InputChannels, Region, TimeRange};
@@ -127,6 +128,10 @@ commands! {
     AddTrack => "add_track", Additive;
     AddGuitarTrack => "add_guitar_track", Additive;
     RemoveTrack => "remove_track", Destructive;
+    DeleteTracks => "delete_tracks", Destructive;
+    RestoreDeletedTracks => "restore_deleted_tracks", Additive;
+    ArchiveTracksForMixdown => "archive_tracks_for_mixdown", Destructive;
+    RestoreMixdownTracks => "restore_mixdown_tracks", Additive;
     RenameTrack => "rename_track", Setter;
     SetTrackGain => "set_track_gain", Setter;
     SetTrackPan => "set_track_pan", Setter;
@@ -351,6 +356,530 @@ impl RemoveTrack {
             }
         }
         edits.push(Edit::RemoveTrack { id: gone });
+        if project.mixdown_archives.iter().any(|a| a.mix_track == gone) {
+            let mut archives = project.mixdown_archives.clone();
+            archives.retain(|a| a.mix_track != gone);
+            edits.push(Edit::SetMixdownArchives(archives));
+        }
+        Ok((edits, Outcome::none()))
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn archive_tracks_edits(
+    project: &Project,
+    unique_ids: &[TrackId],
+) -> (Vec<ArchivedTrack>, Vec<DetachedTrackRoutes>, Vec<Edit>) {
+    let mut archived: Vec<ArchivedTrack> = unique_ids
+        .iter()
+        .filter_map(|&id| {
+            project.track_index(id).map(|index| ArchivedTrack {
+                index,
+                track: project.tracks[index].clone(),
+            })
+        })
+        .collect();
+    archived.sort_by_key(|a| a.index);
+
+    let mut edits = Vec::new();
+    let mut detached_routes = Vec::new();
+    for track in project.all_tracks().filter(|t| !unique_ids.contains(&t.id)) {
+        let detached_output = track.output.filter(|o| unique_ids.contains(o));
+        if detached_output.is_some() {
+            edits.push(Edit::SetTrack {
+                id: track.id,
+                prop: TrackProp::Output(None),
+            });
+        }
+        let detached_sends: Vec<Send> = track
+            .sends
+            .iter()
+            .copied()
+            .filter(|s| unique_ids.contains(&s.bus))
+            .collect();
+        if !detached_sends.is_empty() {
+            edits.push(Edit::SetTrack {
+                id: track.id,
+                prop: TrackProp::Sends(
+                    track
+                        .sends
+                        .iter()
+                        .copied()
+                        .filter(|s| !unique_ids.contains(&s.bus))
+                        .collect(),
+                ),
+            });
+        }
+        let is_detached_send_lane = |l: &AutomationLane| matches!(l.target, AutomationTarget::Send { bus } if unique_ids.contains(&bus));
+        let detached_send_automation: Vec<AutomationLane> = track
+            .automation
+            .iter()
+            .filter(|l| is_detached_send_lane(l))
+            .cloned()
+            .collect();
+        if !detached_send_automation.is_empty() {
+            edits.push(Edit::SetTrack {
+                id: track.id,
+                prop: TrackProp::Automation(
+                    track
+                        .automation
+                        .iter()
+                        .filter(|l| !is_detached_send_lane(l))
+                        .cloned()
+                        .collect(),
+                ),
+            });
+        }
+        let mut detached_plugin_routes = Vec::new();
+        let mut updated_plugins = track.plugins.clone();
+        let mut plugins_changed = false;
+        for p in &mut updated_plugins {
+            let sc = p.sidechain.filter(|s| unique_ids.contains(s));
+            let outs: BTreeMap<u32, TrackId> = p
+                .outputs
+                .iter()
+                .filter(|&(_, b)| unique_ids.contains(b))
+                .map(|(&out, &bus)| (out, bus))
+                .collect();
+            if sc.is_some() || !outs.is_empty() {
+                plugins_changed = true;
+                detached_plugin_routes.push((p.id, sc, outs));
+                p.sidechain = p.sidechain.filter(|s| !unique_ids.contains(s));
+                p.outputs.retain(|_, b| !unique_ids.contains(b));
+            }
+        }
+        if plugins_changed {
+            edits.push(Edit::SetTrack {
+                id: track.id,
+                prop: TrackProp::Plugins(updated_plugins),
+            });
+        }
+        if detached_output.is_some()
+            || !detached_sends.is_empty()
+            || !detached_send_automation.is_empty()
+            || !detached_plugin_routes.is_empty()
+        {
+            detached_routes.push(DetachedTrackRoutes {
+                track: track.id,
+                output: detached_output,
+                sends: detached_sends,
+                send_automation: detached_send_automation,
+                plugin_routes: detached_plugin_routes,
+            });
+        }
+    }
+
+    for a in &archived {
+        edits.push(Edit::RemoveTrack { id: a.track.id });
+    }
+    (archived, detached_routes, edits)
+}
+
+fn restore_archived_tracks_edits(
+    project: &Project,
+    mut archived: Vec<ArchivedTrack>,
+    detached_routes: Vec<DetachedTrackRoutes>,
+    skip_track: Option<TrackId>,
+) -> (Vec<Edit>, Option<TrackId>, Project) {
+    archived.sort_by_key(|a| a.index);
+
+    let existing_unrestored: Vec<TrackId> = project
+        .tracks
+        .iter()
+        .filter(|t| Some(t.id) != skip_track)
+        .map(|t| t.id)
+        .collect();
+    let existing_buses: Vec<TrackId> = project
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Bus && Some(t.id) != skip_track)
+        .map(|t| t.id)
+        .collect();
+
+    let mut valid_ids = existing_unrestored;
+    let mut valid_buses = existing_buses;
+    for a in &archived {
+        if !valid_ids.contains(&a.track.id) {
+            valid_ids.push(a.track.id);
+        }
+        if a.track.kind == TrackKind::Bus && !valid_buses.contains(&a.track.id) {
+            valid_buses.push(a.track.id);
+        }
+    }
+
+    let mut edits = Vec::new();
+    let mut first_restored = None;
+    let mut sim = project.clone();
+    for ArchivedTrack { index, mut track } in archived {
+        if sim.tracks.iter().any(|t| t.id == track.id) {
+            continue;
+        }
+        if first_restored.is_none() {
+            first_restored = Some(track.id);
+        }
+        track.output = track.output.filter(|b| valid_buses.contains(b));
+        track
+            .sends
+            .retain(|s| valid_buses.contains(&s.bus) && s.bus != track.id);
+        let sends = &track.sends;
+        let plugins = &track.plugins;
+        track.automation.retain(|l| match &l.target {
+            AutomationTarget::Send { bus } => sends.iter().any(|s| s.bus == *bus),
+            AutomationTarget::Param { plugin, .. } => plugins.iter().any(|p| p.id == *plugin),
+            _ => true,
+        });
+        for p in &mut track.plugins {
+            p.sidechain = p
+                .sidechain
+                .filter(|s| valid_ids.contains(s) && *s != track.id);
+            p.outputs.retain(|_, b| valid_buses.contains(b));
+        }
+        let at = index.min(sim.tracks.len());
+        sim.tracks.insert(at, track.clone());
+        edits.push(Edit::InsertTrack { index: at, track });
+    }
+
+    for r in detached_routes {
+        if Some(r.track) == skip_track {
+            continue;
+        }
+        let Some(cur) = sim.track(r.track).cloned() else {
+            continue;
+        };
+        if cur.id != MASTER
+            && cur.output.is_none()
+            && let Some(bus) = r.output
+            && valid_buses.contains(&bus)
+            && !sim.depends_on(cur.id, bus)
+        {
+            sim.track_mut(cur.id).expect("checked").output = Some(bus);
+            edits.push(Edit::SetTrack {
+                id: cur.id,
+                prop: TrackProp::Output(Some(bus)),
+            });
+        }
+        if cur.id != MASTER && !r.sends.is_empty() {
+            let mut sends = cur.sends.clone();
+            let mut sends_changed = false;
+            for send in r.sends {
+                if valid_buses.contains(&send.bus)
+                    && send.bus != cur.id
+                    && !sends.iter().any(|s| s.bus == send.bus)
+                    && !sim.depends_on(cur.id, send.bus)
+                {
+                    sends.push(send);
+                    sends_changed = true;
+                }
+            }
+            if sends_changed {
+                sim.track_mut(cur.id).expect("checked").sends = sends.clone();
+                edits.push(Edit::SetTrack {
+                    id: cur.id,
+                    prop: TrackProp::Sends(sends),
+                });
+                if !r.send_automation.is_empty() {
+                    let cur_ref = sim.track(cur.id).expect("checked");
+                    let mut auto = cur_ref.automation.clone();
+                    let mut auto_changed = false;
+                    for lane in r.send_automation {
+                        if let AutomationTarget::Send { bus } = lane.target
+                            && cur_ref.sends.iter().any(|s| s.bus == bus)
+                            && !auto.iter().any(|l| l.target == lane.target)
+                        {
+                            auto.push(lane);
+                            auto_changed = true;
+                        }
+                    }
+                    if auto_changed {
+                        sim.track_mut(cur.id).expect("checked").automation = auto.clone();
+                        edits.push(Edit::SetTrack {
+                            id: cur.id,
+                            prop: TrackProp::Automation(auto),
+                        });
+                    }
+                }
+            }
+        }
+        if !r.plugin_routes.is_empty() {
+            let mut plugins = sim.track(cur.id).expect("checked").plugins.clone();
+            let mut changed = false;
+            for (pid, sc, outputs) in r.plugin_routes {
+                let Some(slot) = plugins.iter_mut().find(|p| p.id == pid) else {
+                    continue;
+                };
+                if slot.sidechain.is_none()
+                    && let Some(src) = sc
+                    && valid_ids.contains(&src)
+                    && src != cur.id
+                    && !sim.depends_on(src, cur.id)
+                {
+                    slot.sidechain = Some(src);
+                    changed = true;
+                }
+                for (out_idx, bus) in outputs {
+                    if !slot.outputs.contains_key(&out_idx)
+                        && valid_buses.contains(&bus)
+                        && !sim.depends_on(cur.id, bus)
+                    {
+                        slot.outputs.insert(out_idx, bus);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                sim.track_mut(cur.id).expect("checked").plugins = plugins.clone();
+                edits.push(Edit::SetTrack {
+                    id: cur.id,
+                    prop: TrackProp::Plugins(plugins),
+                });
+            }
+        }
+    }
+
+    (edits, first_restored, sim)
+}
+
+fn track_audio_sources(track: &Track) -> impl Iterator<Item = SourceId> + '_ {
+    track.clips.iter().filter_map(|c| match c.content {
+        ClipContent::Audio { source, .. } => Some(source),
+        ClipContent::Midi { .. } => None,
+    })
+}
+
+/// Delete one or more tracks (or buses). By default (`permanent: false`),
+/// the tracks, their clips, plugins, and routing are archived non-destructively
+/// in the project so they can be restored later with restore_deleted_tracks.
+/// When `permanent` is true, the tracks, any mixdown archives attached to them,
+/// and any audio sources used exclusively by them are permanently removed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteTracks {
+    pub tracks: Vec<TrackId>,
+    /// Permanently delete the tracks and their exclusive audio sources and
+    /// settings instead of archiving them for later restoration. Defaults to false.
+    #[serde(default)]
+    pub permanent: bool,
+}
+
+impl DeleteTracks {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let mut unique_ids = Vec::with_capacity(self.tracks.len());
+        for id in self.tracks {
+            require_not_master(project, id, "deleted")?;
+            if project.track(id).is_none() {
+                return Err(CoreError::TrackNotFound(id));
+            }
+            if !unique_ids.contains(&id) {
+                unique_ids.push(id);
+            }
+        }
+        if unique_ids.is_empty() {
+            return Err(CoreError::invalid("select at least one track to delete"));
+        }
+
+        let (archived, detached_routes, mut edits) = archive_tracks_edits(project, &unique_ids);
+        if !self.permanent {
+            let mut archives = project.deleted_track_archives.clone();
+            archives.push(DeletedTrackArchive {
+                tracks: archived,
+                detached_routes,
+            });
+            edits.push(Edit::SetDeletedTrackArchives(archives));
+            return Ok((edits, Outcome::none()));
+        }
+
+        let deleted_sources: Vec<SourceId> = unique_ids
+            .iter()
+            .filter_map(|&id| project.track(id))
+            .flat_map(track_audio_sources)
+            .chain(
+                project
+                    .mixdown_archives
+                    .iter()
+                    .filter(|a| unique_ids.contains(&a.mix_track))
+                    .flat_map(|a| &a.tracks)
+                    .flat_map(|at| track_audio_sources(&at.track)),
+            )
+            .collect();
+
+        if project
+            .mixdown_archives
+            .iter()
+            .any(|a| unique_ids.contains(&a.mix_track))
+        {
+            let mut mixdown_archives = project.mixdown_archives.clone();
+            mixdown_archives.retain(|a| !unique_ids.contains(&a.mix_track));
+            edits.push(Edit::SetMixdownArchives(mixdown_archives));
+        }
+
+        let retained_sources: Vec<SourceId> = project
+            .tracks
+            .iter()
+            .filter(|t| !unique_ids.contains(&t.id))
+            .flat_map(track_audio_sources)
+            .chain(
+                project
+                    .mixdown_archives
+                    .iter()
+                    .filter(|a| !unique_ids.contains(&a.mix_track))
+                    .flat_map(|a| &a.tracks)
+                    .flat_map(|at| track_audio_sources(&at.track)),
+            )
+            .chain(
+                project
+                    .deleted_track_archives
+                    .iter()
+                    .flat_map(|a| &a.tracks)
+                    .flat_map(|at| track_audio_sources(&at.track)),
+            )
+            .collect();
+
+        let remaining_sources: Vec<Source> = project
+            .sources
+            .iter()
+            .filter(|s| !(deleted_sources.contains(&s.id) && !retained_sources.contains(&s.id)))
+            .cloned()
+            .collect();
+        if remaining_sources.len() != project.sources.len() {
+            edits.push(Edit::SetSources(remaining_sources));
+        }
+
+        Ok((edits, Outcome::none()))
+    }
+}
+
+/// Restore the most recently non-destructively deleted track(s) (or the
+/// deleted-track archive at `index`), including their clips, plugins, bus
+/// routing, sends, automation, and detached incoming routes, as one undo step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreDeletedTracks {
+    /// Optional index into `deleted_track_archives`. Defaults to the most
+    /// recently deleted batch (`None`).
+    #[serde(default)]
+    pub index: Option<usize>,
+}
+
+impl RestoreDeletedTracks {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        if project.deleted_track_archives.is_empty() {
+            return Err(CoreError::invalid("there are no deleted tracks to restore"));
+        }
+        let target_index = match self.index {
+            Some(i) if i < project.deleted_track_archives.len() => i,
+            Some(i) => {
+                return Err(CoreError::invalid(format!(
+                    "deleted track archive index {i} out of range"
+                )));
+            }
+            None => project.deleted_track_archives.len() - 1,
+        };
+        let mut archives = project.deleted_track_archives.clone();
+        let archive = archives.remove(target_index);
+        let (mut edits, first_restored, _) =
+            restore_archived_tracks_edits(project, archive.tracks, archive.detached_routes, None);
+        edits.push(Edit::SetDeletedTrackArchives(archives));
+        Ok((
+            edits,
+            Outcome {
+                track: first_restored,
+                ..Outcome::default()
+            },
+        ))
+    }
+}
+
+/// Remove source tracks that were mixed down into `mix_track`, stashing their
+/// full state (clips, plugins, bus routing, sends, automation) and any
+/// incoming routes from remaining tracks inside the project's non-destructive
+/// mixdown archive so they can be restored later with restore_mixdown_tracks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveTracksForMixdown {
+    pub mix_track: TrackId,
+    pub tracks: Vec<TrackId>,
+}
+
+impl ArchiveTracksForMixdown {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        require_not_master(project, self.mix_track, "used as a mixdown target")?;
+        let mut unique_ids = Vec::with_capacity(self.tracks.len());
+        for id in self.tracks {
+            require_not_master(project, id, "archived")?;
+            if id == self.mix_track {
+                return Err(CoreError::invalid("a mixdown track cannot archive itself"));
+            }
+            if !unique_ids.contains(&id) {
+                unique_ids.push(id);
+            }
+        }
+        if unique_ids.is_empty() {
+            return Err(CoreError::invalid("select at least one track to archive"));
+        }
+
+        let (archived, detached_routes, mut edits) = archive_tracks_edits(project, &unique_ids);
+        let mut archives = project.mixdown_archives.clone();
+        archives.retain(|a| a.mix_track != self.mix_track);
+        archives.push(MixdownArchive {
+            mix_track: self.mix_track,
+            tracks: archived,
+            detached_routes,
+        });
+        edits.push(Edit::SetMixdownArchives(archives));
+        Ok((edits, Outcome::none()))
+    }
+}
+
+/// Restore the original tracks archived when `mix_track` was created
+/// (including their clips, plugins, bus routing, sends, automation, and
+/// detached incoming routes), optionally removing `mix_track`, as one undo step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreMixdownTracks {
+    pub mix_track: TrackId,
+    /// Remove the combined mixdown track when restoring its source tracks.
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub remove_mix_track: bool,
+}
+
+impl RestoreMixdownTracks {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let archive = project
+            .mixdown_archive(self.mix_track)
+            .cloned()
+            .ok_or_else(|| {
+                CoreError::invalid(format!(
+                    "track {} has no archived source tracks to restore",
+                    self.mix_track
+                ))
+            })?;
+        let will_remove_mix = self.remove_mix_track
+            && self.mix_track != MASTER
+            && project.track(self.mix_track).is_some();
+
+        let (mut edits, _, mut sim) = restore_archived_tracks_edits(
+            project,
+            archive.tracks,
+            archive.detached_routes,
+            will_remove_mix.then_some(self.mix_track),
+        );
+
+        let mut archives = project.mixdown_archives.clone();
+        archives.retain(|a| a.mix_track != self.mix_track);
+        if will_remove_mix {
+            let (mut remove_edits, _) = (RemoveTrack {
+                track: self.mix_track,
+            })
+            .lower(&mut sim)?;
+            // Avoid duplicate SetMixdownArchives if RemoveTrack emitted one.
+            remove_edits.retain(|e| !matches!(e, Edit::SetMixdownArchives(_)));
+            edits.extend(remove_edits);
+        }
+        edits.push(Edit::SetMixdownArchives(archives));
         Ok((edits, Outcome::none()))
     }
 }

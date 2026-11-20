@@ -240,10 +240,12 @@ impl Session {
         self.states_changed |= changed;
     }
 
-    /// Every plugin slot in the project.
+    /// Every plugin slot in the project (including tracks in non-destructive
+    /// mixdown and deleted-track archives, so their states survive save and reload).
     fn plugin_ids(&self) -> Vec<PluginId> {
         self.project
             .all_tracks()
+            .chain(self.project.archived_tracks())
             .flat_map(|t| &t.plugins)
             .map(|p| p.id)
             .collect()
@@ -3657,5 +3659,336 @@ mod tests {
         assert_eq!(recovered.project(), s.project());
         assert_eq!(recovered.path(), Some(bundle.as_path()));
         assert!(recovered.is_dirty());
+    }
+
+    #[test]
+    fn archiving_and_restoring_mixdown_tracks_preserves_plugins_routing_and_states() {
+        use crate::{
+            AddDrumTrack, AddPlugin, ArchiveTracksForMixdown, PluginState, RestoreMixdownTracks,
+            SetPluginOutput, SetPluginSidechain, SetTrackSend,
+        };
+        let mut s = Session::default();
+        let bus = s
+            .execute(
+                AddTrack {
+                    name: Some("Drum Bus".into()),
+                    kind: TrackKind::Bus,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let drums = s
+            .execute(
+                AddDrumTrack {
+                    name: Some("Drums".into()),
+                    kit: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let drum_plugin = s.project().track(drums).unwrap().plugins[0].id;
+        // Patch pad 0 of the drum instrument to the bus, and save binary state.
+        s.execute(
+            SetPluginOutput {
+                plugin: drum_plugin,
+                output: 0,
+                bus: Some(bus),
+            }
+            .into(),
+        )
+        .unwrap();
+        s.set_plugin_state(drum_plugin, Some(PluginState::new(vec![1, 2, 3, 4])));
+
+        // Another remaining track has a plugin sidechained from Drums, and sends to Drum Bus.
+        let bass = add(&mut s, "Bass");
+        let comp = s
+            .execute(
+                AddPlugin {
+                    track: bass,
+                    plugin: "builtin:comp".into(),
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .plugin
+            .unwrap();
+        s.execute(
+            SetPluginSidechain {
+                plugin: comp,
+                source: Some(drums),
+            }
+            .into(),
+        )
+        .unwrap();
+        s.execute(
+            SetTrackSend {
+                track: bass,
+                bus,
+                gain_db: Some(-6.0),
+                pre_fader: None,
+            }
+            .into(),
+        )
+        .unwrap();
+
+        let mix = add(&mut s, "Mixdown 1");
+        s.execute(
+            ArchiveTracksForMixdown {
+                mix_track: mix,
+                tracks: vec![bus, drums],
+            }
+            .into(),
+        )
+        .unwrap();
+
+        assert!(s.project().track(bus).is_none());
+        assert!(s.project().track(drums).is_none());
+        assert!(s.project().mixdown_archive(mix).is_some());
+        // Incoming routes from Bass were cleanly detached while archived.
+        let bass_now = s.project().track(bass).unwrap();
+        assert_eq!(bass_now.plugins[0].sidechain, None);
+        assert!(bass_now.sends.is_empty());
+
+        // Saving and reopening keeps the archived tracks' plugin states intact.
+        let dir = tempfile::tempdir().unwrap();
+        let saved = s.save(Some(&dir.path().join("Archived"))).unwrap();
+        let mut reopened = Session::open(&saved).unwrap();
+        assert_eq!(
+            reopened
+                .project()
+                .plugin_states
+                .get(&drum_plugin)
+                .map(PluginState::bytes),
+            Some([1, 2, 3, 4].as_slice())
+        );
+
+        // New tracks do not collide with archived track/plugin IDs.
+        let extra = add(&mut reopened, "Extra");
+        assert!(extra != bus && extra != drums);
+
+        // Restoring brings back both archived tracks, their per-pad bus routing,
+        // binary plugin state, and Bass's sidechain & send.
+        reopened
+            .execute(
+                RestoreMixdownTracks {
+                    mix_track: mix,
+                    remove_mix_track: true,
+                }
+                .into(),
+            )
+            .unwrap();
+        assert!(reopened.project().track(mix).is_none());
+        assert!(reopened.project().mixdown_archive(mix).is_none());
+        let restored_drums = reopened.project().track(drums).unwrap();
+        assert_eq!(restored_drums.plugins[0].outputs.get(&0), Some(&bus));
+        assert_eq!(
+            reopened
+                .project()
+                .plugin_states
+                .get(&drum_plugin)
+                .map(PluginState::bytes),
+            Some([1, 2, 3, 4].as_slice())
+        );
+        let restored_bass = reopened.project().track(bass).unwrap();
+        assert_eq!(restored_bass.plugins[0].sidechain, Some(drums));
+        assert_eq!(restored_bass.sends.len(), 1);
+        assert_eq!(restored_bass.sends[0].bus, bus);
+
+        // Undo re-archives them in one step; redo restores again.
+        reopened.undo().unwrap();
+        assert!(reopened.project().track(mix).is_some());
+        assert!(reopened.project().track(drums).is_none());
+        reopened.redo().unwrap();
+        assert!(reopened.project().track(mix).is_none());
+        assert!(reopened.project().track(drums).is_some());
+    }
+
+    #[test]
+    fn deleting_tracks_archives_non_destructively_and_permanent_deletes_sources_and_archives() {
+        use crate::{
+            AddClip, AddDrumTrack, AddPlugin, ArchiveTracksForMixdown, DeleteTracks, PluginState,
+            RestoreDeletedTracks, SetPluginOutput, SetPluginSidechain, SetTrackSend,
+        };
+        let mut s = Session::default();
+        let bus = s
+            .execute(
+                AddTrack {
+                    name: Some("Drum Bus".into()),
+                    kind: TrackKind::Bus,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let drums = s
+            .execute(
+                AddDrumTrack {
+                    name: Some("Drums".into()),
+                    kit: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let drum_plugin = s.project().track(drums).unwrap().plugins[0].id;
+        s.execute(
+            SetPluginOutput {
+                plugin: drum_plugin,
+                output: 0,
+                bus: Some(bus),
+            }
+            .into(),
+        )
+        .unwrap();
+        s.set_plugin_state(drum_plugin, Some(PluginState::new(vec![9, 8, 7])));
+
+        let bass = add(&mut s, "Bass");
+        let comp = s
+            .execute(
+                AddPlugin {
+                    track: bass,
+                    plugin: "builtin:comp".into(),
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .plugin
+            .unwrap();
+        s.execute(
+            SetPluginSidechain {
+                plugin: comp,
+                source: Some(drums),
+            }
+            .into(),
+        )
+        .unwrap();
+        s.execute(
+            SetTrackSend {
+                track: bass,
+                bus,
+                gain_db: Some(-3.0),
+                pre_fader: None,
+            }
+            .into(),
+        )
+        .unwrap();
+
+        // Non-destructive delete (default: permanent = false) archives tracks, plugins, and routes.
+        s.execute(
+            DeleteTracks {
+                tracks: vec![bus, drums],
+                permanent: false,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert!(s.project().track(bus).is_none());
+        assert!(s.project().track(drums).is_none());
+        assert_eq!(s.project().deleted_track_archives.len(), 1);
+        assert_eq!(s.project().track(bass).unwrap().plugins[0].sidechain, None);
+        assert!(s.project().track(bass).unwrap().sends.is_empty());
+
+        // Saving and reloading preserves deleted tracks' plugin states and reserved IDs.
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let wav_only = src_dir.join("only.wav");
+        let wav_shared = src_dir.join("shared.wav");
+        let wav_mix = src_dir.join("mix.wav");
+        std::fs::write(&wav_only, b"only").unwrap();
+        std::fs::write(&wav_shared, b"shared").unwrap();
+        std::fs::write(&wav_mix, b"mix").unwrap();
+
+        let only_src = s.add_source("only", &wav_only, 2, 4800);
+        let shared_src = s.add_source("shared", &wav_shared, 2, 4800);
+        let mix_src = s.add_source("mix", &wav_mix, 2, 4800);
+        s.execute(AddClip::new(shared_src, Some(bass), 0.0).into())
+            .unwrap();
+        let saved = s.save(Some(&dir.path().join("DeletedTest"))).unwrap();
+        let mut reopened = Session::open(&saved).unwrap();
+        assert_eq!(
+            reopened
+                .project()
+                .plugin_states
+                .get(&drum_plugin)
+                .map(PluginState::bytes),
+            Some([9, 8, 7].as_slice())
+        );
+
+        // Restore brings back both deleted tracks, per-pad bus routing, state, and incoming routes.
+        let restored = reopened
+            .execute(RestoreDeletedTracks { index: None }.into())
+            .unwrap()
+            .track;
+        assert!(restored.is_some());
+        assert!(reopened.project().deleted_track_archives.is_empty());
+        assert_eq!(
+            reopened.project().track(drums).unwrap().plugins[0]
+                .outputs
+                .get(&0),
+            Some(&bus)
+        );
+        assert_eq!(
+            reopened.project().track(bass).unwrap().plugins[0].sidechain,
+            Some(drums)
+        );
+        assert_eq!(reopened.project().track(bass).unwrap().sends.len(), 1);
+
+        // Undo re-archives them; redo restores them again.
+        reopened.undo().unwrap();
+        assert!(reopened.project().track(drums).is_none());
+        assert_eq!(reopened.project().deleted_track_archives.len(), 1);
+        reopened.redo().unwrap();
+        assert!(reopened.project().track(drums).is_some());
+
+        // Permanent delete removes exclusive audio sources and attached mixdown archives,
+        // while keeping sources shared with remaining tracks.
+        let gtr = add(&mut reopened, "Guitar");
+        reopened
+            .execute(AddClip::new(only_src, Some(gtr), 0.0).into())
+            .unwrap();
+        reopened
+            .execute(AddClip::new(shared_src, Some(gtr), 0.2).into())
+            .unwrap();
+        let temp_src_track = add(&mut reopened, "Orig MixSrc");
+        reopened
+            .execute(AddClip::new(mix_src, Some(temp_src_track), 0.0).into())
+            .unwrap();
+        let mix = add(&mut reopened, "Mixdown Track");
+        reopened
+            .execute(
+                ArchiveTracksForMixdown {
+                    mix_track: mix,
+                    tracks: vec![temp_src_track],
+                }
+                .into(),
+            )
+            .unwrap();
+
+        reopened
+            .execute(
+                DeleteTracks {
+                    tracks: vec![gtr, mix],
+                    permanent: true,
+                }
+                .into(),
+            )
+            .unwrap();
+        assert!(reopened.project().track(gtr).is_none());
+        assert!(reopened.project().track(mix).is_none());
+        assert!(reopened.project().mixdown_archive(mix).is_none());
+        assert!(reopened.project().source(only_src).is_none());
+        assert!(reopened.project().source(mix_src).is_none());
+        assert!(reopened.project().source(shared_src).is_some());
     }
 }

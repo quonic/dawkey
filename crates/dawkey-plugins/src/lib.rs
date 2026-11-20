@@ -519,7 +519,7 @@ impl Instance {
         match &mut self.0 {
             InstanceKind::Vst3(vst3) => vst3.take_wants_reload(),
             InstanceKind::Bridged(bridged) => bridged.take_wants_reload(),
-            InstanceKind::Clap(_) | InstanceKind::Lv2(_) => false,
+            InstanceKind::Builtin | InstanceKind::Clap(_) | InstanceKind::Lv2(_) => false,
         }
     }
 
