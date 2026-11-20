@@ -4157,3 +4157,44 @@ fn the_step_sequencer_pads_follow_time_signature_changes() {
     assert!(app.ui.find("step/0/13").is_some());
     assert!(app.ui.find("step/0/14").is_none());
 }
+
+#[test]
+fn genre_and_fill_pattern_buttons_in_the_step_sequencer() {
+    use crate::view::step_sequencer::{FILLS, PAD_NOTES, PATTERNS};
+
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    app.rebuild();
+
+    let sidebar = app.ui.find("step_seq/sidebar").unwrap().rect();
+    let save_as = app.ui.find("step_seq/save_as").unwrap().rect();
+    assert!(
+        save_as.y + save_as.h <= sidebar.y + sidebar.h,
+        "sidebar buttons should fit without clipping save_as: save_as={save_as:?}, sidebar={sidebar:?}"
+    );
+
+    for &(id, _, _) in PATTERNS {
+        click(&mut app, &format!("step_seq/pattern/{id}")).unwrap();
+        let notes = notes_of(&app, clip);
+        assert!(!notes.is_empty(), "pattern {id} should produce notes");
+        assert!(
+            notes.iter().all(|(pitch, _, _)| PAD_NOTES.contains(pitch)),
+            "pattern {id} emitted non-pad pitch: {notes:?}"
+        );
+    }
+
+    for &(id, _, _) in FILLS {
+        click(&mut app, &format!("step_seq/pattern/{id}")).unwrap();
+        let notes = notes_of(&app, clip);
+        assert!(!notes.is_empty(), "fill {id} should produce notes");
+        assert!(
+            notes.iter().all(|(pitch, _, _)| PAD_NOTES.contains(pitch)),
+            "fill {id} emitted non-pad pitch: {notes:?}"
+        );
+        assert!(
+            notes.iter().any(|&(_, start_beats, _)| start_beats >= 3.0),
+            "fill {id} should land in the final beat (steps 12..=15): {notes:?}"
+        );
+    }
+}

@@ -5,7 +5,7 @@
 //! names mirror `dawkey-core`'s `command.rs` and `dawkey-plugins`'
 //! `builtin.rs` (must stay in sync).
 
-use dawkey_core::TimeSignature;
+use dawkey_core::{DrumPattern, TimeSignature};
 use dawkey_ui::{Color, FontWeight, Insets, Node, Role, Sizing, TextAlign, UiState};
 
 use super::piano_roll::edited;
@@ -18,6 +18,52 @@ pub(crate) const PAD_NOTES: [u8; 8] = [36, 38, 42, 46, 45, 39, 49, 51];
 pub(crate) const PAD_NAMES: [&str; 8] = [
     "Kick", "Snare", "C.Hat", "O.Hat", "Tom", "Clap", "Crash", "Ride",
 ];
+
+pub(crate) const PATTERNS: &[(&str, &str, DrumPattern)] = &[
+    (
+        "four_on_the_floor",
+        "4 On Floor",
+        DrumPattern::FourOnTheFloor,
+    ),
+    ("boom_bap", "Boom Bap", DrumPattern::BoomBap),
+    ("trap", "Trap", DrumPattern::Trap),
+    ("house_shuffle", "House", DrumPattern::HouseShuffle),
+    ("drum_and_bass", "D&B", DrumPattern::DrumAndBass),
+    ("rock", "Rock", DrumPattern::Rock),
+    ("metal", "Metal", DrumPattern::Metal),
+    ("funk", "Funk", DrumPattern::Funk),
+    ("jazz_swing", "Jazz", DrumPattern::JazzSwing),
+    ("bossa_nova", "Bossa", DrumPattern::BossaNova),
+    ("reggae_one_drop", "Reggae", DrumPattern::ReggaeOneDrop),
+    ("disco", "Disco", DrumPattern::Disco),
+    ("techno", "Techno", DrumPattern::Techno),
+    ("half_time", "Half-Time", DrumPattern::HalfTime),
+    ("afrobeat", "Afrobeat", DrumPattern::Afrobeat),
+];
+
+pub(crate) const FILLS: &[(&str, &str, DrumPattern)] = &[
+    ("fill_snare_roll", "Snare Roll", DrumPattern::FillSnareRoll),
+    ("fill_tom_cascade", "Tom Fill", DrumPattern::FillTomCascade),
+    ("fill_trap_roll", "Trap Fill", DrumPattern::FillTrapRoll),
+    ("fill_breakbeat", "Break Fill", DrumPattern::FillBreakbeat),
+    (
+        "fill_double_kick",
+        "Metal Fill",
+        DrumPattern::FillDoubleKick,
+    ),
+    (
+        "fill_jazz_turnaround",
+        "Jazz Fill",
+        DrumPattern::FillJazzTurnaround,
+    ),
+];
+
+pub(crate) fn pattern_from_id(id: &str) -> Option<DrumPattern> {
+    PATTERNS
+        .iter()
+        .chain(FILLS.iter())
+        .find_map(|&(slug, _, pat)| (slug == id).then_some(pat))
+}
 
 const ROW_LABEL_W: f32 = 48.0;
 const PATCH_W: f32 = 56.0;
@@ -200,8 +246,8 @@ fn sidebar(
         Node::label(title)
             .width(Sizing::Fill(1.0))
             .padding(Insets {
-                top: 6.0,
-                bottom: 2.0,
+                top: 4.0,
+                bottom: 1.0,
                 ..Insets::default()
             })
             .style(|s| {
@@ -220,7 +266,7 @@ fn sidebar(
         )
         .text(label)
         .width(Sizing::Fill(1.0))
-        .height(Sizing::Fixed(22.0))
+        .height(Sizing::Fixed(20.0))
         .style(|s| s.font_size = 10.0)
     };
     let pattern_btn = |id: &str, label: &str| {
@@ -231,9 +277,10 @@ fn sidebar(
             None,
         )
         .text(label)
+        .clip()
         .width(Sizing::Fill(1.0))
-        .height(Sizing::Fixed(22.0))
-        .style(|s| s.font_size = 10.0)
+        .height(Sizing::Fixed(20.0))
+        .style(|s| s.font_size = 9.5)
     };
 
     let mut your_patterns = Node::column().width(Sizing::Fill(1.0)).gap(4.0);
@@ -252,7 +299,7 @@ fn sidebar(
                     .text(name.clone())
                     .clip()
                     .width(Sizing::Fill(1.0))
-                    .height(Sizing::Fixed(22.0))
+                    .height(Sizing::Fixed(20.0))
                     .padding(Insets::xy(6.0, 0.0))
                     .style(|s| {
                         s.font_size = 10.0;
@@ -268,7 +315,7 @@ fn sidebar(
                     )
                     .text("×")
                     .width(Sizing::Fixed(20.0))
-                    .height(Sizing::Fixed(22.0))
+                    .height(Sizing::Fixed(20.0))
                     .style(|s| s.color = pal().text_dim),
                 ),
         );
@@ -284,7 +331,7 @@ fn sidebar(
                 )
                 .text("+ Save as pattern…")
                 .width(Sizing::Fill(1.0))
-                .height(Sizing::Fixed(22.0))
+                .height(Sizing::Fixed(20.0))
                 .style(|s| {
                     s.font_size = 10.0;
                     s.color = pal().text_dim;
@@ -303,7 +350,7 @@ fn sidebar(
         )
         .text(label)
         .width(Sizing::Fill(1.0))
-        .height(Sizing::Fixed(22.0))
+        .height(Sizing::Fixed(20.0))
         .style(|s| s.font_size = 10.0)
     };
     let is_kit = |kit: dawkey_studio::SampleKit| active_kit == Some(kit);
@@ -372,31 +419,24 @@ fn sidebar(
                 .child(kit_btn("metal", "Metal")),
         );
 
-    let patterns = Node::column()
-        .width(Sizing::Fill(1.0))
-        .gap(4.0)
-        .child(
-            Node::row()
-                .width(Sizing::Fill(1.0))
-                .gap(4.0)
-                .child(pattern_btn("four_on_the_floor", "4 On Floor"))
-                .child(pattern_btn("boom_bap", "Boom Bap")),
-        )
-        .child(
-            Node::row()
-                .width(Sizing::Fill(1.0))
-                .gap(4.0)
-                .child(pattern_btn("trap", "Trap"))
-                .child(pattern_btn("house_shuffle", "House")),
-        )
-        .child(pattern_btn("drum_and_bass", "D&B"));
+    let pattern_grid = |items: &[(&str, &str, DrumPattern)]| {
+        let mut col = Node::column().width(Sizing::Fill(1.0)).gap(4.0);
+        for chunk in items.chunks(3) {
+            let mut row = Node::row().width(Sizing::Fill(1.0)).gap(4.0);
+            for &(id, label, _) in chunk {
+                row = row.child(pattern_btn(id, label));
+            }
+            col = col.child(row);
+        }
+        col
+    };
 
     Node::column()
         .id("step_seq/sidebar")
         .width(Sizing::Fixed(SIDEBAR_W))
         .height(Sizing::Fill(1.0))
         .padding(Insets::all(10.0))
-        .gap(6.0)
+        .gap(4.0)
         .scrollable()
         .clip()
         .style(|s| {
@@ -408,7 +448,9 @@ fn sidebar(
         .child(section("DRUM EFFECT PRESETS"))
         .child(kits)
         .child(section("PATTERNS"))
-        .child(patterns)
+        .child(pattern_grid(PATTERNS))
+        .child(section("FILLS"))
+        .child(pattern_grid(FILLS))
         .child(section("YOUR PATTERNS"))
         .child(your_patterns)
 }

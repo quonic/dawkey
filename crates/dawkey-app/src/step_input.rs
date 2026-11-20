@@ -4,14 +4,13 @@
 //! one undo step and the same path an AI client would use over MCP.
 
 use dawkey_core::{
-    AddMidiNotes, ApplyDrumKit, ApplyDrumPattern, ClipId, DrumKit, DrumPattern, NoteSpec,
-    RemoveMidiNotes,
+    AddMidiNotes, ApplyDrumKit, ApplyDrumPattern, ClipId, DrumKit, NoteSpec, RemoveMidiNotes,
 };
 use dawkey_ui::{Modifiers, Point};
 
 use crate::App;
 use crate::state::{Page, TextField};
-use crate::view::step_sequencer::PAD_NOTES;
+use crate::view::step_sequencer::{PAD_NOTES, pattern_from_id};
 
 /// Default velocity for a step clicked on.
 const DEFAULT_VELOCITY: u8 = 100;
@@ -93,14 +92,7 @@ impl App {
                     .map_err(|e| e.to_string())
             }
             ["step_seq", "pattern", name] => {
-                let pattern = match *name {
-                    "four_on_the_floor" => DrumPattern::FourOnTheFloor,
-                    "boom_bap" => DrumPattern::BoomBap,
-                    "trap" => DrumPattern::Trap,
-                    "house_shuffle" => DrumPattern::HouseShuffle,
-                    "drum_and_bass" => DrumPattern::DrumAndBass,
-                    _ => return None,
-                };
+                let pattern = pattern_from_id(name)?;
                 let clip = self.view.editing_clip?;
                 self.execute(ApplyDrumPattern { clip, pattern }.into())
             }
