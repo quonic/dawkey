@@ -170,6 +170,13 @@ fn sidebar(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
                 .gap(4.0)
                 .child(preset_btn("jazz", "Jazz"))
                 .child(preset_btn("acoustic", "Acoustic")),
+        )
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
+                .child(preset_btn("bass", "Bass"))
+                .child(preset_btn("bass_drive", "Bass Drive")),
         );
 
     let track = model.rack_track;

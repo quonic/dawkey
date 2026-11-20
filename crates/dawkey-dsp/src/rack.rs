@@ -102,6 +102,14 @@ const CABINET_CHOICES: &[BuiltinChoice] = &[
         value: 3.0,
         label: "4x12 Modern",
     },
+    BuiltinChoice {
+        value: 4.0,
+        label: "4x10 Bass",
+    },
+    BuiltinChoice {
+        value: 5.0,
+        label: "1x15 Bass",
+    },
 ];
 
 const MIC_CHOICES: &[BuiltinChoice] = &[
@@ -535,7 +543,7 @@ const CAB_PARAMS: &[BuiltinParam] = &[
         id: "cabinet",
         name: "Cabinet",
         min: 0.0,
-        max: 3.0,
+        max: 5.0,
         default: 2.0,
         stepped: true,
         unit: None,
@@ -1607,7 +1615,7 @@ impl CabState {
     }
 
     fn update(&mut self, params: &[f64], sr: f32) {
-        let cab = (params[0].round() as usize).min(3);
+        let cab = (params[0].round() as usize).min(5);
         let mic = (params[1].round() as usize).min(2);
         let dist = (params[2] as f32 * 0.01).clamp(0.0, 1.0);
         let low_cut = params[3] as f32;
@@ -1617,7 +1625,13 @@ impl CabState {
             0 => (135.0, 4.0, 480.0, -3.5, 2100.0, 4.5, 4400.0),
             1 => (115.0, 5.0, 420.0, -4.0, 2600.0, 5.0, 4100.0),
             2 => (100.0, 6.0, 380.0, -4.5, 2300.0, 4.0, 3900.0),
-            _ => (85.0, 6.5, 450.0, -6.0, 2900.0, 5.5, 4300.0),
+            3 => (85.0, 6.5, 450.0, -6.0, 2900.0, 5.5, 4300.0),
+            // Bass cabinets: the resonance peak sits an octave or more
+            // lower (larger drivers, bigger enclosures), with a gentler
+            // low-mid scoop and the presence bump moved down so it adds
+            // string "growl" rather than guitar-style top-end sparkle.
+            4 => (90.0, 5.0, 550.0, -2.0, 1800.0, 3.0, 4600.0),
+            _ => (70.0, 6.0, 500.0, -2.5, 1600.0, 2.5, 4200.0),
         };
         let (mic_hz, mic_q, mic_db, mic_hf_scale) = match mic {
             0 => (2800.0, 1.2, 3.0, 0.92),
@@ -2286,6 +2300,17 @@ mod tests {
         let cab_fizz = cab_response_db(2, 0, 25.0, 80.0, 6500.0, 15000.0);
         assert!(cab_low > cab_sub + 10.0, "{cab_low} vs {cab_sub}");
         assert!(cab_low > cab_fizz + 10.0, "{cab_low} vs {cab_fizz}");
+
+        // The bass cabinets (4, 5) resonate an octave or so lower than any
+        // guitar cabinet (90 and 70 Hz, vs 85-135 Hz): right at the lowest
+        // guitar cabinet's own resonance, "1x15 Bass" still has headroom to
+        // spare while the guitar cabinets are already past their peak.
+        let hz = 70.0;
+        let guitar = (0..4)
+            .map(|c| cab_response_db(c, 1, 25.0, 20.0, 5000.0, hz))
+            .fold(f32::MIN, f32::max);
+        let bass = cab_response_db(5, 1, 25.0, 20.0, 5000.0, hz);
+        assert!(bass > guitar + 1.0, "bass {bass} vs guitar's best {guitar}");
         permit_alloc(|| ());
     }
 

@@ -3690,12 +3690,14 @@ fn more_rack_presets_and_saving_your_own() {
     click(&mut app, "view/rack").unwrap();
     click(&mut app, &format!("rack/track/{guitar}")).unwrap();
 
-    // The 4 newer curated presets mount too.
+    // The newer curated presets mount too.
     for (id, expect_first) in [
         ("blues", "builtin:gate"),
         ("metal", "builtin:gate"),
         ("jazz", "builtin:gate"),
         ("acoustic", "builtin:gate"),
+        ("bass", "builtin:gate"),
+        ("bass_drive", "builtin:gate"),
     ] {
         click(&mut app, &format!("rack/preset/{id}")).unwrap();
         let plugins = &app

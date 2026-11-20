@@ -2791,6 +2791,8 @@ pub enum RackPreset {
     Metal,
     Jazz,
     Acoustic,
+    Bass,
+    BassDrive,
 }
 
 /// Mount a curated studio guitar effects rack preset onto a track (replaces
@@ -3211,6 +3213,78 @@ fn preset_chain(preset: RackPreset) -> Vec<(&'static str, Vec<(&'static str, f64
             (
                 "builtin:reverb",
                 vec![("mode", 1.0), ("decay", 2.4), ("mix", 28.0)],
+            ),
+        ],
+        RackPreset::Bass => vec![
+            ("builtin:gate", vec![("threshold", -52.0)]),
+            (
+                "builtin:comp",
+                vec![
+                    ("threshold", -24.0),
+                    ("ratio", 4.0),
+                    ("attack", 8.0),
+                    ("release", 90.0),
+                    ("makeup", 3.0),
+                ],
+            ),
+            (
+                "builtin:amp",
+                vec![
+                    ("channel", 0.0),
+                    ("gain", 3.0),
+                    ("bass", 7.0),
+                    ("mid", 5.5),
+                    ("treble", 4.0),
+                    ("presence", 3.5),
+                ],
+            ),
+            (
+                "builtin:eq",
+                vec![("low_cut", 30.0), ("low_gain", 2.0), ("mid_gain", 1.0)],
+            ),
+            (
+                "builtin:cab",
+                vec![
+                    ("cabinet", 4.0),
+                    ("mic", 1.0),
+                    ("low_cut", 35.0),
+                    ("high_cut", 4500.0),
+                ],
+            ),
+        ],
+        RackPreset::BassDrive => vec![
+            ("builtin:gate", vec![("threshold", -46.0)]),
+            (
+                "builtin:comp",
+                vec![("threshold", -22.0), ("ratio", 5.0), ("makeup", 2.5)],
+            ),
+            (
+                "builtin:drive",
+                vec![("drive", 3.0), ("tone", 4.5), ("tight", 1.0), ("mix", 65.0)],
+            ),
+            (
+                "builtin:amp",
+                vec![
+                    ("channel", 1.0),
+                    ("gain", 5.0),
+                    ("bass", 7.0),
+                    ("mid", 6.0),
+                    ("treble", 4.5),
+                    ("presence", 4.0),
+                ],
+            ),
+            (
+                "builtin:eq",
+                vec![("low_cut", 30.0), ("low_gain", 1.5), ("mid_gain", 1.5)],
+            ),
+            (
+                "builtin:cab",
+                vec![
+                    ("cabinet", 5.0),
+                    ("mic", 1.0),
+                    ("low_cut", 35.0),
+                    ("high_cut", 5000.0),
+                ],
             ),
         ],
     }

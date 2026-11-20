@@ -209,6 +209,8 @@ impl App {
                     "metal" => RackPreset::Metal,
                     "jazz" => RackPreset::Jazz,
                     "acoustic" => RackPreset::Acoustic,
+                    "bass" => RackPreset::Bass,
+                    "bass_drive" => RackPreset::BassDrive,
                     _ => return None,
                 };
                 let track = self.rack_track();
