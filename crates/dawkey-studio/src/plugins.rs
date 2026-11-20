@@ -574,12 +574,13 @@ impl Plugins {
         }
     }
 
-    /// Lets every loaded plugin do its control-thread work.
     /// Lets every loaded plugin do its control-thread work. Returns true
-    /// if a plugin's latency changed (a bridged one's grew with the
-    /// engine's blocks), so the graph must be compiled again.
+    /// if the graph must be compiled again: a plugin's latency changed (a
+    /// bridged one's grew with the engine's blocks), or it asked to be
+    /// reloaded (a VST3 plugin whose latency or buses changed).
     pub(crate) fn idle(&mut self) -> bool {
         let mut changed = false;
+        let mut reloads = Vec::new();
         for (&id, slot) in &mut self.live {
             slot.instance.idle();
             self.changes.extend(
@@ -594,6 +595,13 @@ impl Plugins {
                 slot.latency = latency;
                 changed = true;
             }
+            if slot.instance.wants_reload() {
+                reloads.push(id);
+            }
+        }
+        for id in reloads {
+            self.reload(id);
+            changed = true;
         }
         changed
     }
