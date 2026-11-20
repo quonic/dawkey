@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use std::fs::File;
+use std::io::Cursor;
 use std::path::Path;
 
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
@@ -9,7 +10,7 @@ use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 
 use crate::{AudioData, MediaError};
@@ -27,7 +28,36 @@ pub struct DecodedFile {
 
 /// Decodes the first audio track of `path` and converts it to `target_rate`.
 pub fn decode_file(path: &Path, target_rate: u32) -> Result<DecodedFile, MediaError> {
-    let (channels, source_rate) = decode_native(path)?;
+    let file = File::open(path).map_err(|source| MediaError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    let ext = path.extension().and_then(|e| e.to_str());
+    let (channels, source_rate) = decode_native(Box::new(file), ext, path)?;
+    finish(channels, source_rate, target_rate, path)
+}
+
+/// Decodes the first audio track of an in-memory file (e.g. one embedded in
+/// the binary with `include_bytes!`) and converts it to `target_rate`.
+/// `ext` (e.g. `"flac"`) helps the format probe; `label` names the source in
+/// error messages, since there's no path.
+pub fn decode_bytes(
+    bytes: &'static [u8],
+    ext: &str,
+    target_rate: u32,
+    label: &Path,
+) -> Result<DecodedFile, MediaError> {
+    let source = Box::new(Cursor::new(bytes));
+    let (channels, source_rate) = decode_native(source, Some(ext), label)?;
+    finish(channels, source_rate, target_rate, label)
+}
+
+fn finish(
+    channels: Vec<Vec<f32>>,
+    source_rate: u32,
+    target_rate: u32,
+    path: &Path,
+) -> Result<DecodedFile, MediaError> {
     if channels.is_empty() || channels[0].is_empty() {
         return Err(MediaError::Empty {
             path: path.to_owned(),
@@ -48,7 +78,11 @@ pub fn decode_file(path: &Path, target_rate: u32) -> Result<DecodedFile, MediaEr
 }
 
 /// Decodes to planar f32 at the file's own rate.
-fn decode_native(path: &Path) -> Result<(Vec<Vec<f32>>, u32), MediaError> {
+fn decode_native(
+    source: Box<dyn MediaSource>,
+    ext: Option<&str>,
+    path: &Path,
+) -> Result<(Vec<Vec<f32>>, u32), MediaError> {
     let unsupported = |reason: String| MediaError::Unsupported {
         path: path.to_owned(),
         reason,
@@ -58,13 +92,9 @@ fn decode_native(path: &Path) -> Result<(Vec<Vec<f32>>, u32), MediaError> {
         reason,
     };
 
-    let file = File::open(path).map_err(|source| MediaError::Io {
-        path: path.to_owned(),
-        source,
-    })?;
-    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let stream = MediaSourceStream::new(source, Default::default());
     let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = ext {
         hint.with_extension(ext);
     }
     let mut format = symphonia::default::get_probe()
@@ -182,6 +212,21 @@ mod tests {
         let decoded = decode_file(&path, 48_000).unwrap();
         assert_eq!(decoded.source_rate, 48_000);
         assert_eq!(decoded.audio.channels(), &[left, right]);
+    }
+
+    #[test]
+    fn decode_bytes_matches_decode_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tone.wav");
+        let left = sine(4800, 44_100, 440.0);
+        write_wav(&path, &[left], 44_100).unwrap();
+
+        let from_file = decode_file(&path, 48_000).unwrap();
+        let bytes: &'static [u8] = Box::leak(std::fs::read(&path).unwrap().into_boxed_slice());
+        let from_bytes = decode_bytes(bytes, "wav", 48_000, Path::new("<embedded:tone>")).unwrap();
+
+        assert_eq!(from_bytes.source_rate, from_file.source_rate);
+        assert_eq!(from_bytes.audio, from_file.audio);
     }
 
     #[test]

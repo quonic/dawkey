@@ -204,6 +204,8 @@ pub(crate) struct SlotView {
     pub(crate) bypass: bool,
     /// Couldn't be loaded.
     pub(crate) error: bool,
+    /// `builtin:drums` only: the sample kit its pads play back from, if any.
+    pub(crate) sample_kit: Option<dawkey_studio::SampleKit>,
 }
 
 /// An automation lane.

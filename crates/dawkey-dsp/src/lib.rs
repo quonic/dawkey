@@ -10,7 +10,7 @@ mod drums;
 mod rack;
 mod synth;
 
-pub use drums::{DrumEngine, DrumEvent, DrumEventKind, PAD_NAMES, PAD_NOTES, Pad};
+pub use drums::{DrumEngine, DrumEvent, DrumEventKind, PAD_NAMES, PAD_NOTES, Pad, SampleKitData};
 pub use rack::{
     BuiltinChoice, BuiltinParam, BuiltinSpec, RackEffect, RackProcessor, builtin_specs,
     cab_response_db, eq_response_db,

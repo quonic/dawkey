@@ -3863,6 +3863,44 @@ fn kit_and_pattern_buttons_in_the_step_sequencer() {
 }
 
 #[test]
+fn the_sound_source_toggle_switches_a_pad_between_synth_and_samples() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins[0]
+        .id;
+    assert!(
+        app.studio
+            .plugin_details(plugin)
+            .unwrap()
+            .sample_kit
+            .is_none()
+    );
+
+    click(&mut app, "step_seq/sound/acoustic_vcsl").unwrap();
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().sample_kit,
+        Some(dawkey_studio::SampleKit::AcousticVcsl)
+    );
+
+    click(&mut app, "step_seq/sound/synth").unwrap();
+    assert!(
+        app.studio
+            .plugin_details(plugin)
+            .unwrap()
+            .sample_kit
+            .is_none()
+    );
+}
+
+#[test]
 fn saving_and_loading_a_drum_pattern_in_the_step_sequencer() {
     let mut app = app();
     let (_, clip) = add_drum_clip(&mut app);

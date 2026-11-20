@@ -60,7 +60,7 @@ pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
         let step = (beat / STEP_BEATS).floor();
         (step >= 0.0 && step < f64::from(STEPS)).then_some(step as u8)
     };
-    page.child(sidebar(model, view, clip.id, ui)).child(
+    page.child(sidebar(model, view, track, clip.id, ui)).child(
         Node::column()
             .fill()
             .clip()
@@ -145,7 +145,13 @@ fn grid(notes: &[NoteView], playhead_step: Option<u8>) -> Node {
     rows
 }
 
-fn sidebar(model: &ViewModel, view: &ViewState, clip: dawkey_core::ClipId, ui: &UiState) -> Node {
+fn sidebar(
+    model: &ViewModel,
+    view: &ViewState,
+    track: &TrackView,
+    clip: dawkey_core::ClipId,
+    ui: &UiState,
+) -> Node {
     let section = |title: &str| {
         Node::label(title)
             .width(Sizing::Fill(1.0))
@@ -243,6 +249,29 @@ fn sidebar(model: &ViewModel, view: &ViewState, clip: dawkey_core::ClipId, ui: &
         ),
     );
 
+    let active_kit = track.plugins.first().and_then(|p| p.sample_kit);
+    let sound_btn = |id: &str, label: &str, active: bool| {
+        button(
+            &format!("step_seq/sound/{id}"),
+            label,
+            ui,
+            active.then_some(pal().accent),
+        )
+        .text(label)
+        .width(Sizing::Fill(1.0))
+        .height(Sizing::Fixed(22.0))
+        .style(|s| s.font_size = 10.0)
+    };
+    let sound = Node::row()
+        .width(Sizing::Fill(1.0))
+        .gap(4.0)
+        .child(sound_btn("synth", "Synth", active_kit.is_none()))
+        .child(sound_btn(
+            "acoustic_vcsl",
+            "Acoustic (Samples)",
+            active_kit == Some(dawkey_studio::SampleKit::AcousticVcsl),
+        ));
+
     let kits = Node::column()
         .width(Sizing::Fill(1.0))
         .gap(4.0)
@@ -293,6 +322,8 @@ fn sidebar(model: &ViewModel, view: &ViewState, clip: dawkey_core::ClipId, ui: &
             s.background = Some(pal().panel);
             s.border = Some((1.0, pal().border));
         })
+        .child(section("SOUND SOURCE"))
+        .child(sound)
         .child(section("KITS"))
         .child(kits)
         .child(section("PATTERNS"))

@@ -41,7 +41,7 @@ use dawkey_engine::PluginProcessor;
 use serde::{Deserialize, Serialize};
 
 pub use bridge::{BridgeProgram, Sandbox, run_plugin_host};
-pub use builtin::{builtin_plugin, builtin_plugins};
+pub use builtin::{DRUMS_ID, SampleKit, builtin_plugin, builtin_plugins};
 pub use dawkey_dsp::{cab_response_db, eq_response_db};
 pub use lv2::{StateProperty, StateValue, lv2_state_properties, lv2_state_set};
 pub use scan::{
@@ -399,7 +399,7 @@ impl Host {
         offline: bool,
     ) -> Result<Loaded, PluginError> {
         if info.format == PluginFormat::Builtin {
-            let processor = builtin::load(info, self.sample_rate)?;
+            let processor = builtin::load(info, self.sample_rate, state)?;
             return Ok(Loaded {
                 instance: Instance(InstanceKind::Builtin),
                 processor: Box::new(processor),

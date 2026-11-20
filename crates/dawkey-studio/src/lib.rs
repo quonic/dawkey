@@ -42,8 +42,8 @@ use crate::plugins::Plugins;
 pub use crate::plugins::{PluginProblem, default_cache as default_plugin_cache};
 use crate::recorder::{Recorder, Take, Target};
 pub use dawkey_plugins::{
-    BridgeProgram, Catalog as PluginCatalog, ParamChange, PluginInfo, Sandbox, SearchPath,
-    builtin_plugin, builtin_plugins, cab_response_db, eq_response_db, run_plugin_host,
+    BridgeProgram, Catalog as PluginCatalog, DRUMS_ID, ParamChange, PluginInfo, SampleKit, Sandbox,
+    SearchPath, builtin_plugin, builtin_plugins, cab_response_db, eq_response_db, run_plugin_host,
 };
 use serde::Serialize;
 
@@ -268,6 +268,10 @@ pub struct PluginDetails {
     /// (in bytes), if it saved anything.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_bytes: Option<usize>,
+    /// `builtin:drums` only: the sample kit its pads play back from
+    /// (set_drum_sample_kit), if any; `None` means every pad synthesizes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_kit: Option<SampleKit>,
     /// LV2: the properties the plugin declares besides its parameters
     /// (`patch:writable`/`patch:readable`): a soundfont, a file, a string.
     /// set_plugin_property sets them.
@@ -1965,6 +1969,32 @@ impl Studio {
         self.reload_plugin(plugin)
     }
 
+    /// Sets the drum kit a `builtin:drums` slot plays its pads back from
+    /// (`None` reverts every pad to synthesis); a pad the kit has no sample
+    /// for keeps synthesizing. Like [`set_plugin_property`](Self::set_plugin_property),
+    /// this rewrites the slot's saved state and loads it again: not an undo
+    /// step (plugin state isn't), but saved with the project.
+    pub fn set_drum_sample_kit(
+        &mut self,
+        plugin: PluginId,
+        kit: Option<dawkey_plugins::SampleKit>,
+    ) -> Result<(), StudioError> {
+        let (_, slot) = self
+            .session
+            .project()
+            .plugin(plugin)
+            .ok_or_else(|| StudioError::Invalid(format!("plugin {plugin} does not exist")))?;
+        if slot.plugin != dawkey_plugins::DRUMS_ID {
+            return Err(StudioError::Invalid(format!(
+                "plugin {plugin} ({}) is not the drum kit instrument",
+                slot.plugin
+            )));
+        }
+        let state = kit.map(|k| dawkey_core::PluginState::new(k.id().as_bytes().to_vec()));
+        self.session.set_plugin_state(plugin, state);
+        self.reload_plugin(plugin)
+    }
+
     /// Looks for plugins on `search` from now on (keeping the cache), and
     /// scans it in the background.
     pub fn change_plugin_search(&mut self, search: SearchPath) {
@@ -2093,6 +2123,11 @@ impl Studio {
                 .plugin_states
                 .get(&id)
                 .map(|s| s.bytes().len()),
+            sample_kit: (slot.plugin == dawkey_plugins::DRUMS_ID)
+                .then(|| self.session.project().plugin_states.get(&id))
+                .flatten()
+                .and_then(|s| std::str::from_utf8(s.bytes()).ok())
+                .and_then(SampleKit::from_id),
             properties: info
                 .as_ref()
                 .map(|i| i.properties.clone())

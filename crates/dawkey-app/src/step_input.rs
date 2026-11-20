@@ -67,6 +67,26 @@ impl App {
                 let track = self.studio.session().project().clip(clip)?.0.id;
                 self.execute(ApplyDrumKit { track, kit }.into())
             }
+            ["step_seq", "sound", name] => {
+                let kit = match *name {
+                    "synth" => None,
+                    "acoustic_vcsl" => Some(dawkey_studio::SampleKit::AcousticVcsl),
+                    _ => return None,
+                };
+                let clip = self.view.editing_clip?;
+                let plugin = self
+                    .studio
+                    .session()
+                    .project()
+                    .clip(clip)?
+                    .0
+                    .plugins
+                    .first()?
+                    .id;
+                self.studio
+                    .set_drum_sample_kit(plugin, kit)
+                    .map_err(|e| e.to_string())
+            }
             ["step_seq", "pattern", name] => {
                 let pattern = match *name {
                     "four_on_the_floor" => DrumPattern::FourOnTheFloor,

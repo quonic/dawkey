@@ -864,6 +864,11 @@ impl App {
                         .map_or_else(|| slot.plugin.clone(), |i| i.name.clone()),
                     bypass: slot.bypass,
                     error: status.plugin_problems.iter().any(|p| p.plugin == slot.id),
+                    sample_kit: (slot.plugin == dawkey_studio::DRUMS_ID)
+                        .then(|| project.plugin_states.get(&slot.id))
+                        .flatten()
+                        .and_then(|s| std::str::from_utf8(s.bytes()).ok())
+                        .and_then(dawkey_studio::SampleKit::from_id),
                 })
                 .collect(),
             automation: t

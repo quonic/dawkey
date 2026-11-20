@@ -8,6 +8,7 @@
 //! construction, like [`crate::rack`] and [`crate::synth`].
 
 use std::f32::consts::TAU;
+use std::sync::Arc;
 
 /// The General MIDI drum-map note each pad answers to.
 pub const PAD_NOTES: [u8; 8] = [36, 38, 42, 46, 45, 39, 49, 51];
@@ -152,15 +153,27 @@ struct Voice {
     hp1_in: f32,
     hp1_out: f32,
     hp2_out: f32,
+    /// Fractional read position into a sample-kit pad's buffer, in frames.
+    /// Unused (and harmless) for pads that are still synthesized.
+    pos: f64,
 }
 
-/// Eight synthesized percussion voices, parameterized per pad.
+/// One pad's recorded one-shot, mono, already resampled to the engine's
+/// sample rate; `None` for a pad that keeps synthesizing. Loading this is a
+/// control-thread-only operation (decoding and resampling allocate) — see
+/// [`DrumEngine::load_samples`].
+pub type SampleKitData = [Option<Vec<f32>>; 8];
+
+/// Eight percussion voices, parameterized per pad: synthesized unless a
+/// sample kit is loaded, in which case pads it covers play that recording
+/// back instead (pads it doesn't cover keep synthesizing).
 #[derive(Debug, Clone)]
 pub struct DrumEngine {
     sample_rate: f32,
     params: [(f32, f32, f32); 8],
     voices: [Voice; 8],
     noise: [Noise; 8],
+    samples: Option<Arc<SampleKitData>>,
 }
 
 impl DrumEngine {
@@ -177,7 +190,15 @@ impl DrumEngine {
             params: PAD_DEFAULTS,
             voices: [Voice::default(); 8],
             noise,
+            samples: None,
         }
+    }
+
+    /// Loads a sample kit (`None` reverts fully to synthesis). The kit
+    /// itself must already be decoded and resampled to this engine's rate —
+    /// building it allocates, so do that on the control thread, not here.
+    pub fn load_samples(&mut self, kit: Option<Arc<SampleKitData>>) {
+        self.samples = kit;
     }
 
     /// Sets a flattened param (`pad * 3 + field`); out-of-range indices and
@@ -214,6 +235,7 @@ impl DrumEngine {
         v.phase2 = 0.0;
         v.age = 0.0;
         v.vel = velocity.clamp(0.0, 1.0);
+        v.pos = 0.0;
     }
 
     /// Renders one block, applying `events` (sorted by offset) as it goes.
@@ -240,99 +262,139 @@ impl DrumEngine {
                     continue;
                 }
                 let (tone, _, level_db) = self.params[i];
-                out += self.render_pad(pad, i, tone, level_db, click_coeff);
+                // Disjoint field borrows: voices/noise/samples are
+                // independent fields, so this doesn't need `&mut self`.
+                let v = &mut self.voices[i];
+                let n = &mut self.noise[i];
+                let sample = self.samples.as_deref().and_then(|k| k[i].as_deref());
+                out += render_pad(
+                    pad,
+                    v,
+                    n,
+                    sample,
+                    self.sample_rate,
+                    tone,
+                    level_db,
+                    click_coeff,
+                );
             }
             left[n] = out;
             right[n] = out;
         }
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_pad(
-        &mut self,
-        pad: Pad,
-        i: usize,
-        tone: f32,
-        level_db: f32,
-        click_coeff: f32,
-    ) -> f32 {
-        let sr = self.sample_rate;
-        let v = &mut self.voices[i];
-        let n = &mut self.noise[i];
-        let level = db_to_lin(level_db) * v.vel;
-        let sample = match pad {
-            Pad::Kick => {
-                let freq = 42.0 + 170.0 * v.env.powf(0.4);
-                v.phase += TAU * freq / sr;
-                let tone_sig = v.phase.sin() * v.env;
-                let click_sig = n.next() * v.click * 0.3 * (0.3 + tone);
-                tone_sig + click_sig
-            }
-            Pad::Snare => {
-                let freq = 170.0 + 60.0 * tone;
-                v.phase += TAU * freq / sr;
-                let tone_sig = v.phase.sin() * v.env;
-                let cutoff = 1200.0 + 2500.0 * tone;
-                let a = hp_coeff(cutoff, sr);
-                let x = n.next();
-                let y = a * (v.hp1_out + x - v.hp1_in);
-                v.hp1_in = x;
-                v.hp1_out = y;
-                tone_sig * 0.35 + y * v.env * 0.85
-            }
-            Pad::ClosedHat | Pad::OpenHat => {
-                let cutoff = 5500.0 + 6000.0 * tone;
-                let a = hp_coeff(cutoff, sr);
-                let x = n.next();
-                let y = a * (v.hp1_out + x - v.hp1_in);
-                v.hp1_in = x;
-                v.hp1_out = y;
-                y * v.env
-            }
-            Pad::Tom => {
-                let base = 90.0 + 160.0 * tone;
-                let freq = base * (0.8 + 0.2 * v.env);
-                v.phase += TAU * freq / sr;
-                v.phase.sin() * v.env
-            }
-            Pad::Clap => {
-                let cutoff = 900.0 + 2200.0 * tone;
-                let a = hp_coeff(cutoff, sr);
-                let x = n.next();
-                let y = a * (v.hp1_out + x - v.hp1_in);
-                v.hp1_in = x;
-                v.hp1_out = y;
-                // Low-pass the highpassed noise to band it; a cheap
-                // "flutter" (several quick bursts) stands in for a real
-                // clap's multiple hand-claps.
-                let lp_a = hp_coeff(3500.0, sr);
-                v.hp2_out = v.hp2_out + (1.0 - lp_a) * (y - v.hp2_out);
-                let flutter = (0.55 + 0.45 * (TAU * 22.0 * v.age).sin().abs()).min(1.0);
-                v.hp2_out * v.env * flutter
-            }
-            Pad::Crash | Pad::Ride => {
-                let cutoff = 3200.0 + 4500.0 * tone;
-                let a = hp_coeff(cutoff, sr);
-                let x = n.next();
-                let y = a * (v.hp1_out + x - v.hp1_in);
-                v.hp1_in = x;
-                v.hp1_out = y;
-                let base = 320.0 + 500.0 * tone;
-                v.phase += TAU * base / sr;
-                v.phase2 += TAU * base * 1.6 / sr;
-                let metallic = v.phase.sin() * 0.3 + v.phase2.sin() * 0.2;
-                let noise_mix = if matches!(pad, Pad::Ride) { 0.5 } else { 0.85 };
-                (y * noise_mix + metallic * (1.0 - noise_mix)) * v.env
-            }
-        };
-        v.env *= v.env_coeff;
-        v.click *= click_coeff;
-        v.age += 1.0 / sr;
-        if v.env < 1e-4 {
-            v.active = false;
+/// Plays back one frame of a sample-kit pad's recording, linearly
+/// interpolated, and advances its read position; deactivates the voice at
+/// the buffer's end.
+fn render_sample_pad(v: &mut Voice, buf: &[f32], level_db: f32) -> f32 {
+    let level = db_to_lin(level_db) * v.vel;
+    let idx = v.pos as usize;
+    let sample = match (buf.get(idx), buf.get(idx + 1)) {
+        (Some(&a), Some(&b)) => {
+            let frac = (v.pos - idx as f64) as f32;
+            a + (b - a) * frac
         }
-        sample * level
+        (Some(&a), None) => a,
+        _ => {
+            v.active = false;
+            0.0
+        }
+    };
+    v.pos += 1.0;
+    if v.pos as usize >= buf.len() {
+        v.active = false;
     }
+    sample * level
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_pad(
+    pad: Pad,
+    v: &mut Voice,
+    n: &mut Noise,
+    sample: Option<&[f32]>,
+    sr: f32,
+    tone: f32,
+    level_db: f32,
+    click_coeff: f32,
+) -> f32 {
+    if let Some(buf) = sample {
+        return render_sample_pad(v, buf, level_db);
+    }
+    let level = db_to_lin(level_db) * v.vel;
+    let sample = match pad {
+        Pad::Kick => {
+            let freq = 42.0 + 170.0 * v.env.powf(0.4);
+            v.phase += TAU * freq / sr;
+            let tone_sig = v.phase.sin() * v.env;
+            let click_sig = n.next() * v.click * 0.3 * (0.3 + tone);
+            tone_sig + click_sig
+        }
+        Pad::Snare => {
+            let freq = 170.0 + 60.0 * tone;
+            v.phase += TAU * freq / sr;
+            let tone_sig = v.phase.sin() * v.env;
+            let cutoff = 1200.0 + 2500.0 * tone;
+            let a = hp_coeff(cutoff, sr);
+            let x = n.next();
+            let y = a * (v.hp1_out + x - v.hp1_in);
+            v.hp1_in = x;
+            v.hp1_out = y;
+            tone_sig * 0.35 + y * v.env * 0.85
+        }
+        Pad::ClosedHat | Pad::OpenHat => {
+            let cutoff = 5500.0 + 6000.0 * tone;
+            let a = hp_coeff(cutoff, sr);
+            let x = n.next();
+            let y = a * (v.hp1_out + x - v.hp1_in);
+            v.hp1_in = x;
+            v.hp1_out = y;
+            y * v.env
+        }
+        Pad::Tom => {
+            let base = 90.0 + 160.0 * tone;
+            let freq = base * (0.8 + 0.2 * v.env);
+            v.phase += TAU * freq / sr;
+            v.phase.sin() * v.env
+        }
+        Pad::Clap => {
+            let cutoff = 900.0 + 2200.0 * tone;
+            let a = hp_coeff(cutoff, sr);
+            let x = n.next();
+            let y = a * (v.hp1_out + x - v.hp1_in);
+            v.hp1_in = x;
+            v.hp1_out = y;
+            // Low-pass the highpassed noise to band it; a cheap
+            // "flutter" (several quick bursts) stands in for a real
+            // clap's multiple hand-claps.
+            let lp_a = hp_coeff(3500.0, sr);
+            v.hp2_out = v.hp2_out + (1.0 - lp_a) * (y - v.hp2_out);
+            let flutter = (0.55 + 0.45 * (TAU * 22.0 * v.age).sin().abs()).min(1.0);
+            v.hp2_out * v.env * flutter
+        }
+        Pad::Crash | Pad::Ride => {
+            let cutoff = 3200.0 + 4500.0 * tone;
+            let a = hp_coeff(cutoff, sr);
+            let x = n.next();
+            let y = a * (v.hp1_out + x - v.hp1_in);
+            v.hp1_in = x;
+            v.hp1_out = y;
+            let base = 320.0 + 500.0 * tone;
+            v.phase += TAU * base / sr;
+            v.phase2 += TAU * base * 1.6 / sr;
+            let metallic = v.phase.sin() * 0.3 + v.phase2.sin() * 0.2;
+            let noise_mix = if matches!(pad, Pad::Ride) { 0.5 } else { 0.85 };
+            (y * noise_mix + metallic * (1.0 - noise_mix)) * v.env
+        }
+    };
+    v.env *= v.env_coeff;
+    v.click *= click_coeff;
+    v.age += 1.0 / sr;
+    if v.env < 1e-4 {
+        v.active = false;
+    }
+    sample * level
 }
 
 #[cfg(test)]
@@ -412,5 +474,56 @@ mod tests {
         a.process(&mut al, &mut ar, &events);
         b.process(&mut bl, &mut br, &events);
         assert_eq!(al, bl);
+    }
+
+    fn sample_kit_with(pad: Pad, buf: Vec<f32>) -> Arc<SampleKitData> {
+        let mut kit: SampleKitData = Default::default();
+        kit[pad.index()] = Some(buf);
+        Arc::new(kit)
+    }
+
+    #[test]
+    fn a_sample_backed_pad_plays_back_the_buffer_then_deactivates() {
+        let mut engine = DrumEngine::new(48_000);
+        let buf = vec![1.0, 0.5, -0.5, -1.0];
+        engine.load_samples(Some(sample_kit_with(Pad::Kick, buf.clone())));
+        let events = [DrumEvent {
+            offset: 0,
+            kind: DrumEventKind::NoteOn {
+                key: Pad::Kick.note(),
+                velocity: 1.0,
+            },
+        }];
+        let mut left = vec![0.0; 8];
+        let mut right = vec![0.0; 8];
+        engine.process(&mut left, &mut right, &events);
+        assert_eq!(&left[..buf.len()], buf.as_slice());
+        // Past the buffer's end, the voice is silent (not still synthesizing).
+        assert_eq!(&left[buf.len()..], &[0.0; 4]);
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn a_pad_without_a_sample_still_synthesizes_with_a_kit_loaded() {
+        let mut with_kit = DrumEngine::new(48_000);
+        with_kit.load_samples(Some(sample_kit_with(Pad::Kick, vec![0.0; 4])));
+        let mut without_kit = DrumEngine::new(48_000);
+        let events = [DrumEvent {
+            offset: 0,
+            kind: DrumEventKind::NoteOn {
+                key: Pad::Snare.note(),
+                velocity: 1.0,
+            },
+        }];
+        let mut al = vec![0.0; 2048];
+        let mut ar = vec![0.0; 2048];
+        let mut bl = vec![0.0; 2048];
+        let mut br = vec![0.0; 2048];
+        with_kit.process(&mut al, &mut ar, &events);
+        without_kit.process(&mut bl, &mut br, &events);
+        assert_eq!(
+            al, bl,
+            "snare has no sample, so it should synthesize unchanged"
+        );
     }
 }
