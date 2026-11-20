@@ -31,7 +31,8 @@ use dawkey_core::{
 use dawkey_media::Peaks;
 use dawkey_studio::PluginDetails;
 use dawkey_ui::{
-    Chrome, Color, FontFamily, FontWeight, Icon, Insets, Node, Paint, Role, Sizing, UiState,
+    Chrome, Color, Direction, FontFamily, FontWeight, Icon, Insets, Node, Paint, Role, Sizing,
+    UiState,
 };
 
 pub(crate) use mixer::{db_from_position, position_from_db};
@@ -436,11 +437,13 @@ fn titlebar(model: &ViewModel, ui: &UiState, window: &WindowInfo, radius: f32) -
         })
         .gap(10.0)
         .style(|s| {
-            s.background = Some(if active {
+            let base = if active {
                 pal().titlebar
             } else {
                 pal().titlebar_inactive
-            });
+            };
+            s.background = Some(base);
+            s.gradient = Some((base.mix(Color::hex(0x000000), 0.15), Direction::Column));
             s.radius = [radius, radius, 0.0, 0.0];
         })
         .child(Node::row().size(10.0, 10.0).style(|s| {

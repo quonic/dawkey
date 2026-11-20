@@ -192,6 +192,10 @@ pub struct Style {
     /// Drop shadow: blur radius and color.
     pub shadow: Option<(f32, Color)>,
     pub background: Option<Color>,
+    /// Fades `background` to this color along a direction, in place of a
+    /// flat fill. Has no effect without `background`, and (for now) takes
+    /// priority over `border`: a node can't have both.
+    pub gradient: Option<(Color, Direction)>,
     pub border: Option<(f32, Color)>,
     /// Corner radii: top-left, top-right, bottom-right, bottom-left.
     pub radius: [f32; 4],
@@ -217,6 +221,7 @@ impl Default for Style {
         Self {
             shadow: None,
             background: None,
+            gradient: None,
             border: None,
             radius: [0.0; 4],
             color: DEFAULT_TEXT.get(),
