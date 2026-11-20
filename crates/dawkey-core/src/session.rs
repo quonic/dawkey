@@ -2660,6 +2660,186 @@ mod tests {
     }
 
     #[test]
+    fn add_drum_track_loads_a_kit_and_an_empty_clip_in_one_undo_step() {
+        use crate::command::{AddDrumTrack, DrumKit};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let id = outcome.track.unwrap();
+        let clip = outcome.clip.unwrap();
+        let track = s.project().track(id).unwrap();
+        assert_eq!(track.name, "Drums 1");
+        assert_eq!(track.kind, TrackKind::Midi);
+        assert_eq!(track.plugins[0].plugin, "builtin:drums");
+        // The 808 kit's chain is mounted: the instrument plus its processing.
+        assert!(track.plugins.len() > 1);
+        let (_, clip) = s.project().clip(clip).unwrap();
+        assert!(matches!(
+            &clip.content,
+            crate::model::ClipContent::Midi { notes, .. } if notes.is_empty()
+        ));
+
+        // One undo step undoes the whole thing: track, plugins and clip.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("add_drum_track"));
+        assert!(s.project().tracks.is_empty());
+
+        // A second track with an explicit kit.
+        let mut s = Session::default();
+        let id = s
+            .execute(
+                AddDrumTrack {
+                    name: None,
+                    kit: Some(DrumKit::Trap),
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        assert_eq!(
+            s.project().track(id).unwrap().plugins[0].params["kick_decay"],
+            260.0
+        );
+    }
+
+    #[test]
+    fn applying_a_drum_kit_requires_a_midi_track() {
+        use crate::command::{ApplyDrumKit, DrumKit};
+
+        let mut s = Session::default();
+        let audio = add(&mut s, "Not MIDI");
+        assert!(
+            s.execute(
+                ApplyDrumKit {
+                    track: audio,
+                    kit: DrumKit::Kit909,
+                }
+                .into(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn applying_a_curated_drum_pattern_writes_sixteen_steps() {
+        use crate::command::{AddDrumTrack, ApplyDrumPattern, DrumPattern};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let clip = outcome.clip.unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FourOnTheFloor,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, clip_ref) = s.project().clip(clip).unwrap();
+        let notes = match &clip_ref.content {
+            crate::model::ClipContent::Midi { notes, .. } => notes,
+            _ => panic!("expected a MIDI clip"),
+        };
+        assert_eq!(notes.len(), 10);
+        // The kick lands on the quarter notes (steps 0, 4, 8, 12): frame 0,
+        // the first quarter, ...
+        assert_eq!(notes[0].pitch, 36);
+        assert_eq!(notes[0].start, 0);
+
+        // One undo step undoes the whole pattern.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("apply_drum_pattern"));
+        let (_, clip_ref) = s.project().clip(clip).unwrap();
+        assert!(matches!(
+            &clip_ref.content,
+            crate::model::ClipContent::Midi { notes, .. } if notes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn saving_and_loading_a_drum_pattern() {
+        use crate::command::{
+            AddDrumTrack, ApplyDrumPattern, DrumPattern, LoadSavedDrumPattern,
+            RemoveSavedDrumPattern, SaveDrumPattern,
+        };
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let clip = outcome.clip.unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::BoomBap,
+            }
+            .into(),
+        )
+        .unwrap();
+
+        s.execute(
+            SaveDrumPattern {
+                clip,
+                name: "My Beat".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().drum_patterns.len(), 1);
+        assert_eq!(s.project().drum_patterns[0].steps.len(), 12);
+
+        // Loading it onto another clip writes the same steps.
+        let other_outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let other_clip = other_outcome.clip.unwrap();
+        s.execute(
+            LoadSavedDrumPattern {
+                clip: other_clip,
+                name: "My Beat".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, other_ref) = s.project().clip(other_clip).unwrap();
+        let other_notes = match &other_ref.content {
+            crate::model::ClipContent::Midi { notes, .. } => notes.clone(),
+            _ => panic!("expected a MIDI clip"),
+        };
+        let (_, first_ref) = s.project().clip(clip).unwrap();
+        let first_notes = match &first_ref.content {
+            crate::model::ClipContent::Midi { notes, .. } => notes.clone(),
+            _ => panic!("expected a MIDI clip"),
+        };
+        assert_eq!(other_notes.len(), first_notes.len());
+
+        // An unknown name is refused, for both loading and removing.
+        assert!(
+            s.execute(
+                LoadSavedDrumPattern {
+                    clip: other_clip,
+                    name: "Nope".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+        assert!(
+            s.execute(
+                RemoveSavedDrumPattern {
+                    name: "Nope".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+
+        s.execute(
+            RemoveSavedDrumPattern {
+                name: "My Beat".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert!(s.project().drum_patterns.is_empty());
+    }
+
+    #[test]
     fn time_signature_changes() {
         use crate::command::NoteSpec;
         use crate::command::{

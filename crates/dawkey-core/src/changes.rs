@@ -161,6 +161,7 @@ impl Change {
             Edit::SetLoop(_) => self.also.push("loop"),
             Edit::SetPunch(_) => self.also.push("punch"),
             Edit::SetRackPresets(_) => self.also.push("rack_presets"),
+            Edit::SetDrumPatterns(_) => self.also.push("drum_patterns"),
         }
     }
 

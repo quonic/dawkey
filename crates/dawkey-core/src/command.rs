@@ -13,10 +13,10 @@ use crate::edit::{ClipProp, Edit, TrackProp};
 use crate::error::CoreError;
 use crate::model::{
     AutomationLane, AutomationPoint, AutomationTarget, CC_MAX, Clip, ClipContent, ClipId,
-    ControlPoint, Controller, DEVICE_LATENCY_MS_MAX, GAIN_DB_MAX, GAIN_DB_MIN, MASTER, MIDI_MAX,
-    MidiOutput, Note, NoteId, PluginId, PluginSlot, Project, SavedRackPreset, SavedRackUnit, Send,
-    SourceId, SynthParams, TEMPO_BPM_MAX, TEMPO_BPM_MIN, TimeSignature, Track, TrackId, TrackKind,
-    Waveform,
+    ControlPoint, Controller, DEVICE_LATENCY_MS_MAX, DrumStep, GAIN_DB_MAX, GAIN_DB_MIN, MASTER,
+    MIDI_MAX, MidiOutput, Note, NoteId, PluginId, PluginSlot, Project, SavedDrumPattern,
+    SavedRackPreset, SavedRackUnit, Send, SourceId, SynthParams, TEMPO_BPM_MAX, TEMPO_BPM_MIN,
+    TimeSignature, Track, TrackId, TrackKind, Waveform,
 };
 use crate::model::{InputChannels, Region, TimeRange};
 use crate::session::Outcome;
@@ -179,6 +179,12 @@ commands! {
     SaveRackPreset => "save_rack_preset", Setter;
     RemoveSavedRackPreset => "remove_saved_rack_preset", Destructive;
     LoadSavedRackPreset => "load_saved_rack_preset", Setter;
+    AddDrumTrack => "add_drum_track", Additive;
+    ApplyDrumKit => "apply_drum_kit", Setter;
+    ApplyDrumPattern => "apply_drum_pattern", Setter;
+    SaveDrumPattern => "save_drum_pattern", Setter;
+    RemoveSavedDrumPattern => "remove_saved_drum_pattern", Destructive;
+    LoadSavedDrumPattern => "load_saved_drum_pattern", Setter;
     SetAutomation => "set_automation", Setter;
     AddAutomationPoint => "add_automation_point", Setter;
     RemoveAutomationPoints => "remove_automation_points", Destructive;
@@ -3287,6 +3293,542 @@ fn preset_chain(preset: RackPreset) -> Vec<(&'static str, Vec<(&'static str, f64
                 ],
             ),
         ],
+    }
+}
+
+/// `builtin:drums`' plugin ID (see `dawkey-plugins`' `builtin::DRUMS_ID`,
+/// which must stay in sync with this literal).
+const DRUMS_PLUGIN_ID: &str = "builtin:drums";
+
+/// General MIDI drum-map note numbers builtin:drums' eight pads answer to,
+/// and the parameter-ID slug each pad's tone/decay/level params use (see
+/// `dawkey-plugins`' `builtin::drum_plugin_info`, which must stay in sync):
+/// Kick, Snare, Closed Hat, Open Hat, Tom, Clap, Crash, Ride.
+const DRUM_PAD_NOTES: [u8; 8] = [36, 38, 42, 46, 45, 39, 49, 51];
+const DRUM_PAD_SLUGS: [&str; 8] = [
+    "kick",
+    "snare",
+    "closed_hat",
+    "open_hat",
+    "tom",
+    "clap",
+    "crash",
+    "ride",
+];
+
+fn drum_kit_params(pads: [(f64, f64, f64); 8]) -> BTreeMap<String, f64> {
+    let mut params = BTreeMap::new();
+    for (i, slug) in DRUM_PAD_SLUGS.iter().enumerate() {
+        let (tone, decay_ms, level_db) = pads[i];
+        params.insert(format!("{slug}_tone"), tone);
+        params.insert(format!("{slug}_decay"), decay_ms);
+        params.insert(format!("{slug}_level"), level_db);
+    }
+    params
+}
+
+/// Curated drum kits: a synthesized character per pad (tone, decay_ms,
+/// level_db), plus a short processing chain mounted after the instrument
+/// (a glue compressor, an EQ carve, and either a touch of room reverb or,
+/// for LoFi, a touch of saturation instead).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DrumKit {
+    Kit808,
+    Kit909,
+    Acoustic,
+    LoFi,
+    Trap,
+}
+
+#[allow(clippy::type_complexity)]
+fn drum_kit_spec(
+    kit: DrumKit,
+) -> (
+    [(f64, f64, f64); 8],
+    Vec<(&'static str, Vec<(&'static str, f64)>)>,
+) {
+    match kit {
+        DrumKit::Kit808 => (
+            [
+                (0.6, 420.0, 1.0),
+                (0.4, 150.0, 0.0),
+                (0.3, 55.0, -4.0),
+                (0.3, 300.0, -6.0),
+                (0.5, 260.0, -2.0),
+                (0.45, 120.0, -2.0),
+                (0.4, 1300.0, -7.0),
+                (0.4, 850.0, -8.0),
+            ],
+            vec![
+                (
+                    "builtin:comp",
+                    vec![("threshold", -18.0), ("ratio", 3.0), ("makeup", 2.0)],
+                ),
+                ("builtin:eq", vec![("low_cut", 40.0), ("low_gain", 2.0)]),
+                (
+                    "builtin:reverb",
+                    vec![("mode", 0.0), ("decay", 1.0), ("mix", 8.0)],
+                ),
+            ],
+        ),
+        DrumKit::Kit909 => (
+            [
+                (0.7, 300.0, 1.0),
+                (0.65, 170.0, 1.0),
+                (0.6, 60.0, -3.0),
+                (0.6, 280.0, -5.0),
+                (0.55, 230.0, -2.0),
+                (0.6, 110.0, -1.0),
+                (0.55, 1200.0, -6.0),
+                (0.5, 800.0, -7.0),
+            ],
+            vec![
+                (
+                    "builtin:comp",
+                    vec![("threshold", -16.0), ("ratio", 4.0), ("makeup", 2.5)],
+                ),
+                (
+                    "builtin:eq",
+                    vec![("low_cut", 50.0), ("high_mid_gain", 2.0)],
+                ),
+                (
+                    "builtin:reverb",
+                    vec![("mode", 1.0), ("decay", 1.4), ("mix", 12.0)],
+                ),
+            ],
+        ),
+        DrumKit::Acoustic => (
+            [
+                (0.4, 280.0, 0.0),
+                (0.3, 220.0, 0.0),
+                (0.45, 80.0, -3.0),
+                (0.45, 340.0, -5.0),
+                (0.6, 320.0, -1.0),
+                (0.5, 150.0, -2.0),
+                (0.45, 1600.0, -5.0),
+                (0.4, 1000.0, -6.0),
+            ],
+            vec![
+                (
+                    "builtin:comp",
+                    vec![("threshold", -20.0), ("ratio", 2.5), ("makeup", 1.5)],
+                ),
+                (
+                    "builtin:eq",
+                    vec![("low_mid_gain", 1.0), ("high_gain", 1.0)],
+                ),
+                (
+                    "builtin:reverb",
+                    vec![("mode", 2.0), ("decay", 2.8), ("mix", 30.0)],
+                ),
+            ],
+        ),
+        DrumKit::LoFi => (
+            [
+                (0.3, 300.0, -1.0),
+                (0.2, 160.0, -2.0),
+                (0.15, 65.0, -6.0),
+                (0.15, 260.0, -8.0),
+                (0.25, 240.0, -3.0),
+                (0.2, 110.0, -4.0),
+                (0.2, 1100.0, -9.0),
+                (0.2, 750.0, -9.0),
+            ],
+            vec![
+                (
+                    "builtin:comp",
+                    vec![("threshold", -18.0), ("ratio", 3.0), ("makeup", 1.5)],
+                ),
+                ("builtin:eq", vec![("low_cut", 30.0), ("high_gain", -4.0)]),
+                (
+                    "builtin:drive",
+                    vec![
+                        ("drive", 2.0),
+                        ("tone", 3.0),
+                        ("level", 0.0),
+                        ("tight", 0.0),
+                        ("mix", 25.0),
+                    ],
+                ),
+            ],
+        ),
+        DrumKit::Trap => (
+            [
+                (0.55, 260.0, 1.0),
+                (0.5, 150.0, 0.0),
+                (0.5, 140.0, -3.0),
+                (0.5, 380.0, -5.0),
+                (0.45, 220.0, -2.0),
+                (0.55, 130.0, -1.0),
+                (0.45, 1200.0, -6.0),
+                (0.4, 800.0, -7.0),
+            ],
+            vec![
+                (
+                    "builtin:comp",
+                    vec![("threshold", -14.0), ("ratio", 5.0), ("makeup", 3.0)],
+                ),
+                ("builtin:eq", vec![("low_cut", 35.0), ("low_gain", 2.0)]),
+                (
+                    "builtin:reverb",
+                    vec![("mode", 0.0), ("decay", 0.8), ("mix", 6.0)],
+                ),
+            ],
+        ),
+    }
+}
+
+/// Builds `builtin:drums` plus `kit`'s processing chain as a `mount_chain`
+/// input (plugin ID, params).
+fn drum_kit_chain(kit: DrumKit) -> Vec<(String, BTreeMap<String, f64>)> {
+    let (pads, fx) = drum_kit_spec(kit);
+    let mut chain = vec![(DRUMS_PLUGIN_ID.to_owned(), drum_kit_params(pads))];
+    chain.extend(fx.into_iter().map(|(id, params)| {
+        (
+            id.to_owned(),
+            params.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
+        )
+    }));
+    chain
+}
+
+/// Add a MIDI track already set up as a drum machine: builtin:drums (the
+/// synthesized drum kit instrument) loaded with a kit preset's sound and
+/// processing chain, and one empty one-bar MIDI clip ready for step
+/// programming (see apply_drum_pattern, add_midi_notes). Returns the new
+/// track's ID and the clip's ID.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AddDrumTrack {
+    /// Track name. Defaults to "Drums N".
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Starting kit. Defaults to Kit808.
+    #[serde(default)]
+    pub kit: Option<DrumKit>,
+}
+
+impl AddDrumTrack {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let name = match self.name {
+            Some(name) => validate_name(&name)?,
+            None => (1..)
+                .map(|n| format!("Drums {n}"))
+                .find(|name| project.tracks.iter().all(|t| &t.name != name))
+                .expect("unbounded range always yields a free name"),
+        };
+        let id = project.alloc_track_id();
+        let track = Track::new(id, name, TrackKind::Midi);
+        let mut edits = vec![Edit::InsertTrack {
+            index: project.tracks.len(),
+            track,
+        }];
+        let mut plugins = Vec::new();
+        for (plugin, params) in drum_kit_chain(self.kit.unwrap_or(DrumKit::Kit808)) {
+            plugins.push(PluginSlot {
+                id: project.alloc_plugin_id(),
+                plugin,
+                params,
+                bypass: false,
+                sidechain: None,
+                outputs: Default::default(),
+            });
+        }
+        edits.push(Edit::SetTrack {
+            id,
+            prop: TrackProp::Plugins(plugins),
+        });
+        let length = fit_to_bars(project, 0, 0, 0);
+        let clip = Clip {
+            id: project.alloc_clip_id(),
+            start: 0,
+            length,
+            gain_db: 0.0,
+            muted: false,
+            lane: 0,
+            name: None,
+            content: ClipContent::Midi {
+                notes: Vec::new(),
+                controls: Vec::new(),
+            },
+        };
+        let clip_id = clip.id;
+        insert_clip(project, id, clip, false, &mut edits);
+        Ok((
+            edits,
+            Outcome {
+                track: Some(id),
+                clip: Some(clip_id),
+                ..Outcome::default()
+            },
+        ))
+    }
+}
+
+/// Mount a drum kit preset's sound and processing chain (see
+/// add_drum_track) onto a MIDI track, replacing its current plugin chain,
+/// as one undo step.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyDrumKit {
+    pub track: TrackId,
+    pub kit: DrumKit,
+}
+
+impl ApplyDrumKit {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let track = project
+            .track(self.track)
+            .ok_or(CoreError::TrackNotFound(self.track))?;
+        if track.kind != TrackKind::Midi {
+            return Err(CoreError::invalid(format!(
+                "track {} is not a MIDI track (add_drum_track makes one)",
+                self.track
+            )));
+        }
+        mount_chain(project, self.track, drum_kit_chain(self.kit), true)
+    }
+}
+
+/// Curated drum step patterns, 16 steps (one bar of 16th notes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DrumPattern {
+    FourOnTheFloor,
+    BoomBap,
+    Trap,
+    HouseShuffle,
+    DrumAndBass,
+}
+
+fn step(pad_index: usize, step: u8, velocity: u8) -> DrumStep {
+    DrumStep {
+        pad: DRUM_PAD_NOTES[pad_index],
+        step,
+        velocity,
+    }
+}
+
+/// Pad indices: 0 Kick, 1 Snare, 2 Closed Hat, 3 Open Hat, 4 Tom, 5 Clap, 6
+/// Crash, 7 Ride.
+fn curated_pattern_steps(pattern: DrumPattern) -> Vec<DrumStep> {
+    match pattern {
+        DrumPattern::FourOnTheFloor => vec![
+            step(0, 0, 115),
+            step(0, 4, 115),
+            step(0, 8, 115),
+            step(0, 12, 115),
+            step(5, 4, 100),
+            step(5, 12, 100),
+            step(2, 2, 80),
+            step(2, 6, 80),
+            step(2, 10, 80),
+            step(2, 14, 80),
+        ],
+        DrumPattern::BoomBap => vec![
+            step(0, 0, 115),
+            step(0, 10, 110),
+            step(1, 4, 110),
+            step(1, 12, 110),
+            step(2, 0, 70),
+            step(2, 2, 65),
+            step(2, 4, 70),
+            step(2, 6, 65),
+            step(2, 8, 70),
+            step(2, 10, 65),
+            step(2, 12, 70),
+            step(2, 14, 65),
+        ],
+        DrumPattern::Trap => vec![
+            step(0, 0, 118),
+            step(0, 7, 105),
+            step(0, 10, 110),
+            step(5, 4, 105),
+            step(5, 12, 105),
+            step(2, 0, 70),
+            step(2, 1, 60),
+            step(2, 2, 95),
+            step(2, 3, 60),
+            step(2, 4, 70),
+            step(2, 5, 60),
+            step(2, 6, 95),
+            step(2, 7, 60),
+            step(2, 8, 70),
+            step(2, 9, 60),
+            step(2, 10, 95),
+            step(2, 11, 60),
+            step(2, 12, 70),
+            step(2, 13, 60),
+            step(2, 14, 95),
+            step(2, 15, 60),
+        ],
+        DrumPattern::HouseShuffle => vec![
+            step(0, 0, 115),
+            step(0, 4, 115),
+            step(0, 8, 115),
+            step(0, 12, 115),
+            step(5, 4, 95),
+            step(5, 12, 95),
+            step(3, 2, 90),
+            step(3, 6, 90),
+            step(3, 10, 90),
+            step(3, 14, 90),
+        ],
+        DrumPattern::DrumAndBass => vec![
+            step(0, 0, 118),
+            step(0, 10, 112),
+            step(1, 4, 115),
+            step(1, 12, 115),
+            step(1, 7, 60),
+            step(2, 0, 70),
+            step(2, 2, 70),
+            step(2, 4, 70),
+            step(2, 6, 70),
+            step(2, 8, 70),
+            step(2, 10, 70),
+            step(2, 12, 70),
+            step(2, 14, 70),
+        ],
+    }
+}
+
+/// Steps on a 16-step bar as note specs (one step is a 16th note: 0.25
+/// beats).
+fn steps_to_note_specs(steps: &[DrumStep]) -> Vec<NoteSpec> {
+    steps
+        .iter()
+        .map(|s| NoteSpec {
+            pitch: s.pad,
+            start_beats: f64::from(s.step) * 0.25,
+            length_beats: 0.25,
+            velocity: s.velocity,
+        })
+        .collect()
+}
+
+/// Replaces clip `id`'s notes with `steps`' (see set_notes), as one undo
+/// step.
+fn apply_drum_steps(
+    project: &mut Project,
+    id: ClipId,
+    steps: &[DrumStep],
+) -> Result<(Vec<Edit>, Outcome), CoreError> {
+    let (_, start, length) = midi_notes(project, id)?;
+    let specs = steps_to_note_specs(steps);
+    let notes = new_notes(project, &specs, start, 0)?;
+    let edits = set_notes(project, id, start, length, notes);
+    Ok((edits, Outcome::none()))
+}
+
+/// Replace a MIDI clip's notes with a curated drum pattern's (see
+/// add_drum_track, which gives a track the right instrument to play them),
+/// as one undo step.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyDrumPattern {
+    pub clip: ClipId,
+    pub pattern: DrumPattern,
+}
+
+impl ApplyDrumPattern {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        apply_drum_steps(project, self.clip, &curated_pattern_steps(self.pattern))
+    }
+}
+
+/// Save a MIDI clip's notes as a named drum step pattern of your own (a
+/// 16-step bar), alongside the curated ones apply_drum_pattern mounts.
+/// Every note must be on one of builtin:drums' pad notes (see list_plugins).
+/// Saving under a name that's already used replaces it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveDrumPattern {
+    pub clip: ClipId,
+    pub name: String,
+}
+
+impl SaveDrumPattern {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let name = validate_name(&self.name)?;
+        let (notes, _, length) = midi_notes(project, self.clip)?;
+        if notes.is_empty() {
+            return Err(CoreError::invalid("the clip has no notes to save"));
+        }
+        let steps = notes
+            .iter()
+            .map(|n| {
+                if !DRUM_PAD_NOTES.contains(&n.pitch) {
+                    return Err(CoreError::invalid(format!(
+                        "note at pitch {} is not one of builtin:drums' pad notes",
+                        n.pitch
+                    )));
+                }
+                let step = if length == 0 {
+                    0
+                } else {
+                    ((n.start as f64 / length as f64) * 16.0).round() as i64
+                }
+                .clamp(0, 15) as u8;
+                Ok(DrumStep {
+                    pad: n.pitch,
+                    step,
+                    velocity: n.velocity,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut patterns = project.drum_patterns.clone();
+        match patterns.iter_mut().find(|p| p.name == name) {
+            Some(existing) => existing.steps = steps,
+            None => patterns.push(SavedDrumPattern { name, steps }),
+        }
+        Ok((vec![Edit::SetDrumPatterns(patterns)], Outcome::none()))
+    }
+}
+
+/// Remove one of your saved drum patterns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveSavedDrumPattern {
+    pub name: String,
+}
+
+impl RemoveSavedDrumPattern {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let mut patterns = project.drum_patterns.clone();
+        let before = patterns.len();
+        patterns.retain(|p| p.name != self.name);
+        if patterns.len() == before {
+            return Err(CoreError::invalid(format!(
+                "no saved drum pattern named {:?}",
+                self.name
+            )));
+        }
+        Ok((vec![Edit::SetDrumPatterns(patterns)], Outcome::none()))
+    }
+}
+
+/// Replace a MIDI clip's notes with one of your own saved drum patterns
+/// (save_drum_pattern), as one undo step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoadSavedDrumPattern {
+    pub clip: ClipId,
+    pub name: String,
+}
+
+impl LoadSavedDrumPattern {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let steps = project
+            .drum_patterns
+            .iter()
+            .find(|p| p.name == self.name)
+            .ok_or_else(|| {
+                CoreError::invalid(format!("no saved drum pattern named {:?}", self.name))
+            })?
+            .steps
+            .clone();
+        apply_drum_steps(project, self.clip, &steps)
     }
 }
 
