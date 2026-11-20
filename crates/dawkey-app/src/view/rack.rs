@@ -14,7 +14,7 @@ use dawkey_ui::{
     TextAlign, UiState,
 };
 
-use super::{TrackView, ViewModel, button, meter, text_field, toggle, track_buttons};
+use super::{TrackView, ViewModel, button, meter, name_editor, text_field, toggle, track_buttons};
 use crate::state::{TextField, ViewState};
 use crate::theme::*;
 
@@ -51,11 +51,11 @@ pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState, content_w
         .id("rack")
         .fill()
         .background(pal().panel)
-        .child(sidebar(model, ui))
+        .child(sidebar(model, view, ui))
         .child(cabinet(model, view, ui, bay_inner_w))
 }
 
-fn sidebar(model: &ViewModel, ui: &UiState) -> Node {
+fn sidebar(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
     let section = |title: &str| {
         Node::label(title)
             .width(Sizing::Fill(1.0))
@@ -156,7 +156,76 @@ fn sidebar(model: &ViewModel, ui: &UiState) -> Node {
                 .gap(4.0)
                 .child(preset_btn("lead", "High-Gain Lead"))
                 .child(preset_btn("ambient", "Ambient")),
+        )
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
+                .child(preset_btn("blues", "Blues"))
+                .child(preset_btn("metal", "Metal")),
+        )
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
+                .child(preset_btn("jazz", "Jazz"))
+                .child(preset_btn("acoustic", "Acoustic")),
         );
+
+    let track = model.rack_track;
+    let mut your_presets = Node::column().width(Sizing::Fill(1.0)).gap(4.0);
+    for (i, name) in model.rack_presets.iter().enumerate() {
+        your_presets = your_presets.child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
+                .child(
+                    button(
+                        &format!("rack/saved/{i}"),
+                        &format!("Mount \"{name}\""),
+                        ui,
+                        None,
+                    )
+                    .text(name.clone())
+                    .clip()
+                    .width(Sizing::Fill(1.0))
+                    .height(Sizing::Fixed(22.0))
+                    .padding(Insets::xy(6.0, 0.0))
+                    .style(|s| {
+                        s.font_size = 10.0;
+                        s.text_align = TextAlign::Start;
+                    }),
+                )
+                .child(
+                    button(
+                        &format!("rack/remove_saved/{i}"),
+                        &format!("Remove the \"{name}\" preset"),
+                        ui,
+                        None,
+                    )
+                    .text("×")
+                    .width(Sizing::Fixed(20.0))
+                    .height(Sizing::Fixed(22.0))
+                    .style(|s| s.color = pal().text_dim),
+                ),
+        );
+    }
+    your_presets = your_presets.child(
+        name_editor(&TextField::RackPresetName(track), "Preset name", view, ui).unwrap_or_else(
+            || {
+                button(
+                    "rack/save_as",
+                    "Save the current chain as a preset",
+                    ui,
+                    None,
+                )
+                .text("+ Save as preset…")
+                .width(Sizing::Fill(1.0))
+                .height(Sizing::Fixed(22.0))
+                .style(|s| s.font_size = 10.0)
+            },
+        ),
+    );
 
     let add_btn = |kind: &str, label: &str| {
         button(&format!("rack/add/{kind}"), label, ui, None)
@@ -217,6 +286,8 @@ fn sidebar(model: &ViewModel, ui: &UiState) -> Node {
         .child(tracks_col)
         .child(section("GUITAR RIG PRESETS"))
         .child(presets)
+        .child(section("YOUR PRESETS"))
+        .child(your_presets)
         .child(section("MOUNT STUDIO UNIT"))
         .child(units)
         .child(Node::spacer())

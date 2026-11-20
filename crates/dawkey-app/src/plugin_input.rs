@@ -4,9 +4,10 @@
 //! commands, one undo step per gesture.
 
 use dawkey_core::{
-    AddAutomationPoint, AddPlugin, AutomationTarget, LoadRackPreset, MASTER, MovePlugin, PluginId,
-    PointSpec, RackPreset, RemovePlugin, SetAutomation, SetPluginBypass, SetPluginOutput,
-    SetPluginParam, SetPluginSidechain, TrackId, TrackKind,
+    AddAutomationPoint, AddPlugin, AutomationTarget, LoadRackPreset, LoadSavedRackPreset, MASTER,
+    MovePlugin, PluginId, PointSpec, RackPreset, RemovePlugin, RemoveSavedRackPreset,
+    SetAutomation, SetPluginBypass, SetPluginOutput, SetPluginParam, SetPluginSidechain, TrackId,
+    TrackKind,
 };
 use dawkey_ui::{Modifiers, Point};
 
@@ -204,6 +205,10 @@ impl App {
                     "crunch" => RackPreset::Crunch,
                     "lead" => RackPreset::Lead,
                     "ambient" => RackPreset::Ambient,
+                    "blues" => RackPreset::Blues,
+                    "metal" => RackPreset::Metal,
+                    "jazz" => RackPreset::Jazz,
+                    "acoustic" => RackPreset::Acoustic,
                     _ => return None,
                 };
                 let track = self.rack_track();
@@ -216,6 +221,43 @@ impl App {
                     }
                     .into(),
                 )
+            }
+            ["rack", "save_as"] => {
+                let track = self.rack_track();
+                self.start_text_edit(TextField::RackPresetName(track))
+            }
+            ["rack", "saved", index] => {
+                let index: usize = index.parse().ok()?;
+                let name = self
+                    .studio
+                    .session()
+                    .project()
+                    .rack_presets
+                    .get(index)?
+                    .name
+                    .clone();
+                let track = self.rack_track();
+                self.view.rack_scroll = 0.0;
+                self.execute(
+                    LoadSavedRackPreset {
+                        track,
+                        name,
+                        replace: Some(true),
+                    }
+                    .into(),
+                )
+            }
+            ["rack", "remove_saved", index] => {
+                let index: usize = index.parse().ok()?;
+                let name = self
+                    .studio
+                    .session()
+                    .project()
+                    .rack_presets
+                    .get(index)?
+                    .name
+                    .clone();
+                self.execute(RemoveSavedRackPreset { name }.into())
             }
             ["plugin", id, "param", param] if count == 2 => {
                 // Double-click: type a value.

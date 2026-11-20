@@ -737,6 +737,14 @@ impl App {
         } else {
             Vec::new()
         };
+        let rack_presets = self
+            .studio
+            .session()
+            .project()
+            .rack_presets
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
         let catalog = self.studio.cached_catalog().filter(|_| wants_catalog);
         let picker = self.view.plugin_picker.map(|_| {
             catalog.map_or_else(Vec::new, |c| {
@@ -942,6 +950,7 @@ impl App {
             picker,
             rack_track,
             rack_units,
+            rack_presets,
             scanning,
             automation_write: self.view.automation_write,
             song_end_s: project.frames_to_seconds(project.end()),

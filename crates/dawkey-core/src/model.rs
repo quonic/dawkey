@@ -272,6 +272,23 @@ pub struct PluginSlot {
     pub outputs: BTreeMap<u32, TrackId>,
 }
 
+/// One unit in a `SavedRackPreset`'s chain: a builtin rack plugin ID (e.g.
+/// `"builtin:drive"`) and the parameters saved_rack_preset captured from it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SavedRackUnit {
+    pub plugin: String,
+    #[serde(default)]
+    pub params: BTreeMap<String, f64>,
+}
+
+/// A user's own rack preset (save_rack_preset), saved in the project
+/// alongside the curated ones load_rack_preset mounts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SavedRackPreset {
+    pub name: String,
+    pub chain: Vec<SavedRackUnit>,
+}
+
 /// What a plugin saved of itself beyond its parameters (presets, loaded
 /// files, settings it has no parameters for), as the plugin wrote it.
 /// Saved in project files as base64.
@@ -902,6 +919,9 @@ pub struct Project {
     /// back as it was; not part of the undo history.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugin_states: BTreeMap<PluginId, PluginState>,
+    /// The user's own saved rack presets (save_rack_preset), by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rack_presets: Vec<SavedRackPreset>,
     /// Next IDs to hand out. Saved so IDs stay unique across sessions.
     next_track_id: u64,
     #[serde(default)]
@@ -947,6 +967,7 @@ impl Project {
             loop_region: Region::default(),
             punch: Region::default(),
             plugin_states: BTreeMap::new(),
+            rack_presets: Vec::new(),
             next_track_id: 1,
             next_source_id: 1,
             next_clip_id: 1,

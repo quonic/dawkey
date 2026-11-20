@@ -330,6 +330,8 @@ pub enum TextField {
     TrackName(TrackId),
     /// A clip's name (empty: back to the default).
     ClipName(ClipId),
+    /// A name to save the rack track's current chain as a preset under.
+    RackPresetName(TrackId),
 }
 
 /// Slider position (0 to 1, cubic) of a MIDI device latency in ms.

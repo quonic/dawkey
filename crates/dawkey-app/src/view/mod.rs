@@ -82,6 +82,8 @@ pub(crate) struct ViewModel {
     pub(crate) rack_track: TrackId,
     /// Full parameter details for the units mounted in the active rack.
     pub(crate) rack_units: Vec<PluginDetails>,
+    /// The user's own saved rack presets, by name.
+    pub(crate) rack_presets: Vec<String>,
     /// Plugins are being scanned on a worker thread.
     pub(crate) scanning: bool,
     /// Moving controls while playing writes automation.

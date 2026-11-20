@@ -3682,3 +3682,88 @@ fn guitar_effects_rack() {
     click(&mut app, &format!("plugin/{}/edit", ext.0)).unwrap();
     assert_eq!(app.view_state().plugin_editor, Some(ext));
 }
+
+#[test]
+fn more_rack_presets_and_saving_your_own() {
+    let (mut app, _dir) = app_with_plugins();
+    let guitar = add_track(&mut app, "Guitar");
+    click(&mut app, "view/rack").unwrap();
+    click(&mut app, &format!("rack/track/{guitar}")).unwrap();
+
+    // The 4 newer curated presets mount too.
+    for (id, expect_first) in [
+        ("blues", "builtin:gate"),
+        ("metal", "builtin:gate"),
+        ("jazz", "builtin:gate"),
+        ("acoustic", "builtin:gate"),
+    ] {
+        click(&mut app, &format!("rack/preset/{id}")).unwrap();
+        let plugins = &app
+            .studio
+            .session()
+            .project()
+            .track(TrackId(guitar))
+            .unwrap()
+            .plugins;
+        assert!(!plugins.is_empty(), "{id}");
+        assert_eq!(plugins[0].plugin, expect_first, "{id}");
+    }
+
+    // Tweak the mounted (acoustic) chain, then save it as your own preset.
+    click(&mut app, "rack/preset/crunch").unwrap();
+    let plugins = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(guitar))
+        .unwrap()
+        .plugins
+        .clone();
+    let gate = plugins[0].id;
+    app.studio
+        .execute(dawkey_core::SetPluginParam::new(gate, "threshold", -33.0).into())
+        .unwrap();
+
+    assert!(app.access_tree().find("rack/saved/0").is_none());
+    click(&mut app, "rack/save_as").unwrap();
+    let field = app.access_tree().find("rack/save_name").unwrap().clone();
+    assert_eq!(field.role, Role::TextField);
+    type_keys(&mut app, &["m", "y", "space", "t", "o", "n", "e", "return"]);
+    assert_eq!(
+        app.studio.session().project().rack_presets.len(),
+        1,
+        "{:?}",
+        app.studio.session().project().rack_presets
+    );
+    assert_eq!(
+        app.studio.session().project().rack_presets[0].name,
+        "my tone"
+    );
+    assert_eq!(
+        app.access_tree()
+            .find("rack/saved/0")
+            .and_then(|n| n.name.clone()),
+        Some("Mount \"my tone\"".to_owned())
+    );
+
+    // Mounting it onto another track reproduces the saved chain, including
+    // the tweak.
+    let other = add_track(&mut app, "Other");
+    click(&mut app, &format!("rack/track/{other}")).unwrap();
+    click(&mut app, "rack/saved/0").unwrap();
+    let mounted = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(other))
+        .unwrap()
+        .plugins
+        .clone();
+    assert_eq!(mounted[0].plugin, "builtin:gate");
+    assert_eq!(mounted[0].params["threshold"], -33.0);
+
+    // Removing it clears the list.
+    click(&mut app, "rack/remove_saved/0").unwrap();
+    assert!(app.studio.session().project().rack_presets.is_empty());
+    assert!(app.access_tree().find("rack/saved/0").is_none());
+}

@@ -2519,6 +2519,147 @@ mod tests {
     }
 
     #[test]
+    fn saving_and_loading_a_rack_preset() {
+        use crate::command::{
+            AddPlugin, LoadSavedRackPreset, RemoveSavedRackPreset, SaveRackPreset, SetPluginParam,
+        };
+
+        let mut s = Session::default();
+        let gtr = add(&mut s, "Guitar");
+        let gate = s
+            .execute(
+                AddPlugin {
+                    track: gtr,
+                    plugin: "builtin:gate".into(),
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .plugin
+            .unwrap();
+        s.execute(SetPluginParam::new(gate, "threshold", -40.0).into())
+            .unwrap();
+        s.execute(
+            AddPlugin {
+                track: gtr,
+                plugin: "builtin:drive".into(),
+                index: None,
+            }
+            .into(),
+        )
+        .unwrap();
+        // An external plugin in the chain isn't part of what's saved.
+        s.execute(
+            AddPlugin {
+                track: gtr,
+                plugin: "clap:reverb".into(),
+                index: None,
+            }
+            .into(),
+        )
+        .unwrap();
+
+        // Saving with no builtin units at all is refused.
+        let empty = add(&mut s, "Empty");
+        assert!(
+            s.execute(
+                SaveRackPreset {
+                    track: empty,
+                    name: "Nothing".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+
+        s.execute(
+            SaveRackPreset {
+                track: gtr,
+                name: "My Tone".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().rack_presets.len(), 1);
+        assert_eq!(s.project().rack_presets[0].chain.len(), 2);
+        assert_eq!(s.project().rack_presets[0].chain[0].plugin, "builtin:gate");
+        assert_eq!(
+            s.project().rack_presets[0].chain[0].params["threshold"],
+            -40.0
+        );
+
+        // Saving again under the same name replaces it, not duplicates it.
+        s.execute(SetPluginParam::new(gate, "threshold", -30.0).into())
+            .unwrap();
+        s.execute(
+            SaveRackPreset {
+                track: gtr,
+                name: "My Tone".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().rack_presets.len(), 1);
+        assert_eq!(
+            s.project().rack_presets[0].chain[0].params["threshold"],
+            -30.0
+        );
+
+        // Loading it onto another track mounts the same builtin chain.
+        let other = add(&mut s, "Other");
+        s.execute(
+            LoadSavedRackPreset {
+                track: other,
+                name: "My Tone".into(),
+                replace: None,
+            }
+            .into(),
+        )
+        .unwrap();
+        let loaded = &s.project().track(other).unwrap().plugins;
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].plugin, "builtin:gate");
+        assert_eq!(loaded[0].params["threshold"], -30.0);
+        assert_eq!(loaded[1].plugin, "builtin:drive");
+
+        // One undo step undoes the whole load.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("load_saved_rack_preset"));
+        assert!(s.project().track(other).unwrap().plugins.is_empty());
+
+        // An unknown name is refused, for both loading and removing.
+        assert!(
+            s.execute(
+                LoadSavedRackPreset {
+                    track: other,
+                    name: "Nope".into(),
+                    replace: None,
+                }
+                .into(),
+            )
+            .is_err()
+        );
+        assert!(
+            s.execute(
+                RemoveSavedRackPreset {
+                    name: "Nope".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+
+        s.execute(
+            RemoveSavedRackPreset {
+                name: "My Tone".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert!(s.project().rack_presets.is_empty());
+    }
+
+    #[test]
     fn time_signature_changes() {
         use crate::command::NoteSpec;
         use crate::command::{
