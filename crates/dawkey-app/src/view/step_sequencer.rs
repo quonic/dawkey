@@ -262,14 +262,45 @@ fn sidebar(
         .height(Sizing::Fixed(22.0))
         .style(|s| s.font_size = 10.0)
     };
-    let sound = Node::row()
+    let is_kit = |kit: dawkey_studio::SampleKit| active_kit == Some(kit);
+    let sound = Node::column()
         .width(Sizing::Fill(1.0))
         .gap(4.0)
         .child(sound_btn("synth", "Synth", active_kit.is_none()))
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
+                .child(sound_btn(
+                    "acoustic_vcsl",
+                    "Acoustic",
+                    is_kit(dawkey_studio::SampleKit::AcousticVcsl),
+                ))
+                .child(sound_btn(
+                    "jazz_virtuosity",
+                    "Jazz",
+                    is_kit(dawkey_studio::SampleKit::JazzVirtuosity),
+                )),
+        )
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
+                .child(sound_btn(
+                    "lofi_virtuosity",
+                    "LoFi",
+                    is_kit(dawkey_studio::SampleKit::LofiVirtuosity),
+                ))
+                .child(sound_btn(
+                    "vintage_vcsl",
+                    "Vintage",
+                    is_kit(dawkey_studio::SampleKit::VintageVcsl),
+                )),
+        )
         .child(sound_btn(
-            "acoustic_vcsl",
-            "Acoustic (Samples)",
-            active_kit == Some(dawkey_studio::SampleKit::AcousticVcsl),
+            "latin_vcsl",
+            "Latin Percussion",
+            is_kit(dawkey_studio::SampleKit::LatinVcsl),
         ));
 
     let kits = Node::column()

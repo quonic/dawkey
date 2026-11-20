@@ -71,6 +71,10 @@ impl App {
                 let kit = match *name {
                     "synth" => None,
                     "acoustic_vcsl" => Some(dawkey_studio::SampleKit::AcousticVcsl),
+                    "jazz_virtuosity" => Some(dawkey_studio::SampleKit::JazzVirtuosity),
+                    "lofi_virtuosity" => Some(dawkey_studio::SampleKit::LofiVirtuosity),
+                    "vintage_vcsl" => Some(dawkey_studio::SampleKit::VintageVcsl),
+                    "latin_vcsl" => Some(dawkey_studio::SampleKit::LatinVcsl),
                     _ => return None,
                 };
                 let clip = self.view.editing_clip?;

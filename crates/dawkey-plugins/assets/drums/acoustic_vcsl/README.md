@@ -15,10 +15,10 @@ processing.
 | Tom | `Membranophones/Struck Membranophones/Tom 1/Stick/TomH_HitS_v3_rr1_Mid.wav` |
 | Crash | `Idiophones/Struck Idiophones/Clash Cymbals 1/cymbal_crash1_mf1.wav` |
 | Ride | `Idiophones/Struck Idiophones/Suspended Cymbal 1/susCymb1_hit_stick_mp1.wav` |
+| Clap | `Idiophones/Struck Idiophones/Claps/SoloClap_vl3.wav` (in `assets/drums/shared/`, reused by other kits) |
 
-VCSL has no dedicated hand-clap or ride cymbal instrument, so this kit has no
-Clap sample (the Clap pad stays synthesized when this kit is active) and
-Ride uses a stick-struck suspended cymbal in its place.
+VCSL has no dedicated ride cymbal instrument, so Ride uses a stick-struck
+suspended cymbal in its place.
 
 Licensed CC0 1.0 Universal (see `CC0.txt`): "Essentially it's Public Domain -
 you can do whatever you want with these sounds (even make commercial

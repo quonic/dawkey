@@ -91,6 +91,61 @@ async fn set_drum_sample_kit_switches_pads_to_real_recordings() {
 }
 
 #[tokio::test]
+async fn the_jazz_kit_sounds_different_from_both_synth_and_the_acoustic_kit() {
+    let dawkey = start().await;
+    let added = dawkey.call("add_drum_track", json!({})).await.unwrap();
+    let track = added["track"].as_u64().unwrap();
+    let clip = added["clip"].as_u64().unwrap();
+    let plugin = dawkey
+        .call("get_state", json!({ "summary": true }))
+        .await
+        .unwrap()["project"]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"].as_u64() == Some(track))
+        .unwrap()["plugins"][0]["id"]
+        .as_u64()
+        .unwrap();
+    dawkey
+        .call(
+            "add_midi_notes",
+            json!({
+                "clip": clip,
+                "notes": [
+                    { "pitch": 36, "start_beats": 0.0, "length_beats": 0.25 },
+                    { "pitch": 51, "start_beats": 0.5, "length_beats": 0.25 },
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+    let synth = render(&dawkey, 0.0, 1.0).await;
+
+    dawkey
+        .call(
+            "set_drum_sample_kit",
+            json!({ "plugin": plugin, "kit": "acoustic_vcsl" }),
+        )
+        .await
+        .unwrap();
+    let acoustic = render(&dawkey, 0.0, 1.0).await;
+
+    dawkey
+        .call(
+            "set_drum_sample_kit",
+            json!({ "plugin": plugin, "kit": "jazz_virtuosity" }),
+        )
+        .await
+        .unwrap();
+    let jazz = render(&dawkey, 0.0, 1.0).await;
+
+    assert!(!jazz["silent"].as_bool().unwrap(), "{jazz}");
+    assert_ne!(jazz["hash"], synth["hash"]);
+    assert_ne!(jazz["hash"], acoustic["hash"]);
+}
+
+#[tokio::test]
 async fn an_unknown_sample_kit_is_a_readable_tool_error() {
     let dawkey = start().await;
     let added = dawkey.call("add_drum_track", json!({})).await.unwrap();

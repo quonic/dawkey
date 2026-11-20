@@ -3890,6 +3890,20 @@ fn the_sound_source_toggle_switches_a_pad_between_synth_and_samples() {
         Some(dawkey_studio::SampleKit::AcousticVcsl)
     );
 
+    // Each of the other bundled kits is reachable too.
+    for (id, kit) in [
+        ("jazz_virtuosity", dawkey_studio::SampleKit::JazzVirtuosity),
+        ("lofi_virtuosity", dawkey_studio::SampleKit::LofiVirtuosity),
+        ("vintage_vcsl", dawkey_studio::SampleKit::VintageVcsl),
+        ("latin_vcsl", dawkey_studio::SampleKit::LatinVcsl),
+    ] {
+        click(&mut app, &format!("step_seq/sound/{id}")).unwrap();
+        assert_eq!(
+            app.studio.plugin_details(plugin).unwrap().sample_kit,
+            Some(kit)
+        );
+    }
+
     click(&mut app, "step_seq/sound/synth").unwrap();
     assert!(
         app.studio
