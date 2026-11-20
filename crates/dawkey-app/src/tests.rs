@@ -3769,3 +3769,116 @@ fn more_rack_presets_and_saving_your_own() {
     assert!(app.studio.session().project().rack_presets.is_empty());
     assert!(app.access_tree().find("rack/saved/0").is_none());
 }
+
+/// A MIDI track with builtin:drums as its first plugin, and an empty
+/// one-bar clip, as add_drum_track would make.
+fn add_drum_clip(app: &mut App) -> (u64, u64) {
+    let outcome = app
+        .studio
+        .execute(dawkey_core::AddDrumTrack::default().into())
+        .unwrap();
+    (outcome.track.unwrap().0, outcome.clip.unwrap().0)
+}
+
+#[test]
+fn drum_clips_open_the_step_sequencer_not_the_piano_roll() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.rebuild();
+    app.double_click(&format!("clip/{clip}"), Modifiers::default())
+        .unwrap();
+    assert_eq!(app.view_state().page, Page::StepSequencer);
+    assert_eq!(app.view_state().editing_clip, Some(ClipId(clip)));
+    click(&mut app, "step_seq/close").unwrap();
+    assert_eq!(app.view_state().page, Page::Arrange);
+
+    // A regular MIDI clip still opens the piano roll.
+    let (_, midi) = add_midi(&mut app, 4.0, &[(60, 0.0, 1.0)]);
+    app.rebuild();
+    app.double_click(&format!("clip/{midi}"), Modifiers::default())
+        .unwrap();
+    assert_eq!(app.view_state().page, Page::PianoRoll);
+}
+
+#[test]
+fn clicking_a_step_toggles_a_note_one_undo_step_at_a_time() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    assert!(notes_of(&app, clip).is_empty());
+
+    // Kick (pad 0) on step 4 (beat 1.0).
+    click(&mut app, "step/0/4").unwrap();
+    assert_eq!(notes_of(&app, clip), [(36, 1.0, 0.25)]);
+    assert_eq!(
+        app.studio.undo().unwrap().as_deref(),
+        Some("add_midi_notes")
+    );
+    assert!(notes_of(&app, clip).is_empty());
+    app.rebuild();
+
+    // Clicking it again removes it.
+    click(&mut app, "step/0/4").unwrap();
+    assert_eq!(notes_of(&app, clip).len(), 1);
+    click(&mut app, "step/0/4").unwrap();
+    assert!(notes_of(&app, clip).is_empty());
+}
+
+#[test]
+fn kit_and_pattern_buttons_in_the_step_sequencer() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+
+    click(&mut app, "step_seq/kit/909").unwrap();
+    let plugins = &app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins;
+    assert_eq!(plugins[0].plugin, "builtin:drums");
+    assert_eq!(plugins[0].params["kick_decay"], 300.0);
+
+    click(&mut app, "step_seq/pattern/four_on_the_floor").unwrap();
+    let notes = notes_of(&app, clip);
+    assert!(notes.contains(&(36, 0.0, 0.25)), "{notes:?}");
+    assert_eq!(notes.len(), 10);
+}
+
+#[test]
+fn saving_and_loading_a_drum_pattern_in_the_step_sequencer() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    click(&mut app, "step_seq/pattern/boom_bap").unwrap();
+
+    assert!(app.access_tree().find("step_seq/saved/0").is_none());
+    click(&mut app, "step_seq/save_as").unwrap();
+    let field = app
+        .access_tree()
+        .find("step_seq/save_name")
+        .unwrap()
+        .clone();
+    assert_eq!(field.role, Role::TextField);
+    type_keys(&mut app, &["m", "y", "space", "b", "e", "a", "t", "return"]);
+    assert_eq!(app.studio.session().project().drum_patterns.len(), 1);
+    assert_eq!(
+        app.access_tree()
+            .find("step_seq/saved/0")
+            .and_then(|n| n.name.clone()),
+        Some("Load \"my beat\"".to_owned())
+    );
+
+    // Loading it onto another drum clip reproduces the same steps.
+    let (_, other) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(other)).unwrap();
+    click(&mut app, "step_seq/saved/0").unwrap();
+    assert_eq!(notes_of(&app, other), notes_of(&app, clip));
+
+    // Removing it clears the list.
+    click(&mut app, "step_seq/remove_saved/0").unwrap();
+    assert!(app.studio.session().project().drum_patterns.is_empty());
+    assert!(app.access_tree().find("step_seq/saved/0").is_none());
+}

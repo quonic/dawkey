@@ -21,6 +21,7 @@ pub(crate) mod plugins;
 mod prefs;
 pub(crate) mod rack;
 mod recovery;
+pub(crate) mod step_sequencer;
 pub(crate) mod tempo;
 
 use std::sync::Arc;
@@ -84,6 +85,8 @@ pub(crate) struct ViewModel {
     pub(crate) rack_units: Vec<PluginDetails>,
     /// The user's own saved rack presets, by name.
     pub(crate) rack_presets: Vec<String>,
+    /// The user's own saved drum patterns, by name.
+    pub(crate) drum_patterns: Vec<String>,
     /// Plugins are being scanned on a worker thread.
     pub(crate) scanning: bool,
     /// Moving controls while playing writes automation.
@@ -401,6 +404,7 @@ pub(crate) fn build(
         Page::Mixer => mixer::build(model, view, ui),
         Page::Rack => rack::build(model, view, ui, area.w),
         Page::PianoRoll => piano_roll::build(model, view, ui),
+        Page::StepSequencer => step_sequencer::build(model, view, ui),
     };
     // The plugin picker and editor float over the page.
     let page =

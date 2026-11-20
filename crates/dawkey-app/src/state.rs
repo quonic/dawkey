@@ -81,6 +81,8 @@ pub enum Page {
     Rack,
     /// The MIDI note editor for one clip.
     PianoRoll,
+    /// The step grid editor for one drum machine clip.
+    StepSequencer,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -332,6 +334,8 @@ pub enum TextField {
     ClipName(ClipId),
     /// A name to save the rack track's current chain as a preset under.
     RackPresetName(TrackId),
+    /// A name to save a drum clip's current steps as a pattern under.
+    DrumPatternName(ClipId),
 }
 
 /// Slider position (0 to 1, cubic) of a MIDI device latency in ms.
