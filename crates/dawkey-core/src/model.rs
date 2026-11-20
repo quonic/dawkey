@@ -435,6 +435,24 @@ impl InputChannels {
             Self::Left | Self::Right => 1,
         }
     }
+
+    /// Short label a UI shows on a cycling control.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stereo => "Stereo",
+            Self::Left => "L",
+            Self::Right => "R",
+        }
+    }
+
+    /// The next choice a click cycles to.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Stereo => Self::Left,
+            Self::Left => Self::Right,
+            Self::Right => Self::Stereo,
+        }
+    }
 }
 
 /// A timeline range `[start, end)` in frames.

@@ -3,9 +3,9 @@
 //! project goes through studio commands, so it's undoable like any MCP call.
 
 use dawkey_core::{
-    AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project, RemoveClip, RemoveTrackSend,
-    SetLoop, SetPunch, SetTrackArm, SetTrackGain, SetTrackMute, SetTrackOutput, SetTrackPan,
-    SetTrackSend, SetTrackSolo, TrackId, TrackKind,
+    AddGuitarTrack, AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project, RemoveClip,
+    RemoveTrackSend, SetLoop, SetPunch, SetTrackArm, SetTrackGain, SetTrackInput, SetTrackMute,
+    SetTrackOutput, SetTrackPan, SetTrackSend, SetTrackSolo, TrackId, TrackKind,
 };
 use dawkey_ui::{ChromeAction, DragPhase, Modifiers, MouseButton, Point, Rect, UiAction};
 
@@ -154,6 +154,7 @@ impl App {
                 Ok(())
             }
             ["arrange", "add_track"] => self.execute(AddTrack::default().into()),
+            ["arrange", "add_guitar_track"] => self.execute(AddGuitarTrack::default().into()),
             ["arrange", "add_midi_track"] => self.execute(
                 AddTrack {
                     kind: TrackKind::Midi,
@@ -171,6 +172,10 @@ impl App {
             ["track", track, "output"] => {
                 let track = parse_track(track)?;
                 self.cycle_output(track)
+            }
+            ["track", track, "input"] => {
+                let track = parse_track(track)?;
+                self.cycle_input(track)
             }
             ["track", track, "add_send"] => {
                 let track = parse_track(track)?;
@@ -493,6 +498,25 @@ impl App {
             return Err("there's no bus to send it to (+ Bus makes one)".into());
         }
         self.execute(SetTrackOutput { track, bus }.into())
+    }
+
+    /// Stereo -> left -> right -> stereo: which input channel(s) an
+    /// armed audio track records and (while monitoring) plays live.
+    fn cycle_input(&mut self, track: TrackId) -> Result<(), String> {
+        let current = self
+            .studio
+            .session()
+            .project()
+            .track(track)
+            .ok_or_else(|| format!("track {track} does not exist"))?
+            .input;
+        self.execute(
+            SetTrackInput {
+                track,
+                input: current.next(),
+            }
+            .into(),
+        )
     }
 
     /// Adds a send from `track` to the first bus it can send to (at 0 dB).

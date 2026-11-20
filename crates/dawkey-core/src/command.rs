@@ -122,6 +122,7 @@ macro_rules! commands {
 
 commands! {
     AddTrack => "add_track", Additive;
+    AddGuitarTrack => "add_guitar_track", Additive;
     RemoveTrack => "remove_track", Destructive;
     RenameTrack => "rename_track", Setter;
     SetTrackGain => "set_track_gain", Setter;
@@ -212,6 +213,61 @@ impl AddTrack {
         let index = self.index.unwrap_or(project.tracks.len());
         let track = Track::new(id, name, self.kind);
         Ok((vec![Edit::InsertTrack { index, track }], Outcome::track(id)))
+    }
+}
+
+/// Adds an audio track already set up to monitor a single instrument live:
+/// armed, monitoring, and listening to one channel (the left input by
+/// default) rather than both. That's the usual wiring for a guitar, bass
+/// or other mono source plugged into one input, so you hear it the moment
+/// you plug in, without a silent "other half" from an unconnected second
+/// channel the way a plain stereo-input track would have. Returns the new
+/// track's ID. Use add_track for a normal (stereo) audio track.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AddGuitarTrack {
+    /// Track name. Defaults to "Guitar N".
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Which input channel to listen to. Defaults to the left (first)
+    /// input.
+    #[serde(default)]
+    pub input: Option<InputChannels>,
+}
+
+impl AddGuitarTrack {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let name = match self.name {
+            Some(name) => validate_name(&name)?,
+            None => (1..)
+                .map(|n| format!("Guitar {n}"))
+                .find(|name| project.tracks.iter().all(|t| &t.name != name))
+                .expect("unbounded range always yields a free name"),
+        };
+        let input = self.input.unwrap_or(InputChannels::Left);
+        let id = project.alloc_track_id();
+        let track = Track::new(id, name, TrackKind::Audio);
+        Ok((
+            vec![
+                Edit::InsertTrack {
+                    index: project.tracks.len(),
+                    track,
+                },
+                Edit::SetTrack {
+                    id,
+                    prop: TrackProp::Armed(true),
+                },
+                Edit::SetTrack {
+                    id,
+                    prop: TrackProp::Input(input),
+                },
+                Edit::SetTrack {
+                    id,
+                    prop: TrackProp::Monitor(true),
+                },
+            ],
+            Outcome::track(id),
+        ))
     }
 }
 

@@ -819,6 +819,7 @@ impl App {
             mute: t.mute,
             solo: t.solo,
             armed: t.armed,
+            input: t.input,
             monitor: t.monitor,
             take_lanes: t
                 .clips

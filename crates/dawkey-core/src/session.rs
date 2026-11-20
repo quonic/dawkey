@@ -512,10 +512,10 @@ fn resolve_source_path(bundle: Option<&Path>, path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::command::{
-        AddClip, AddTrack, MoveClip, RemoveClip, RemoveTrack, RenameClip, RenameTrack, SetClipGain,
-        SetTempo, SetTrackGain,
+        AddClip, AddGuitarTrack, AddTrack, MoveClip, RemoveClip, RemoveTrack, RenameClip,
+        RenameTrack, SetClipGain, SetTempo, SetTrackGain,
     };
-    use crate::model::TrackKind;
+    use crate::model::{InputChannels, TrackKind};
 
     fn add(session: &mut Session, name: &str) -> TrackId {
         session
@@ -543,6 +543,53 @@ mod tests {
         assert_eq!(s.redo().unwrap().as_deref(), Some("add_track"));
         assert_eq!(s.project().tracks[0].id, id);
         assert_eq!(s.project().tracks[0].name, "Drums");
+    }
+
+    #[test]
+    fn add_guitar_track_is_armed_monitoring_and_mono_in_one_undo_step() {
+        let mut s = Session::default();
+        let id = s
+            .execute(AddGuitarTrack::default().into())
+            .unwrap()
+            .track
+            .unwrap();
+        let track = s.project().track(id).unwrap();
+        assert_eq!(track.name, "Guitar 1");
+        assert_eq!(track.kind, TrackKind::Audio);
+        assert!(track.armed);
+        assert!(track.monitor);
+        assert_eq!(track.input, InputChannels::Left);
+
+        // One undo step undoes the whole thing, not just the last field.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("add_guitar_track"));
+        assert!(s.project().tracks.is_empty());
+
+        // A second, unrelated session: a second default one gets its own
+        // number, and an explicit name and channel are honored.
+        let mut s = Session::default();
+        s.execute(AddGuitarTrack::default().into()).unwrap();
+        let second = s
+            .execute(
+                AddGuitarTrack {
+                    name: Some("Bass".into()),
+                    input: Some(InputChannels::Right),
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        assert_eq!(s.project().tracks[0].name, "Guitar 1");
+        let second = s.project().track(second).unwrap();
+        assert_eq!(second.name, "Bass");
+        assert_eq!(second.input, InputChannels::Right);
+        // A third default one skips the taken "Guitar 1".
+        let third = s
+            .execute(AddGuitarTrack::default().into())
+            .unwrap()
+            .track
+            .unwrap();
+        assert_eq!(s.project().track(third).unwrap().name, "Guitar 2");
     }
 
     #[test]

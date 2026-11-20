@@ -123,6 +123,8 @@ pub(crate) struct TrackView {
     pub(crate) mute: bool,
     pub(crate) solo: bool,
     pub(crate) armed: bool,
+    /// Audio tracks: which input channel(s) it listens to.
+    pub(crate) input: dawkey_core::InputChannels,
     /// Audio tracks: plays its input while armed.
     pub(crate) monitor: bool,
     /// Take lanes its clips use (the highest lane plus one).
