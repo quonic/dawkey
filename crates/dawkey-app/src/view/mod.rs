@@ -33,7 +33,8 @@ use dawkey_core::{
 use dawkey_media::Peaks;
 use dawkey_studio::PluginDetails;
 use dawkey_ui::{
-    Chrome, Color, FontFamily, FontWeight, Icon, Insets, Node, Paint, Role, Sizing, UiState,
+    Chrome, Color, Direction, FontFamily, FontWeight, Icon, Insets, Node, Paint, Role, Sizing,
+    UiState,
 };
 
 pub(crate) use mixer::{db_from_position, position_from_db};
@@ -391,7 +392,7 @@ pub(crate) fn build(
             s.background = Some(pal().window);
             s.radius = [radius; 4];
             if margin > 0.0 {
-                s.shadow = Some((SHADOW_BLUR, pal().shadow));
+                s.shadow = Some(ELEVATION.high());
                 s.border = Some((1.0, pal().border));
             }
         });
@@ -457,11 +458,13 @@ fn titlebar(model: &ViewModel, ui: &UiState, window: &WindowInfo, radius: f32) -
         })
         .gap(10.0)
         .style(|s| {
-            s.background = Some(if active {
+            let base = if active {
                 pal().titlebar
             } else {
                 pal().titlebar_inactive
-            });
+            };
+            s.background = Some(base);
+            s.gradient = Some((base.mix(Color::hex(0x000000), 0.15), Direction::Column));
             s.radius = [radius, radius, 0.0, 0.0];
         })
         .child(Node::row().size(10.0, 10.0).style(|s| {
@@ -980,6 +983,9 @@ pub(crate) fn meter(
             levels: display,
             vertical,
             background: pal().meter,
+            low: pal().solo_on,
+            mid: pal().mute_on,
+            high: pal().record_on,
         })
 }
 
