@@ -2288,4 +2288,64 @@ mod tests {
         assert!(cab_low > cab_fizz + 10.0, "{cab_low} vs {cab_fizz}");
         permit_alloc(|| ());
     }
+
+    /// A tiny deterministic noise generator (xorshift32), so the test needs
+    /// no RNG dependency and is reproducible.
+    fn broadband(len: usize, seed: &mut u32) -> Vec<f32> {
+        (0..len)
+            .map(|_| {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 17;
+                *seed ^= *seed << 5;
+                (*seed as f32 / u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    /// `dawkey_plugins::Host::load_for` unconditionally tells the host every
+    /// built-in rack unit has zero latency (`PluginFormat::Builtin` always
+    /// gets `latency: 0`), unlike CLAP/LV2/VST3, which are asked. That's
+    /// only honest if no unit secretly buffers its input before responding.
+    /// This pins it at the DSP level, independent of the host's claim:
+    /// every unit must respond to a loud, broadband signal (on its main
+    /// input and its sidechain, where it takes one) within a tolerance wide
+    /// enough for ordinary envelope/filter settling, but far short of what
+    /// real lookahead or an oversampling filter's group delay would cost.
+    #[test]
+    fn builtin_effects_respond_without_hidden_latency() {
+        const SILENCE: usize = 512;
+        const SIGNAL: usize = 4096;
+        // ~5 ms at 48 kHz: generous for attack/filter settling, nowhere
+        // near what unreported lookahead or an oversampling filter costs.
+        const TOLERANCE: usize = 240;
+        const THRESHOLD: f32 = 0.02;
+
+        for spec in builtin_specs() {
+            let mut proc = RackProcessor::new(spec.effect, 48_000);
+            let mut seed_l = 0x1234_5678_u32;
+            let mut seed_r = 0x8765_4321_u32;
+            let mut l = vec![0.0_f32; SILENCE];
+            l.extend(broadband(SIGNAL, &mut seed_l).iter().map(|s| s * 0.8));
+            let mut r = vec![0.0_f32; SILENCE];
+            r.extend(broadband(SIGNAL, &mut seed_r).iter().map(|s| s * 0.8));
+            let (sc_l, sc_r) = (l.clone(), r.clone());
+
+            assert_no_alloc::assert_no_alloc(|| {
+                proc.process(&mut l, &mut r, Some([&sc_l, &sc_r]), 120.0);
+            });
+
+            let onset = l[SILENCE..]
+                .iter()
+                .zip(&r[SILENCE..])
+                .position(|(a, b)| a.abs() > THRESHOLD || b.abs() > THRESHOLD)
+                .unwrap_or_else(|| panic!("{}: no response to a loud signal", spec.id));
+            assert!(
+                onset <= TOLERANCE,
+                "{}: output didn't respond until {onset} samples ({:.1} ms) after \
+                 input started — that's real latency load_for doesn't report",
+                spec.id,
+                onset as f32 / 48.0,
+            );
+        }
+    }
 }
