@@ -5,6 +5,7 @@
 //! names mirror `dawkey-core`'s `command.rs` and `dawkey-plugins`'
 //! `builtin.rs` (must stay in sync).
 
+use dawkey_core::TimeSignature;
 use dawkey_ui::{Color, FontWeight, Insets, Node, Role, Sizing, TextAlign, UiState};
 
 use super::piano_roll::edited;
@@ -17,10 +18,6 @@ pub(crate) const PAD_NOTES: [u8; 8] = [36, 38, 42, 46, 45, 39, 49, 51];
 pub(crate) const PAD_NAMES: [&str; 8] = [
     "Kick", "Snare", "C.Hat", "O.Hat", "Tom", "Clap", "Crash", "Ride",
 ];
-/// Steps in one bar's grid (16th notes).
-pub(crate) const STEPS: u8 = 16;
-/// Length of one step, in beats (quarter notes).
-pub(crate) const STEP_BEATS: f64 = 0.25;
 
 const ROW_LABEL_W: f32 = 48.0;
 const PATCH_W: f32 = 56.0;
@@ -38,7 +35,7 @@ fn lerp(a: Color, b: Color, t: f32) -> Color {
     )
 }
 
-pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
+pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> Node {
     let page = Node::row()
         .id("step_seq")
         .accessible_label("Drum step sequencer")
@@ -55,18 +52,21 @@ pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
     let ClipViewContent::Midi { notes, .. } = &clip.content else {
         unreachable!("edited() only finds MIDI clips");
     };
+    let start_beat = model.tempo.beat_at_seconds(clip.start_s);
+    let sig = model.meter.meter_at(start_beat + 1e-9);
+    let steps = sig.steps_per_bar();
+    let step_beats = sig.step_beats();
     let playhead_step = {
-        let start_beat = model.tempo.beat_at_seconds(clip.start_s);
         let beat = model.tempo.beat_at_seconds(model.position_s) - start_beat;
-        let step = (beat / STEP_BEATS).floor();
-        (step >= 0.0 && step < f64::from(STEPS)).then_some(step as u8)
+        let step = (beat / step_beats).floor();
+        (step >= 0.0 && step < f64::from(steps)).then_some(step as u16)
     };
     page.child(sidebar(model, view, track, clip.id, ui)).child(
         Node::column()
             .fill()
             .clip()
             .child(header(track, clip, ui))
-            .child(grid(model, track, notes, playhead_step, ui)),
+            .child(grid(model, track, notes, sig, playhead_step, window_w, ui)),
     )
 }
 
@@ -108,9 +108,18 @@ fn grid(
     model: &ViewModel,
     track: &TrackView,
     notes: &[NoteView],
-    playhead_step: Option<u8>,
+    sig: TimeSignature,
+    playhead_step: Option<u16>,
+    window_w: f32,
     ui: &UiState,
 ) -> Node {
+    let steps = sig.steps_per_bar();
+    let steps_per_beat = sig.steps_per_beat();
+    let step_beats = sig.step_beats();
+    let avail = (window_w - SIDEBAR_W - 20.0 - ROW_LABEL_W - PATCH_W - GAP * 2.0).max(100.0);
+    let cell_w = ((avail - f32::from(steps.saturating_sub(1)) * GAP) / f32::from(steps.max(1)))
+        .floor()
+        .clamp(6.0, CELL);
     let pad_outputs = track
         .plugins
         .first()
@@ -145,12 +154,12 @@ fn grid(
             .padding(Insets::xy(6.0, 0.0))
             .style(|s| s.font_size = 9.0),
         );
-        for step in 0..STEPS {
+        for step in 0..steps {
             let hit = notes.iter().find(|n| {
-                n.pitch == pad_note && (n.start_beats - f64::from(step) * STEP_BEATS).abs() < 1e-6
+                n.pitch == pad_note && (n.start_beats - f64::from(step) * step_beats).abs() < 1e-6
             });
             let velocity = hit.map(|n| n.velocity);
-            let is_beat = step % 4 == 0;
+            let is_beat = step % steps_per_beat == 0;
             let is_now = playhead_step == Some(step);
             let bg = match velocity {
                 Some(v) => lerp(pal().track, pal().accent, f32::from(v) / 127.0),
@@ -166,7 +175,7 @@ fn grid(
                     .accessible_label(format!("{name} step {}", step + 1))
                     .value(if velocity.is_some() { "on" } else { "off" })
                     .clickable()
-                    .width(Sizing::Fixed(CELL))
+                    .width(Sizing::Fixed(cell_w))
                     .height(Sizing::Fixed(CELL))
                     .style(move |s| {
                         s.background = Some(bg);

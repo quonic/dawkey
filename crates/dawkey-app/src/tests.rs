@@ -4119,3 +4119,41 @@ fn saving_and_loading_a_drum_pattern_in_the_step_sequencer() {
     assert!(app.studio.session().project().drum_patterns.is_empty());
     assert!(app.access_tree().find("step_seq/saved/0").is_none());
 }
+
+#[test]
+fn the_step_sequencer_pads_follow_time_signature_changes() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    app.rebuild();
+
+    // 4/4: 16 steps (0..=15).
+    assert!(app.ui.find("step/0/15").is_some());
+    assert!(app.ui.find("step/0/16").is_none());
+
+    // 3/4: 12 steps (0..=11).
+    app.studio
+        .execute(dawkey_core::SetTimeSignature::new(3, 4).into())
+        .unwrap();
+    app.rebuild();
+    assert!(app.ui.find("step/0/11").is_some());
+    assert!(app.ui.find("step/0/12").is_none());
+
+    // 5/4: 20 steps (0..=19), and step 16 lands at beat 4.0.
+    app.studio
+        .execute(dawkey_core::SetTimeSignature::new(5, 4).into())
+        .unwrap();
+    app.rebuild();
+    assert!(app.ui.find("step/0/19").is_some());
+    assert!(app.ui.find("step/0/20").is_none());
+    click(&mut app, "step/0/16").unwrap();
+    assert_eq!(notes_of(&app, clip), [(36, 4.0, 0.25)]);
+
+    // 7/8: 14 steps (0..=13).
+    app.studio
+        .execute(dawkey_core::SetTimeSignature::new(7, 8).into())
+        .unwrap();
+    app.rebuild();
+    assert!(app.ui.find("step/0/13").is_some());
+    assert!(app.ui.find("step/0/14").is_none());
+}

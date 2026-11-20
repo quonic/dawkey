@@ -20,7 +20,7 @@ use crate::model::{
 };
 use crate::model::{InputChannels, Region, TimeRange};
 use crate::session::Outcome;
-use crate::tempo::{MeterChange, TempoChange, TempoMap};
+use crate::tempo::{MeterChange, MeterMap, TempoChange, TempoMap};
 
 const MAX_NAME_LEN: usize = 256;
 /// Latest timeline position accepted, in seconds (24 hours).
@@ -846,7 +846,12 @@ impl SetTimeSignature {
                 changes.sort_by_key(|c| c.bar);
             }
         }
-        Ok((vec![Edit::SetMeter { start, changes }], Outcome::none()))
+        let mut edits = vec![Edit::SetMeter {
+            start,
+            changes: changes.clone(),
+        }];
+        edits.extend(update_drum_clips_for_meter(project, start, &changes));
+        Ok((edits, Outcome::none()))
     }
 }
 
@@ -869,11 +874,16 @@ impl RemoveTimeSignatureChange {
                 self.at_bar
             )));
         }
-        let edit = Edit::SetMeter {
+        let mut edits = vec![Edit::SetMeter {
             start: project.time_signature,
-            changes,
-        };
-        Ok((vec![edit], Outcome::none()))
+            changes: changes.clone(),
+        }];
+        edits.extend(update_drum_clips_for_meter(
+            project,
+            project.time_signature,
+            &changes,
+        ));
+        Ok((edits, Outcome::none()))
     }
 }
 
@@ -891,7 +901,7 @@ pub struct SetTimeSignatureMap {
 }
 
 impl SetTimeSignatureMap {
-    fn lower(self, _project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
         let start = validate_meter(self.numerator, self.denominator)?;
         if self.changes.len() > MAX_METER_CHANGES {
             return Err(CoreError::invalid(format!(
@@ -907,8 +917,88 @@ impl SetTimeSignatureMap {
             changes.push(change);
         }
         changes.sort_by_key(|c| c.bar);
-        Ok((vec![Edit::SetMeter { start, changes }], Outcome::none()))
+        let mut edits = vec![Edit::SetMeter {
+            start,
+            changes: changes.clone(),
+        }];
+        edits.extend(update_drum_clips_for_meter(project, start, &changes));
+        Ok((edits, Outcome::none()))
     }
+}
+
+/// Adjusts clips on drum tracks (`builtin:drums`) when the time
+/// signature map changes, so each clip's length and notes match the
+/// new bar's step grid at its start.
+fn update_drum_clips_for_meter(
+    project: &Project,
+    new_start: TimeSignature,
+    new_changes: &[MeterChange],
+) -> Vec<Edit> {
+    let tempo = project.tempo_map();
+    let old_meter = project.meter_map();
+    let new_meter = MeterMap::new(new_start, new_changes);
+    let mut edits = Vec::new();
+    for track in &project.tracks {
+        if !track
+            .plugins
+            .first()
+            .is_some_and(|p| p.plugin == DRUMS_PLUGIN_ID)
+        {
+            continue;
+        }
+        for clip in &track.clips {
+            let ClipContent::Midi { notes, .. } = &clip.content else {
+                continue;
+            };
+            let start_beat = tempo.beat_at(clip.start as f64);
+            let old_sig = old_meter.meter_at(start_beat + 1e-9);
+            let new_sig = new_meter.meter_at(start_beat + 1e-9);
+            if old_sig == new_sig {
+                continue;
+            }
+            let new_len = tempo
+                .clip_frames(clip.start, new_sig.beats_per_bar())
+                .max(1);
+            if clip.length != new_len {
+                edits.push(Edit::SetClip {
+                    id: clip.id,
+                    prop: ClipProp::Length(new_len),
+                });
+            }
+            let old_step_beats = old_sig.step_beats();
+            let new_step_beats = new_sig.step_beats();
+            let max_steps = new_sig.steps_per_bar();
+            let mut updated = Vec::with_capacity(notes.len());
+            for n in notes {
+                let beat = tempo.clip_beats(clip.start, n.start);
+                let step_f = (beat / old_step_beats).round();
+                if step_f < 0.0 || step_f >= f64::from(max_steps) {
+                    continue;
+                }
+                let (start, length) = if (old_step_beats - new_step_beats).abs() > 1e-12 {
+                    let s = tempo.clip_frames(clip.start, step_f * new_step_beats);
+                    let e = tempo.clip_frames(clip.start, (step_f + 1.0) * new_step_beats);
+                    (s, e.saturating_sub(s).max(1))
+                } else {
+                    (n.start, n.length)
+                };
+                if start < new_len {
+                    updated.push(Note {
+                        start,
+                        length,
+                        ..*n
+                    });
+                }
+            }
+            if updated != *notes {
+                edits.push(Edit::SetClip {
+                    id: clip.id,
+                    prop: ClipProp::Notes(updated),
+                });
+            }
+        }
+    }
+    edits
 }
 
 fn validate_meter(numerator: u8, denominator: u8) -> Result<TimeSignature, CoreError> {
@@ -3813,31 +3903,73 @@ fn curated_pattern_steps(pattern: DrumPattern) -> Vec<DrumStep> {
     }
 }
 
-/// Steps on a 16-step bar as note specs (one step is a 16th note: 0.25
-/// beats).
-fn steps_to_note_specs(steps: &[DrumStep]) -> Vec<NoteSpec> {
+/// Steps on a bar's step grid as note specs.
+fn steps_to_note_specs(steps: &[DrumStep], step_beats: f64) -> Vec<NoteSpec> {
     steps
         .iter()
         .map(|s| NoteSpec {
             pitch: s.pad,
-            start_beats: f64::from(s.step) * 0.25,
-            length_beats: 0.25,
+            start_beats: f64::from(s.step) * step_beats,
+            length_beats: step_beats,
             velocity: s.velocity,
         })
         .collect()
 }
 
-/// Replaces clip `id`'s notes with `steps`' (see set_notes), as one undo
-/// step.
+/// Replaces clip `id`'s notes with `steps`' fitted to one bar of the
+/// clip's meter, as one undo step. When `tile_from` is given, patterns
+/// repeat every `tile_from` steps to fill longer bars (and truncate to
+/// shorter ones).
 fn apply_drum_steps(
     project: &mut Project,
     id: ClipId,
     steps: &[DrumStep],
+    tile_from: Option<u16>,
 ) -> Result<(Vec<Edit>, Outcome), CoreError> {
     let (_, start, length) = midi_notes(project, id)?;
-    let specs = steps_to_note_specs(steps);
+    let map = project.tempo_map();
+    let sig = project
+        .meter_map()
+        .meter_at(map.beat_at(start as f64) + 1e-9);
+    let bar_steps = sig.steps_per_bar();
+    let step_beats = sig.step_beats();
+    let mut adapted = Vec::new();
+    match tile_from {
+        Some(period) if period > 0 => {
+            for offset in (0..bar_steps).step_by(usize::from(period)) {
+                for s in steps {
+                    let step = offset + u16::from(s.step);
+                    if step < bar_steps && step <= u16::from(u8::MAX) {
+                        adapted.push(DrumStep {
+                            step: step as u8,
+                            ..*s
+                        });
+                    }
+                }
+            }
+        }
+        _ => {
+            for s in steps {
+                if u16::from(s.step) < bar_steps {
+                    adapted.push(*s);
+                }
+            }
+        }
+    }
+    let specs = steps_to_note_specs(&adapted, step_beats);
     let notes = new_notes(project, &specs, start, 0)?;
-    let edits = set_notes(project, id, start, length, notes);
+    let one_bar = fit_to_bars(project, start, 0, 0);
+    let fitted = fit_to_bars(project, start, one_bar, notes_end(&notes));
+    let mut edits = vec![Edit::SetClip {
+        id,
+        prop: ClipProp::Notes(sorted(notes)),
+    }];
+    if fitted != length {
+        edits.push(Edit::SetClip {
+            id,
+            prop: ClipProp::Length(fitted),
+        });
+    }
     Ok((edits, Outcome::none()))
 }
 
@@ -3853,7 +3985,12 @@ pub struct ApplyDrumPattern {
 
 impl ApplyDrumPattern {
     fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
-        apply_drum_steps(project, self.clip, &curated_pattern_steps(self.pattern))
+        apply_drum_steps(
+            project,
+            self.clip,
+            &curated_pattern_steps(self.pattern),
+            Some(16),
+        )
     }
 }
 
@@ -3871,10 +4008,19 @@ pub struct SaveDrumPattern {
 impl SaveDrumPattern {
     fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
         let name = validate_name(&self.name)?;
-        let (notes, _, length) = midi_notes(project, self.clip)?;
+        let (notes, start, _) = midi_notes(project, self.clip)?;
         if notes.is_empty() {
             return Err(CoreError::invalid("the clip has no notes to save"));
         }
+        let map = project.tempo_map();
+        let sig = project
+            .meter_map()
+            .meter_at(map.beat_at(start as f64) + 1e-9);
+        let step_beats = sig.step_beats();
+        let max_step = sig
+            .steps_per_bar()
+            .saturating_sub(1)
+            .min(u16::from(u8::MAX));
         let steps = notes
             .iter()
             .map(|n| {
@@ -3884,12 +4030,9 @@ impl SaveDrumPattern {
                         n.pitch
                     )));
                 }
-                let step = if length == 0 {
-                    0
-                } else {
-                    ((n.start as f64 / length as f64) * 16.0).round() as i64
-                }
-                .clamp(0, 15) as u8;
+                let step = (map.clip_beats(start, n.start) / step_beats)
+                    .round()
+                    .clamp(0.0, f64::from(max_step)) as u8;
                 Ok(DrumStep {
                     pad: n.pitch,
                     step,
@@ -3948,7 +4091,7 @@ impl LoadSavedDrumPattern {
             })?
             .steps
             .clone();
-        apply_drum_steps(project, self.clip, &steps)
+        apply_drum_steps(project, self.clip, &steps, None)
     }
 }
 

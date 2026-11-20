@@ -410,7 +410,7 @@ pub(crate) fn build(
         Page::Mixer => mixer::build(model, view, ui),
         Page::Rack => rack::build(model, view, ui, area.w),
         Page::PianoRoll => piano_roll::build(model, view, ui),
-        Page::StepSequencer => step_sequencer::build(model, view, ui),
+        Page::StepSequencer => step_sequencer::build(model, view, ui, area.w),
     };
     // The plugin picker and editor float over the page.
     let page =

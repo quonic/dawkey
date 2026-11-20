@@ -2905,6 +2905,61 @@ mod tests {
     }
 
     #[test]
+    fn changing_the_meter_resizes_drum_clips_and_patterns_to_match() {
+        use crate::command::{AddDrumTrack, ApplyDrumPattern, DrumPattern, SetTimeSignature};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let clip = outcome.clip.unwrap();
+        let per_beat = 24_000;
+        assert_eq!(s.project().clip(clip).unwrap().1.length, 4 * per_beat);
+
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FourOnTheFloor,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().clip(clip).unwrap().1.notes().len(), 10);
+
+        // Switching to 3/4 shrinks the drum clip to 3 beats and drops the
+        // 4th beat's notes; undoing restores both the length and notes.
+        s.execute(SetTimeSignature::new(3, 4).into()).unwrap();
+        let (_, shrunk) = s.project().clip(clip).unwrap();
+        assert_eq!(shrunk.length, 3 * per_beat);
+        assert!(shrunk.notes().iter().all(|n| n.start < 3 * per_beat));
+        assert_eq!(shrunk.notes().len(), 7);
+
+        s.undo().unwrap();
+        let (_, restored) = s.project().clip(clip).unwrap();
+        assert_eq!(restored.length, 4 * per_beat);
+        assert_eq!(restored.notes().len(), 10);
+
+        // Switching to 5/4 widens the drum clip to 5 beats, and applying a
+        // curated pattern fills the 5th beat too (step 16 at 4.0 beats).
+        s.execute(SetTimeSignature::new(5, 4).into()).unwrap();
+        assert_eq!(s.project().clip(clip).unwrap().1.length, 5 * per_beat);
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FourOnTheFloor,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, five_four) = s.project().clip(clip).unwrap();
+        assert_eq!(five_four.length, 5 * per_beat);
+        assert!(
+            five_four
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 36 && n.start == 4 * per_beat)
+        );
+    }
+
+    #[test]
     fn time_signature_changes() {
         use crate::command::NoteSpec;
         use crate::command::{

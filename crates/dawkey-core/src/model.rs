@@ -885,6 +885,22 @@ impl TimeSignature {
         4.0 / f64::from(self.denominator)
     }
 
+    /// Quarter notes per drum-sequencer step: a 16th note (0.25), or a
+    /// 32nd note (0.125) when the denominator is 32.
+    pub fn step_beats(self) -> f64 {
+        0.25_f64.min(self.beat_unit())
+    }
+
+    /// Drum-sequencer steps in each beat (the denominator's note).
+    pub fn steps_per_beat(self) -> u16 {
+        (16 / u16::from(self.denominator)).max(1)
+    }
+
+    /// Drum-sequencer steps in one bar of this time signature.
+    pub fn steps_per_bar(self) -> u16 {
+        u16::from(self.numerator) * self.steps_per_beat()
+    }
+
     /// Whether this is a time signature Dawkey supports: 1 to 32 beats of
     /// a whole, half, quarter, ... or 32nd note.
     pub fn valid(self) -> bool {

@@ -11,7 +11,7 @@ use dawkey_ui::{Modifiers, Point};
 
 use crate::App;
 use crate::state::{Page, TextField};
-use crate::view::step_sequencer::{PAD_NOTES, STEP_BEATS};
+use crate::view::step_sequencer::PAD_NOTES;
 
 /// Default velocity for a step clicked on.
 const DEFAULT_VELOCITY: u8 = 100;
@@ -145,7 +145,7 @@ impl App {
             }
             ["step", pad, n] => {
                 let pad_index: usize = pad.parse().ok()?;
-                let step: u8 = n.parse().ok()?;
+                let step: u16 = n.parse().ok()?;
                 let pad_note = *PAD_NOTES.get(pad_index)?;
                 self.toggle_step(pad_note, step)
             }
@@ -153,7 +153,7 @@ impl App {
         })
     }
 
-    fn toggle_step(&mut self, pad_note: u8, step: u8) -> Result<(), String> {
+    fn toggle_step(&mut self, pad_note: u8, step: u16) -> Result<(), String> {
         let clip = self
             .view
             .editing_clip
@@ -163,7 +163,15 @@ impl App {
             .clip(clip)
             .ok_or_else(|| format!("clip {clip} does not exist"))?;
         let map = project.tempo_map();
-        let target = map.clip_frames(c.start, f64::from(step) * STEP_BEATS);
+        let sig = project
+            .meter_map()
+            .meter_at(map.beat_at(c.start as f64) + 1e-9);
+        let steps = sig.steps_per_bar();
+        if step >= steps {
+            return Err(format!("step {step} is past the bar's {steps} steps"));
+        }
+        let step_beats = sig.step_beats();
+        let target = map.clip_frames(c.start, f64::from(step) * step_beats);
         let existing = c
             .notes()
             .iter()
@@ -182,8 +190,8 @@ impl App {
                     clip,
                     notes: vec![NoteSpec {
                         pitch: pad_note,
-                        start_beats: f64::from(step) * STEP_BEATS,
-                        length_beats: STEP_BEATS,
+                        start_beats: f64::from(step) * step_beats,
+                        length_beats: step_beats,
                         velocity: DEFAULT_VELOCITY,
                     }],
                 }
