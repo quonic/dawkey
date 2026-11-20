@@ -494,6 +494,18 @@ impl Instance {
         }
     }
 
+    /// It asked to be reloaded since the last call (a VST3 plugin whose
+    /// latency or buses changed: `kLatencyChanged`, `kReloadComponent`,
+    /// `kIoChanged`). Reloading it loads a fresh instance from its saved
+    /// state, the way a crashed plugin's `reload_plugin` does.
+    pub fn wants_reload(&mut self) -> bool {
+        match &mut self.0 {
+            InstanceKind::Vst3(vst3) => vst3.take_wants_reload(),
+            InstanceKind::Bridged(bridged) => bridged.take_wants_reload(),
+            InstanceKind::Clap(_) | InstanceKind::Lv2(_) => false,
+        }
+    }
+
     /// Control-thread housekeeping the plugin asked for. Call it regularly.
     pub fn idle(&mut self) {
         match &mut self.0 {
