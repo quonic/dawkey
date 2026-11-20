@@ -4068,6 +4068,13 @@ fn the_pad_patch_button_cycles_master_then_a_bus_then_back() {
         Some(TrackId(bus))
     );
 
+    // Switching Drum Effect Presets keeps the pad patched to its bus.
+    click(&mut app, "step_seq/kit/metal").unwrap();
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().outputs[0].bus,
+        Some(TrackId(bus))
+    );
+
     click(&mut app, "step_seq/pad/0/output").unwrap();
     assert!(
         app.studio.plugin_details(plugin).unwrap().outputs[0]

@@ -2726,13 +2726,35 @@ mod tests {
         // the instrument itself a new ID: the sample kit a client picked
         // for it (set_drum_sample_kit) is keyed by that ID, outside this
         // Edit entirely, and would silently fall back to synthesis if the
-        // instrument's slot were recreated.
-        use crate::command::{AddDrumTrack, ApplyDrumKit, DrumKit};
+        // instrument's slot were recreated. Per-pad bus routing on that
+        // slot must also survive the kit change.
+        use crate::command::{AddDrumTrack, ApplyDrumKit, DrumKit, SetPluginOutput};
 
         let mut s = Session::default();
         let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
         let track = outcome.track.unwrap();
         let drums_id = s.project().track(track).unwrap().plugins[0].id;
+        let bus = s
+            .execute(
+                AddTrack {
+                    name: Some("Kick Bus".into()),
+                    kind: TrackKind::Bus,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        s.execute(
+            SetPluginOutput {
+                plugin: drums_id,
+                output: 0,
+                bus: Some(bus),
+            }
+            .into(),
+        )
+        .unwrap();
 
         s.execute(
             ApplyDrumKit {
@@ -2745,6 +2767,7 @@ mod tests {
         let after = s.project().track(track).unwrap();
         assert_eq!(after.plugins[0].id, drums_id);
         assert_eq!(after.plugins[0].plugin, "builtin:drums");
+        assert_eq!(after.plugins[0].outputs.get(&0), Some(&bus));
         // The processing chain itself is still fully replaced.
         assert_eq!(
             after

@@ -3652,28 +3652,33 @@ impl ApplyDrumKit {
                 "a track can hold at most {MAX_PLUGINS} plugins"
             )));
         }
-        // Keep the instrument's existing slot ID, so a sample kit chosen
-        // for it (plugin_states, outside this Edit) survives a kit
-        // change; only the processing chain after it gets fresh IDs.
+        // Keep the instrument's existing slot ID and per-pad bus routing,
+        // so a sample kit chosen for it (plugin_states, outside this Edit)
+        // and any pads patched to buses survive a kit change; only the
+        // processing chain after it gets fresh IDs.
         let existing_drums = track
             .plugins
             .first()
             .filter(|p| p.plugin == DRUMS_PLUGIN_ID)
-            .map(|p| p.id);
+            .map(|p| (p.id, p.outputs.clone()));
+        let existing_drums_id = existing_drums.as_ref().map(|(id, _)| *id);
         let removed: Vec<PluginId> = track
             .plugins
             .iter()
-            .filter(|p| Some(p.id) != existing_drums)
+            .filter(|p| Some(p.id) != existing_drums_id)
             .map(|p| p.id)
             .collect();
         let old_lanes = track.automation.clone();
 
         let mut plugins = Vec::with_capacity(chain.len());
         for (i, (plugin, params)) in chain.into_iter().enumerate() {
-            let id = if i == 0 {
-                existing_drums.unwrap_or_else(|| project.alloc_plugin_id())
+            let (id, outputs) = if i == 0 {
+                match existing_drums.clone() {
+                    Some((id, outputs)) => (id, outputs),
+                    None => (project.alloc_plugin_id(), Default::default()),
+                }
             } else {
-                project.alloc_plugin_id()
+                (project.alloc_plugin_id(), Default::default())
             };
             plugins.push(PluginSlot {
                 id,
@@ -3681,7 +3686,7 @@ impl ApplyDrumKit {
                 params,
                 bypass: false,
                 sidechain: None,
-                outputs: Default::default(),
+                outputs,
             });
         }
 
