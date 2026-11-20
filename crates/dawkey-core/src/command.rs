@@ -171,6 +171,7 @@ commands! {
     SetPluginBypass => "set_plugin_bypass", Setter;
     SetPluginSidechain => "set_plugin_sidechain", Setter;
     SetPluginOutput => "set_plugin_output", Setter;
+    LoadRackPreset => "load_rack_preset", Setter;
     SetAutomation => "set_automation", Setter;
     AddAutomationPoint => "add_automation_point", Setter;
     RemoveAutomationPoints => "remove_automation_points", Destructive;
@@ -2631,8 +2632,8 @@ impl SetSynth {
 #[serde(deny_unknown_fields)]
 pub struct AddPlugin {
     pub track: TrackId,
-    /// The plugin's ID from list_plugins, e.g. "clap:org.example.reverb",
-    /// "lv2:http://example.org/eq" or
+    /// The plugin's ID from list_plugins, e.g. "builtin:amp",
+    /// "clap:org.example.reverb", "lv2:http://example.org/eq" or
     /// "vst3:5A1C7E8F3B2D4C6E9F0A1B2C3D4E5F60".
     pub plugin: String,
     /// Position in the chain (0 = first). Defaults to the end.
@@ -2645,12 +2646,12 @@ impl AddPlugin {
         let track = project
             .track(self.track)
             .ok_or(CoreError::TrackNotFound(self.track))?;
-        if !["clap:", "lv2:", "vst3:"]
+        if !["builtin:", "clap:", "lv2:", "vst3:"]
             .iter()
             .any(|prefix| self.plugin.starts_with(prefix))
         {
             return Err(CoreError::invalid(format!(
-                "unknown plugin {:?}; plugin IDs start with clap:, lv2: or vst3: (see list_plugins)",
+                "unknown plugin {:?}; plugin IDs start with builtin:, clap:, lv2: or vst3: (see list_plugins)",
                 self.plugin
             )));
         }
@@ -2713,6 +2714,214 @@ impl RemovePlugin {
             });
         }
         Ok((edits, Outcome::none()))
+    }
+}
+
+/// Curated 19-inch studio guitar rack signal chains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RackPreset {
+    Clean,
+    Crunch,
+    Lead,
+    Ambient,
+}
+
+/// Mount a curated studio guitar effects rack preset onto a track (replaces
+/// existing rack/insert units unless `replace` is false), as one undo step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoadRackPreset {
+    pub track: TrackId,
+    pub preset: RackPreset,
+    /// Replace the track's current chain (default true), or append to it.
+    #[serde(default)]
+    pub replace: Option<bool>,
+}
+
+impl LoadRackPreset {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let track = project
+            .track(self.track)
+            .ok_or(CoreError::TrackNotFound(self.track))?;
+        let replace = self.replace.unwrap_or(true);
+        let chain = preset_chain(self.preset);
+        let existing = if replace { 0 } else { track.plugins.len() };
+        if existing + chain.len() > MAX_PLUGINS {
+            return Err(CoreError::invalid(format!(
+                "a track can hold at most {MAX_PLUGINS} plugins"
+            )));
+        }
+        let mut plugins = if replace {
+            Vec::with_capacity(chain.len())
+        } else {
+            track.plugins.clone()
+        };
+        let removed: Vec<PluginId> = if replace {
+            track.plugins.iter().map(|p| p.id).collect()
+        } else {
+            Vec::new()
+        };
+        let old_lanes = track.automation.clone();
+        for (plugin, params) in chain {
+            let id = project.alloc_plugin_id();
+            plugins.push(PluginSlot {
+                id,
+                plugin: plugin.to_owned(),
+                params: params.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
+                bypass: false,
+                sidechain: None,
+                outputs: Default::default(),
+            });
+        }
+        let mut edits = vec![Edit::SetTrack {
+            id: self.track,
+            prop: TrackProp::Plugins(plugins),
+        }];
+        if !removed.is_empty() {
+            let lanes: Vec<AutomationLane> = old_lanes
+                .iter()
+                .filter(|l| !removed.iter().any(|id| targets_plugin(&l.target, *id)))
+                .cloned()
+                .collect();
+            if lanes.len() != old_lanes.len() {
+                edits.push(Edit::SetTrack {
+                    id: self.track,
+                    prop: TrackProp::Automation(lanes),
+                });
+            }
+        }
+        Ok((edits, Outcome::track(self.track)))
+    }
+}
+
+fn preset_chain(preset: RackPreset) -> Vec<(&'static str, Vec<(&'static str, f64)>)> {
+    match preset {
+        RackPreset::Clean => vec![
+            ("builtin:gate", vec![("threshold", -52.0)]),
+            (
+                "builtin:comp",
+                vec![("threshold", -20.0), ("ratio", 3.5), ("makeup", 2.5)],
+            ),
+            (
+                "builtin:amp",
+                vec![
+                    ("channel", 0.0),
+                    ("gain", 3.5),
+                    ("treble", 6.5),
+                    ("presence", 5.5),
+                ],
+            ),
+            (
+                "builtin:cab",
+                vec![("cabinet", 1.0), ("mic", 2.0), ("room", 20.0)],
+            ),
+            (
+                "builtin:chorus",
+                vec![("rate", 0.7), ("depth", 40.0), ("mix", 30.0)],
+            ),
+            (
+                "builtin:reverb",
+                vec![("mode", 1.0), ("decay", 2.0), ("mix", 20.0)],
+            ),
+        ],
+        RackPreset::Crunch => vec![
+            ("builtin:gate", vec![("threshold", -46.0)]),
+            (
+                "builtin:drive",
+                vec![("drive", 4.0), ("tone", 5.8), ("tight", 1.0)],
+            ),
+            (
+                "builtin:amp",
+                vec![
+                    ("channel", 1.0),
+                    ("gain", 6.0),
+                    ("mid", 6.5),
+                    ("treble", 6.2),
+                ],
+            ),
+            (
+                "builtin:eq",
+                vec![("low_cut", 80.0), ("high_mid_gain", 2.0)],
+            ),
+            ("builtin:cab", vec![("cabinet", 2.0), ("mic", 0.0)]),
+            (
+                "builtin:reverb",
+                vec![("mode", 0.0), ("decay", 1.6), ("mix", 18.0)],
+            ),
+        ],
+        RackPreset::Lead => vec![
+            ("builtin:gate", vec![("threshold", -40.0)]),
+            (
+                "builtin:drive",
+                vec![
+                    ("drive", 6.5),
+                    ("tone", 6.2),
+                    ("level", 3.0),
+                    ("tight", 1.0),
+                ],
+            ),
+            (
+                "builtin:amp",
+                vec![
+                    ("channel", 2.0),
+                    ("gain", 7.8),
+                    ("mid", 6.5),
+                    ("treble", 7.0),
+                    ("presence", 6.5),
+                ],
+            ),
+            (
+                "builtin:eq",
+                vec![("low_cut", 95.0), ("mid_gain", 2.5), ("high_gain", 1.5)],
+            ),
+            ("builtin:cab", vec![("cabinet", 3.0), ("mic", 0.0)]),
+            (
+                "builtin:delay",
+                vec![
+                    ("sync", 3.0),
+                    ("feedback", 38.0),
+                    ("duck", 35.0),
+                    ("mix", 28.0),
+                ],
+            ),
+            (
+                "builtin:reverb",
+                vec![("mode", 2.0), ("decay", 2.8), ("mix", 22.0)],
+            ),
+        ],
+        RackPreset::Ambient => vec![
+            (
+                "builtin:comp",
+                vec![("threshold", -22.0), ("ratio", 5.0), ("mix", 85.0)],
+            ),
+            (
+                "builtin:amp",
+                vec![("channel", 0.0), ("gain", 3.0), ("treble", 6.0)],
+            ),
+            (
+                "builtin:cab",
+                vec![("cabinet", 0.0), ("mic", 1.0), ("room", 35.0)],
+            ),
+            (
+                "builtin:chorus",
+                vec![("depth", 65.0), ("width", 100.0), ("mix", 45.0)],
+            ),
+            (
+                "builtin:delay",
+                vec![
+                    ("time", 520.0),
+                    ("feedback", 55.0),
+                    ("ping_pong", 85.0),
+                    ("mod_depth", 30.0),
+                    ("mix", 40.0),
+                ],
+            ),
+            (
+                "builtin:reverb",
+                vec![("mode", 2.0), ("decay", 6.5), ("mix", 45.0)],
+            ),
+        ],
     }
 }
 

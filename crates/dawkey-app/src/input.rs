@@ -131,6 +131,10 @@ impl App {
                 self.view.page = Page::Mixer;
                 Ok(())
             }
+            ["view", "rack"] => {
+                self.view.page = Page::Rack;
+                Ok(())
+            }
             ["view", "piano_roll"] => match self.editable_clip() {
                 Some(clip) => self.open_piano_roll(clip),
                 None => Err("select a MIDI clip to edit".into()),
@@ -699,6 +703,10 @@ impl App {
         if self.on_overlay_scroll(id, delta) {
             return;
         }
+        if id == Some("rack/bay") || (id.is_none() && self.view.page == Page::Rack) {
+            self.scroll_rack(delta.y);
+            return;
+        }
         if matches!(
             id,
             Some("piano_roll/grid" | "piano_roll/keys" | "piano_roll/ruler")
@@ -840,8 +848,12 @@ impl App {
             ("tab", false, _) => {
                 self.view.page = match self.view.page {
                     Page::Arrange => Page::Mixer,
-                    Page::Mixer | Page::PianoRoll => Page::Arrange,
+                    Page::Mixer | Page::Rack | Page::PianoRoll => Page::Arrange,
                 };
+                Ok(())
+            }
+            ("f4", false, _) => {
+                self.view.page = Page::Rack;
                 Ok(())
             }
             ("+" | "=", ..) => {

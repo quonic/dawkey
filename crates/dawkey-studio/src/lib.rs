@@ -43,7 +43,7 @@ pub use crate::plugins::{PluginProblem, default_cache as default_plugin_cache};
 use crate::recorder::{Recorder, Take, Target};
 pub use dawkey_plugins::{
     BridgeProgram, Catalog as PluginCatalog, ParamChange, PluginInfo, Sandbox, SearchPath,
-    run_plugin_host,
+    builtin_plugin, builtin_plugins, cab_response_db, eq_response_db, run_plugin_host,
 };
 use serde::Serialize;
 

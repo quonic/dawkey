@@ -342,6 +342,9 @@ impl Plugins {
     /// The catalog entry for a slot's plugin. Waits for the catalog, except
     /// in the background mode, where it's `None` until the scan is done.
     pub(crate) fn info(&mut self, plugin: &str) -> Option<&PluginInfo> {
+        if let Some(info) = dawkey_plugins::builtin_plugin(plugin) {
+            return Some(info);
+        }
         if self.background {
             self.catalog_now()?.get(plugin)
         } else {

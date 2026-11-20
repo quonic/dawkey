@@ -843,6 +843,7 @@ dependencies = [
  "assert_no_alloc",
  "clack-extensions",
  "clack-host",
+ "dawkey-dsp",
  "dawkey-engine",
  "dawkey-test-plugins",
  "landlock",
