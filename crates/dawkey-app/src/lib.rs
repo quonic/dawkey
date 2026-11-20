@@ -21,6 +21,7 @@ mod prefs_input;
 mod recovery;
 mod roll_input;
 mod state;
+mod step_input;
 mod take_input;
 mod tempo_input;
 mod text_input;
@@ -400,7 +401,7 @@ impl App {
         if self.view.editing_clip.is_some() && view::edited(&model, &self.view).is_none() {
             self.view.editing_clip = None;
             self.view.selected_notes.clear();
-            if self.view.page == Page::PianoRoll {
+            if matches!(self.view.page, Page::PianoRoll | Page::StepSequencer) {
                 self.view.page = Page::Arrange;
             }
         }
@@ -745,6 +746,14 @@ impl App {
             .iter()
             .map(|p| p.name.clone())
             .collect();
+        let drum_patterns = self
+            .studio
+            .session()
+            .project()
+            .drum_patterns
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
         let catalog = self.studio.cached_catalog().filter(|_| wants_catalog);
         let picker = self.view.plugin_picker.map(|_| {
             catalog.map_or_else(Vec::new, |c| {
@@ -855,6 +864,19 @@ impl App {
                         .map_or_else(|| slot.plugin.clone(), |i| i.name.clone()),
                     bypass: slot.bypass,
                     error: status.plugin_problems.iter().any(|p| p.plugin == slot.id),
+                    sample_kit: (slot.plugin == dawkey_studio::DRUMS_ID)
+                        .then(|| project.plugin_states.get(&slot.id))
+                        .flatten()
+                        .and_then(|s| std::str::from_utf8(s.bytes()).ok())
+                        .and_then(dawkey_studio::SampleKit::from_id),
+                    pad_outputs: if slot.plugin == dawkey_studio::DRUMS_ID {
+                        let count = plugin_info(&slot.plugin).map_or(0, |i| i.outputs.len());
+                        (0..count as u32)
+                            .map(|output| slot.outputs.get(&output).copied())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                 })
                 .collect(),
             automation: t
@@ -951,6 +973,7 @@ impl App {
             rack_track,
             rack_units,
             rack_presets,
+            drum_patterns,
             scanning,
             automation_write: self.view.automation_write,
             song_end_s: project.frames_to_seconds(project.end()),

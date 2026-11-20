@@ -2660,6 +2660,522 @@ mod tests {
     }
 
     #[test]
+    fn add_drum_track_loads_a_kit_and_an_empty_clip_in_one_undo_step() {
+        use crate::command::{AddDrumTrack, DrumKit};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let id = outcome.track.unwrap();
+        let clip = outcome.clip.unwrap();
+        let track = s.project().track(id).unwrap();
+        assert_eq!(track.name, "Drums 1");
+        assert_eq!(track.kind, TrackKind::Midi);
+        assert_eq!(track.plugins[0].plugin, "builtin:drums");
+        // The 808 kit's chain is mounted: the instrument plus its processing.
+        assert!(track.plugins.len() > 1);
+        let (_, clip) = s.project().clip(clip).unwrap();
+        assert!(matches!(
+            &clip.content,
+            crate::model::ClipContent::Midi { notes, .. } if notes.is_empty()
+        ));
+
+        // One undo step undoes the whole thing: track, plugins and clip.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("add_drum_track"));
+        assert!(s.project().tracks.is_empty());
+
+        // A second track with an explicit kit.
+        let mut s = Session::default();
+        let id = s
+            .execute(
+                AddDrumTrack {
+                    name: None,
+                    kit: Some(DrumKit::Trap),
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        assert_eq!(
+            s.project().track(id).unwrap().plugins[0].params["kick_decay"],
+            260.0
+        );
+    }
+
+    #[test]
+    fn applying_a_drum_kit_requires_a_midi_track() {
+        use crate::command::{ApplyDrumKit, DrumKit};
+
+        let mut s = Session::default();
+        let audio = add(&mut s, "Not MIDI");
+        assert!(
+            s.execute(
+                ApplyDrumKit {
+                    track: audio,
+                    kit: DrumKit::Kit909,
+                }
+                .into(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn applying_a_drum_kit_keeps_the_instruments_plugin_id() {
+        // A kit change replaces the processing chain, but must not give
+        // the instrument itself a new ID: the sample kit a client picked
+        // for it (set_drum_sample_kit) is keyed by that ID, outside this
+        // Edit entirely, and would silently fall back to synthesis if the
+        // instrument's slot were recreated. Per-pad bus routing on that
+        // slot must also survive the kit change.
+        use crate::command::{AddDrumTrack, ApplyDrumKit, DrumKit, SetPluginOutput};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let track = outcome.track.unwrap();
+        let drums_id = s.project().track(track).unwrap().plugins[0].id;
+        let bus = s
+            .execute(
+                AddTrack {
+                    name: Some("Kick Bus".into()),
+                    kind: TrackKind::Bus,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        s.execute(
+            SetPluginOutput {
+                plugin: drums_id,
+                output: 0,
+                bus: Some(bus),
+            }
+            .into(),
+        )
+        .unwrap();
+
+        s.execute(
+            ApplyDrumKit {
+                track,
+                kit: DrumKit::Metal,
+            }
+            .into(),
+        )
+        .unwrap();
+        let after = s.project().track(track).unwrap();
+        assert_eq!(after.plugins[0].id, drums_id);
+        assert_eq!(after.plugins[0].plugin, "builtin:drums");
+        assert_eq!(after.plugins[0].outputs.get(&0), Some(&bus));
+        // The processing chain itself is still fully replaced.
+        assert_eq!(
+            after
+                .plugins
+                .iter()
+                .map(|p| p.plugin.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "builtin:drums",
+                "builtin:gate",
+                "builtin:comp",
+                "builtin:eq",
+                "builtin:drive"
+            ]
+        );
+    }
+
+    #[test]
+    fn applying_a_curated_drum_pattern_writes_sixteen_steps() {
+        use crate::command::{AddDrumTrack, ApplyDrumPattern, DrumPattern};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let clip = outcome.clip.unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FourOnTheFloor,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, clip_ref) = s.project().clip(clip).unwrap();
+        let notes = match &clip_ref.content {
+            crate::model::ClipContent::Midi { notes, .. } => notes,
+            _ => panic!("expected a MIDI clip"),
+        };
+        assert_eq!(notes.len(), 10);
+        // The kick lands on the quarter notes (steps 0, 4, 8, 12): frame 0,
+        // the first quarter, ...
+        assert_eq!(notes[0].pitch, 36);
+        assert_eq!(notes[0].start, 0);
+
+        // One undo step undoes the whole pattern.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("apply_drum_pattern"));
+        let (_, clip_ref) = s.project().clip(clip).unwrap();
+        assert!(matches!(
+            &clip_ref.content,
+            crate::model::ClipContent::Midi { notes, .. } if notes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn saving_and_loading_a_drum_pattern() {
+        use crate::command::{
+            AddDrumTrack, ApplyDrumPattern, DrumPattern, LoadSavedDrumPattern,
+            RemoveSavedDrumPattern, SaveDrumPattern,
+        };
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let clip = outcome.clip.unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::BoomBap,
+            }
+            .into(),
+        )
+        .unwrap();
+
+        s.execute(
+            SaveDrumPattern {
+                clip,
+                name: "My Beat".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().drum_patterns.len(), 1);
+        assert_eq!(s.project().drum_patterns[0].steps.len(), 12);
+
+        // Loading it onto another clip writes the same steps.
+        let other_outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let other_clip = other_outcome.clip.unwrap();
+        s.execute(
+            LoadSavedDrumPattern {
+                clip: other_clip,
+                name: "My Beat".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, other_ref) = s.project().clip(other_clip).unwrap();
+        let other_notes = match &other_ref.content {
+            crate::model::ClipContent::Midi { notes, .. } => notes.clone(),
+            _ => panic!("expected a MIDI clip"),
+        };
+        let (_, first_ref) = s.project().clip(clip).unwrap();
+        let first_notes = match &first_ref.content {
+            crate::model::ClipContent::Midi { notes, .. } => notes.clone(),
+            _ => panic!("expected a MIDI clip"),
+        };
+        assert_eq!(other_notes.len(), first_notes.len());
+
+        // An unknown name is refused, for both loading and removing.
+        assert!(
+            s.execute(
+                LoadSavedDrumPattern {
+                    clip: other_clip,
+                    name: "Nope".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+        assert!(
+            s.execute(
+                RemoveSavedDrumPattern {
+                    name: "Nope".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+
+        s.execute(
+            RemoveSavedDrumPattern {
+                name: "My Beat".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert!(s.project().drum_patterns.is_empty());
+    }
+
+    #[test]
+    fn changing_the_meter_resizes_drum_clips_and_patterns_to_match() {
+        use crate::command::{AddDrumTrack, ApplyDrumPattern, DrumPattern, SetTimeSignature};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let clip = outcome.clip.unwrap();
+        let per_beat = 24_000;
+        assert_eq!(s.project().clip(clip).unwrap().1.length, 4 * per_beat);
+
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FourOnTheFloor,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().clip(clip).unwrap().1.notes().len(), 10);
+
+        // Switching to 3/4 shrinks the drum clip to 3 beats and drops the
+        // 4th beat's notes; undoing restores both the length and notes.
+        s.execute(SetTimeSignature::new(3, 4).into()).unwrap();
+        let (_, shrunk) = s.project().clip(clip).unwrap();
+        assert_eq!(shrunk.length, 3 * per_beat);
+        assert!(shrunk.notes().iter().all(|n| n.start < 3 * per_beat));
+        assert_eq!(shrunk.notes().len(), 7);
+
+        s.undo().unwrap();
+        let (_, restored) = s.project().clip(clip).unwrap();
+        assert_eq!(restored.length, 4 * per_beat);
+        assert_eq!(restored.notes().len(), 10);
+
+        // Switching to 5/4 widens the drum clip to 5 beats, and applying a
+        // curated pattern fills the 5th beat too (step 16 at 4.0 beats).
+        s.execute(SetTimeSignature::new(5, 4).into()).unwrap();
+        assert_eq!(s.project().clip(clip).unwrap().1.length, 5 * per_beat);
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FourOnTheFloor,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, five_four) = s.project().clip(clip).unwrap();
+        assert_eq!(five_four.length, 5 * per_beat);
+        assert!(
+            five_four
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 36 && n.start == 4 * per_beat)
+        );
+    }
+
+    #[test]
+    fn meter_specific_drum_patterns_switch_meter_and_undo_together() {
+        use crate::{AddDrumTrack, AddMidiClip, ApplyDrumPattern, DrumPattern, TimeSignature};
+        let mut s = Session::default();
+        let track = s
+            .execute(
+                AddDrumTrack {
+                    name: None,
+                    kit: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let clip = s
+            .execute(
+                AddMidiClip {
+                    track: Some(track),
+                    track_name: None,
+                    position_s: 0.0,
+                    length_s: None,
+                    notes: vec![],
+                    controls: vec![],
+                    muted: false,
+                    take: false,
+                }
+                .into(),
+            )
+            .unwrap()
+            .clip
+            .unwrap();
+        let per_beat = s.project().tempo_map().clip_frames(0, 1.0);
+        let step = per_beat / 4;
+
+        // 3/4 Waltz switches the meter from 4/4 and reverts in one undo.
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::Waltz,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 3,
+                denominator: 4,
+            }
+        );
+        let (_, waltz) = s.project().clip(clip).unwrap();
+        assert_eq!(waltz.length, 3 * per_beat);
+        assert!(waltz.notes().iter().any(|n| n.pitch == 36 && n.start == 0));
+        assert!(waltz.notes().iter().all(|n| n.start < 12 * step));
+
+        s.undo().unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 4,
+                denominator: 4,
+            }
+        );
+        let (_, reverted) = s.project().clip(clip).unwrap();
+        assert_eq!(reverted.length, 4 * per_beat);
+        assert!(reverted.notes().is_empty());
+
+        // 5/4, 7/8, and 12/8 patterns switch meter and populate their full bars.
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::TakeFive,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 5,
+                denominator: 4,
+            }
+        );
+        let (_, take_five) = s.project().clip(clip).unwrap();
+        assert_eq!(take_five.length, 5 * per_beat);
+        assert!(
+            take_five
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 51 && n.start == 19 * step)
+        );
+
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::ProgSevenEight,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 7,
+                denominator: 8,
+            }
+        );
+        let (_, seven_eight) = s.project().clip(clip).unwrap();
+        assert_eq!(seven_eight.length, 14 * step);
+        assert!(
+            seven_eight
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 45 && n.start == 13 * step)
+        );
+
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::TwelveEightShuffle,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 12,
+                denominator: 8,
+            }
+        );
+        let (_, twelve_eight) = s.project().clip(clip).unwrap();
+        assert_eq!(twelve_eight.length, 6 * per_beat);
+        assert!(
+            twelve_eight
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 38 && n.start == 23 * step)
+        );
+    }
+
+    #[test]
+    fn drum_fills_end_align_to_any_measure() {
+        use crate::{AddDrumTrack, AddMidiClip, ApplyDrumPattern, DrumPattern, SetTimeSignature};
+        let mut s = Session::default();
+        let track = s
+            .execute(
+                AddDrumTrack {
+                    name: None,
+                    kit: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let clip = s
+            .execute(
+                AddMidiClip {
+                    track: Some(track),
+                    track_name: None,
+                    position_s: 0.0,
+                    length_s: None,
+                    notes: vec![],
+                    controls: vec![],
+                    muted: false,
+                    take: false,
+                }
+                .into(),
+            )
+            .unwrap()
+            .clip
+            .unwrap();
+        let step = s.project().tempo_map().clip_frames(0, 0.25);
+
+        // 3/4 (12 steps): FillSnareRoll's climax crash lands on step 11.
+        s.execute(SetTimeSignature::new(3, 4).into()).unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FillSnareRoll,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, three_four) = s.project().clip(clip).unwrap();
+        assert!(
+            three_four
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 49 && n.start == 11 * step),
+            "crash should land on step 11 in 3/4"
+        );
+
+        // 5/4 (20 steps): FillSnareRoll's crash lands on step 19 and keeps a beat-1 hit.
+        s.execute(SetTimeSignature::new(5, 4).into()).unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FillSnareRoll,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, five_four) = s.project().clip(clip).unwrap();
+        assert!(five_four.notes().iter().any(|n| n.start == 0));
+        assert!(
+            five_four
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 49 && n.start == 19 * step),
+            "crash should land on step 19 in 5/4"
+        );
+    }
+
+    #[test]
     fn time_signature_changes() {
         use crate::command::NoteSpec;
         use crate::command::{

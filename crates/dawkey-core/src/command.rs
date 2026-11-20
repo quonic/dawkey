@@ -13,14 +13,14 @@ use crate::edit::{ClipProp, Edit, TrackProp};
 use crate::error::CoreError;
 use crate::model::{
     AutomationLane, AutomationPoint, AutomationTarget, CC_MAX, Clip, ClipContent, ClipId,
-    ControlPoint, Controller, DEVICE_LATENCY_MS_MAX, GAIN_DB_MAX, GAIN_DB_MIN, MASTER, MIDI_MAX,
-    MidiOutput, Note, NoteId, PluginId, PluginSlot, Project, SavedRackPreset, SavedRackUnit, Send,
-    SourceId, SynthParams, TEMPO_BPM_MAX, TEMPO_BPM_MIN, TimeSignature, Track, TrackId, TrackKind,
-    Waveform,
+    ControlPoint, Controller, DEVICE_LATENCY_MS_MAX, DrumStep, GAIN_DB_MAX, GAIN_DB_MIN, MASTER,
+    MIDI_MAX, MidiOutput, Note, NoteId, PluginId, PluginSlot, Project, SavedDrumPattern,
+    SavedRackPreset, SavedRackUnit, Send, SourceId, SynthParams, TEMPO_BPM_MAX, TEMPO_BPM_MIN,
+    TimeSignature, Track, TrackId, TrackKind, Waveform,
 };
 use crate::model::{InputChannels, Region, TimeRange};
 use crate::session::Outcome;
-use crate::tempo::{MeterChange, TempoChange, TempoMap};
+use crate::tempo::{MeterChange, MeterMap, TempoChange, TempoMap};
 
 const MAX_NAME_LEN: usize = 256;
 /// Latest timeline position accepted, in seconds (24 hours).
@@ -179,6 +179,12 @@ commands! {
     SaveRackPreset => "save_rack_preset", Setter;
     RemoveSavedRackPreset => "remove_saved_rack_preset", Destructive;
     LoadSavedRackPreset => "load_saved_rack_preset", Setter;
+    AddDrumTrack => "add_drum_track", Additive;
+    ApplyDrumKit => "apply_drum_kit", Setter;
+    ApplyDrumPattern => "apply_drum_pattern", Setter;
+    SaveDrumPattern => "save_drum_pattern", Setter;
+    RemoveSavedDrumPattern => "remove_saved_drum_pattern", Destructive;
+    LoadSavedDrumPattern => "load_saved_drum_pattern", Setter;
     SetAutomation => "set_automation", Setter;
     AddAutomationPoint => "add_automation_point", Setter;
     RemoveAutomationPoints => "remove_automation_points", Destructive;
@@ -840,7 +846,12 @@ impl SetTimeSignature {
                 changes.sort_by_key(|c| c.bar);
             }
         }
-        Ok((vec![Edit::SetMeter { start, changes }], Outcome::none()))
+        let mut edits = vec![Edit::SetMeter {
+            start,
+            changes: changes.clone(),
+        }];
+        edits.extend(update_drum_clips_for_meter(project, start, &changes));
+        Ok((edits, Outcome::none()))
     }
 }
 
@@ -863,11 +874,16 @@ impl RemoveTimeSignatureChange {
                 self.at_bar
             )));
         }
-        let edit = Edit::SetMeter {
+        let mut edits = vec![Edit::SetMeter {
             start: project.time_signature,
-            changes,
-        };
-        Ok((vec![edit], Outcome::none()))
+            changes: changes.clone(),
+        }];
+        edits.extend(update_drum_clips_for_meter(
+            project,
+            project.time_signature,
+            &changes,
+        ));
+        Ok((edits, Outcome::none()))
     }
 }
 
@@ -885,7 +901,7 @@ pub struct SetTimeSignatureMap {
 }
 
 impl SetTimeSignatureMap {
-    fn lower(self, _project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
         let start = validate_meter(self.numerator, self.denominator)?;
         if self.changes.len() > MAX_METER_CHANGES {
             return Err(CoreError::invalid(format!(
@@ -901,8 +917,88 @@ impl SetTimeSignatureMap {
             changes.push(change);
         }
         changes.sort_by_key(|c| c.bar);
-        Ok((vec![Edit::SetMeter { start, changes }], Outcome::none()))
+        let mut edits = vec![Edit::SetMeter {
+            start,
+            changes: changes.clone(),
+        }];
+        edits.extend(update_drum_clips_for_meter(project, start, &changes));
+        Ok((edits, Outcome::none()))
     }
+}
+
+/// Adjusts clips on drum tracks (`builtin:drums`) when the time
+/// signature map changes, so each clip's length and notes match the
+/// new bar's step grid at its start.
+fn update_drum_clips_for_meter(
+    project: &Project,
+    new_start: TimeSignature,
+    new_changes: &[MeterChange],
+) -> Vec<Edit> {
+    let tempo = project.tempo_map();
+    let old_meter = project.meter_map();
+    let new_meter = MeterMap::new(new_start, new_changes);
+    let mut edits = Vec::new();
+    for track in &project.tracks {
+        if !track
+            .plugins
+            .first()
+            .is_some_and(|p| p.plugin == DRUMS_PLUGIN_ID)
+        {
+            continue;
+        }
+        for clip in &track.clips {
+            let ClipContent::Midi { notes, .. } = &clip.content else {
+                continue;
+            };
+            let start_beat = tempo.beat_at(clip.start as f64);
+            let old_sig = old_meter.meter_at(start_beat + 1e-9);
+            let new_sig = new_meter.meter_at(start_beat + 1e-9);
+            if old_sig == new_sig {
+                continue;
+            }
+            let new_len = tempo
+                .clip_frames(clip.start, new_sig.beats_per_bar())
+                .max(1);
+            if clip.length != new_len {
+                edits.push(Edit::SetClip {
+                    id: clip.id,
+                    prop: ClipProp::Length(new_len),
+                });
+            }
+            let old_step_beats = old_sig.step_beats();
+            let new_step_beats = new_sig.step_beats();
+            let max_steps = new_sig.steps_per_bar();
+            let mut updated = Vec::with_capacity(notes.len());
+            for n in notes {
+                let beat = tempo.clip_beats(clip.start, n.start);
+                let step_f = (beat / old_step_beats).round();
+                if step_f < 0.0 || step_f >= f64::from(max_steps) {
+                    continue;
+                }
+                let (start, length) = if (old_step_beats - new_step_beats).abs() > 1e-12 {
+                    let s = tempo.clip_frames(clip.start, step_f * new_step_beats);
+                    let e = tempo.clip_frames(clip.start, (step_f + 1.0) * new_step_beats);
+                    (s, e.saturating_sub(s).max(1))
+                } else {
+                    (n.start, n.length)
+                };
+                if start < new_len {
+                    updated.push(Note {
+                        start,
+                        length,
+                        ..*n
+                    });
+                }
+            }
+            if updated != *notes {
+                edits.push(Edit::SetClip {
+                    id: clip.id,
+                    prop: ClipProp::Notes(updated),
+                });
+            }
+        }
+    }
+    edits
 }
 
 fn validate_meter(numerator: u8, denominator: u8) -> Result<TimeSignature, CoreError> {
@@ -3290,6 +3386,1303 @@ fn preset_chain(preset: RackPreset) -> Vec<(&'static str, Vec<(&'static str, f64
     }
 }
 
+/// `builtin:drums`' plugin ID (see `dawkey-plugins`' `builtin::DRUMS_ID`,
+/// which must stay in sync with this literal).
+const DRUMS_PLUGIN_ID: &str = "builtin:drums";
+
+/// General MIDI drum-map note numbers builtin:drums' eight pads answer to,
+/// and the parameter-ID slug each pad's tone/decay/level params use (see
+/// `dawkey-plugins`' `builtin::drum_plugin_info`, which must stay in sync):
+/// Kick, Snare, Closed Hat, Open Hat, Tom, Clap, Crash, Ride.
+const DRUM_PAD_NOTES: [u8; 8] = [36, 38, 42, 46, 45, 39, 49, 51];
+const DRUM_PAD_SLUGS: [&str; 8] = [
+    "kick",
+    "snare",
+    "closed_hat",
+    "open_hat",
+    "tom",
+    "clap",
+    "crash",
+    "ride",
+];
+
+fn drum_kit_params(pads: [(f64, f64, f64); 8]) -> BTreeMap<String, f64> {
+    let mut params = BTreeMap::new();
+    for (i, slug) in DRUM_PAD_SLUGS.iter().enumerate() {
+        let (tone, decay_ms, level_db) = pads[i];
+        params.insert(format!("{slug}_tone"), tone);
+        params.insert(format!("{slug}_decay"), decay_ms);
+        params.insert(format!("{slug}_level"), level_db);
+    }
+    params
+}
+
+/// Curated drum kits: a synthesized character per pad (tone, decay_ms,
+/// level_db), plus a short processing chain mounted after the instrument
+/// (a glue compressor, an EQ carve, and either a touch of room reverb or,
+/// for LoFi, a touch of saturation instead).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DrumKit {
+    Kit808,
+    Kit909,
+    /// A clean, natural-sounding synthesized character (not to be
+    /// confused with the `acoustic_vcsl` *sample* kit, a real recording).
+    Natural,
+    /// A darkened, saturated synthesized character (not to be confused
+    /// with the `lofi_virtuosity` *sample* kit, a real recording).
+    Tape,
+    Trap,
+    Metal,
+}
+
+#[allow(clippy::type_complexity)]
+fn drum_kit_spec(
+    kit: DrumKit,
+) -> (
+    [(f64, f64, f64); 8],
+    Vec<(&'static str, Vec<(&'static str, f64)>)>,
+) {
+    match kit {
+        DrumKit::Kit808 => (
+            [
+                (0.6, 420.0, 1.0),
+                (0.4, 150.0, 0.0),
+                (0.3, 55.0, -4.0),
+                (0.3, 300.0, -6.0),
+                (0.5, 260.0, -2.0),
+                (0.45, 120.0, -2.0),
+                (0.4, 1300.0, -7.0),
+                (0.4, 850.0, -8.0),
+            ],
+            vec![
+                (
+                    "builtin:comp",
+                    vec![("threshold", -18.0), ("ratio", 3.0), ("makeup", 2.0)],
+                ),
+                ("builtin:eq", vec![("low_cut", 40.0), ("low_gain", 2.0)]),
+                (
+                    "builtin:reverb",
+                    vec![("mode", 0.0), ("decay", 1.0), ("mix", 8.0)],
+                ),
+            ],
+        ),
+        DrumKit::Kit909 => (
+            [
+                (0.7, 300.0, 1.0),
+                (0.65, 170.0, 1.0),
+                (0.6, 60.0, -3.0),
+                (0.6, 280.0, -5.0),
+                (0.55, 230.0, -2.0),
+                (0.6, 110.0, -1.0),
+                (0.55, 1200.0, -6.0),
+                (0.5, 800.0, -7.0),
+            ],
+            vec![
+                (
+                    "builtin:comp",
+                    vec![("threshold", -16.0), ("ratio", 4.0), ("makeup", 2.5)],
+                ),
+                (
+                    "builtin:eq",
+                    vec![("low_cut", 50.0), ("high_mid_gain", 2.0)],
+                ),
+                (
+                    "builtin:reverb",
+                    vec![("mode", 1.0), ("decay", 1.4), ("mix", 12.0)],
+                ),
+            ],
+        ),
+        DrumKit::Natural => (
+            [
+                (0.4, 280.0, 0.0),
+                (0.3, 220.0, 0.0),
+                (0.45, 80.0, -3.0),
+                (0.45, 340.0, -5.0),
+                (0.6, 320.0, -1.0),
+                (0.5, 150.0, -2.0),
+                (0.45, 1600.0, -5.0),
+                (0.4, 1000.0, -6.0),
+            ],
+            vec![
+                (
+                    "builtin:comp",
+                    vec![("threshold", -20.0), ("ratio", 2.5), ("makeup", 1.5)],
+                ),
+                (
+                    "builtin:eq",
+                    vec![("low_mid_gain", 1.0), ("high_gain", 1.0)],
+                ),
+                (
+                    "builtin:reverb",
+                    vec![("mode", 2.0), ("decay", 2.8), ("mix", 30.0)],
+                ),
+            ],
+        ),
+        DrumKit::Tape => (
+            [
+                (0.3, 300.0, -1.0),
+                (0.2, 160.0, -2.0),
+                (0.15, 65.0, -6.0),
+                (0.15, 260.0, -8.0),
+                (0.25, 240.0, -3.0),
+                (0.2, 110.0, -4.0),
+                (0.2, 1100.0, -9.0),
+                (0.2, 750.0, -9.0),
+            ],
+            vec![
+                (
+                    "builtin:comp",
+                    vec![("threshold", -18.0), ("ratio", 3.0), ("makeup", 1.5)],
+                ),
+                ("builtin:eq", vec![("low_cut", 30.0), ("high_gain", -4.0)]),
+                (
+                    "builtin:drive",
+                    vec![
+                        ("drive", 2.0),
+                        ("tone", 3.0),
+                        ("level", 0.0),
+                        ("tight", 0.0),
+                        ("mix", 25.0),
+                    ],
+                ),
+            ],
+        ),
+        DrumKit::Trap => (
+            [
+                (0.55, 260.0, 1.0),
+                (0.5, 150.0, 0.0),
+                (0.5, 140.0, -3.0),
+                (0.5, 380.0, -5.0),
+                (0.45, 220.0, -2.0),
+                (0.55, 130.0, -1.0),
+                (0.45, 1200.0, -6.0),
+                (0.4, 800.0, -7.0),
+            ],
+            vec![
+                (
+                    "builtin:comp",
+                    vec![("threshold", -14.0), ("ratio", 5.0), ("makeup", 3.0)],
+                ),
+                ("builtin:eq", vec![("low_cut", 35.0), ("low_gain", 2.0)]),
+                (
+                    "builtin:reverb",
+                    vec![("mode", 0.0), ("decay", 0.8), ("mix", 6.0)],
+                ),
+            ],
+        ),
+        DrumKit::Metal => (
+            [
+                (0.65, 200.0, 2.0),
+                (0.6, 140.0, 1.0),
+                (0.5, 50.0, -2.0),
+                (0.45, 220.0, -4.0),
+                (0.55, 200.0, -1.0),
+                (0.5, 100.0, -1.0),
+                (0.45, 1100.0, -5.0),
+                (0.4, 750.0, -6.0),
+            ],
+            vec![
+                (
+                    "builtin:gate",
+                    vec![
+                        ("threshold", -35.0),
+                        ("floor", -70.0),
+                        ("hysteresis", 3.0),
+                        ("attack", 0.5),
+                        ("hold", 20.0),
+                        ("release", 60.0),
+                    ],
+                ),
+                (
+                    "builtin:comp",
+                    vec![
+                        ("threshold", -22.0),
+                        ("ratio", 6.0),
+                        ("attack", 2.0),
+                        ("makeup", 3.0),
+                    ],
+                ),
+                (
+                    "builtin:eq",
+                    vec![
+                        ("low_cut", 50.0),
+                        ("low_gain", 3.0),
+                        ("mid_gain", -4.0),
+                        ("high_mid_gain", 3.0),
+                        ("high_gain", 2.0),
+                    ],
+                ),
+                (
+                    "builtin:drive",
+                    vec![
+                        ("drive", 4.0),
+                        ("tone", 6.0),
+                        ("level", 0.0),
+                        ("tight", 1.0),
+                        ("mix", 35.0),
+                    ],
+                ),
+            ],
+        ),
+    }
+}
+
+/// Builds `builtin:drums` plus `kit`'s processing chain as a `mount_chain`
+/// input (plugin ID, params).
+fn drum_kit_chain(kit: DrumKit) -> Vec<(String, BTreeMap<String, f64>)> {
+    let (pads, fx) = drum_kit_spec(kit);
+    let mut chain = vec![(DRUMS_PLUGIN_ID.to_owned(), drum_kit_params(pads))];
+    chain.extend(fx.into_iter().map(|(id, params)| {
+        (
+            id.to_owned(),
+            params.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
+        )
+    }));
+    chain
+}
+
+/// Add a MIDI track already set up as a drum machine: builtin:drums (the
+/// synthesized drum kit instrument) loaded with a kit preset's sound and
+/// processing chain, and one empty one-bar MIDI clip ready for step
+/// programming (see apply_drum_pattern, add_midi_notes). Returns the new
+/// track's ID and the clip's ID.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AddDrumTrack {
+    /// Track name. Defaults to "Drums N".
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Starting kit. Defaults to Kit808.
+    #[serde(default)]
+    pub kit: Option<DrumKit>,
+}
+
+impl AddDrumTrack {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let name = match self.name {
+            Some(name) => validate_name(&name)?,
+            None => (1..)
+                .map(|n| format!("Drums {n}"))
+                .find(|name| project.tracks.iter().all(|t| &t.name != name))
+                .expect("unbounded range always yields a free name"),
+        };
+        let id = project.alloc_track_id();
+        let track = Track::new(id, name, TrackKind::Midi);
+        let mut edits = vec![Edit::InsertTrack {
+            index: project.tracks.len(),
+            track,
+        }];
+        let mut plugins = Vec::new();
+        for (plugin, params) in drum_kit_chain(self.kit.unwrap_or(DrumKit::Kit808)) {
+            plugins.push(PluginSlot {
+                id: project.alloc_plugin_id(),
+                plugin,
+                params,
+                bypass: false,
+                sidechain: None,
+                outputs: Default::default(),
+            });
+        }
+        edits.push(Edit::SetTrack {
+            id,
+            prop: TrackProp::Plugins(plugins),
+        });
+        let length = fit_to_bars(project, 0, 0, 0);
+        let clip = Clip {
+            id: project.alloc_clip_id(),
+            start: 0,
+            length,
+            gain_db: 0.0,
+            muted: false,
+            lane: 0,
+            name: None,
+            content: ClipContent::Midi {
+                notes: Vec::new(),
+                controls: Vec::new(),
+            },
+        };
+        let clip_id = clip.id;
+        insert_clip(project, id, clip, false, &mut edits);
+        Ok((
+            edits,
+            Outcome {
+                track: Some(id),
+                clip: Some(clip_id),
+                ..Outcome::default()
+            },
+        ))
+    }
+}
+
+/// Mount a drum kit preset's sound and processing chain (see
+/// add_drum_track) onto a MIDI track, replacing its current plugin chain,
+/// as one undo step.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyDrumKit {
+    pub track: TrackId,
+    pub kit: DrumKit,
+}
+
+impl ApplyDrumKit {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let track = project
+            .track(self.track)
+            .ok_or(CoreError::TrackNotFound(self.track))?;
+        if track.kind != TrackKind::Midi {
+            return Err(CoreError::invalid(format!(
+                "track {} is not a MIDI track (add_drum_track makes one)",
+                self.track
+            )));
+        }
+        let chain = drum_kit_chain(self.kit);
+        if chain.len() > MAX_PLUGINS {
+            return Err(CoreError::invalid(format!(
+                "a track can hold at most {MAX_PLUGINS} plugins"
+            )));
+        }
+        // Keep the instrument's existing slot ID and per-pad bus routing,
+        // so a sample kit chosen for it (plugin_states, outside this Edit)
+        // and any pads patched to buses survive a kit change; only the
+        // processing chain after it gets fresh IDs.
+        let existing_drums = track
+            .plugins
+            .first()
+            .filter(|p| p.plugin == DRUMS_PLUGIN_ID)
+            .map(|p| (p.id, p.outputs.clone()));
+        let existing_drums_id = existing_drums.as_ref().map(|(id, _)| *id);
+        let removed: Vec<PluginId> = track
+            .plugins
+            .iter()
+            .filter(|p| Some(p.id) != existing_drums_id)
+            .map(|p| p.id)
+            .collect();
+        let old_lanes = track.automation.clone();
+
+        let mut plugins = Vec::with_capacity(chain.len());
+        for (i, (plugin, params)) in chain.into_iter().enumerate() {
+            let (id, outputs) = if i == 0 {
+                match existing_drums.clone() {
+                    Some((id, outputs)) => (id, outputs),
+                    None => (project.alloc_plugin_id(), Default::default()),
+                }
+            } else {
+                (project.alloc_plugin_id(), Default::default())
+            };
+            plugins.push(PluginSlot {
+                id,
+                plugin,
+                params,
+                bypass: false,
+                sidechain: None,
+                outputs,
+            });
+        }
+
+        let mut edits = vec![Edit::SetTrack {
+            id: self.track,
+            prop: TrackProp::Plugins(plugins),
+        }];
+        if !removed.is_empty() {
+            let lanes: Vec<AutomationLane> = old_lanes
+                .iter()
+                .filter(|l| !removed.iter().any(|id| targets_plugin(&l.target, *id)))
+                .cloned()
+                .collect();
+            if lanes.len() != old_lanes.len() {
+                edits.push(Edit::SetTrack {
+                    id: self.track,
+                    prop: TrackProp::Automation(lanes),
+                });
+            }
+        }
+        Ok((edits, Outcome::track(self.track)))
+    }
+}
+
+/// Curated drum step patterns (4/4 grooves, fills, and non-4/4 meter grooves).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DrumPattern {
+    FourOnTheFloor,
+    BoomBap,
+    Trap,
+    HouseShuffle,
+    DrumAndBass,
+    Rock,
+    Metal,
+    Funk,
+    JazzSwing,
+    BossaNova,
+    ReggaeOneDrop,
+    Disco,
+    Techno,
+    HalfTime,
+    Afrobeat,
+    Waltz,
+    SixEightBlues,
+    TakeFive,
+    ProgSevenEight,
+    NineEightCompound,
+    TwelveEightShuffle,
+    FillSnareRoll,
+    FillTomCascade,
+    FillTrapRoll,
+    FillBreakbeat,
+    FillDoubleKick,
+    FillJazzTurnaround,
+}
+
+/// Time signature required by a meter-specific curated pattern, if any.
+fn pattern_time_signature(pattern: DrumPattern) -> Option<TimeSignature> {
+    let (numerator, denominator) = match pattern {
+        DrumPattern::Waltz => (3, 4),
+        DrumPattern::SixEightBlues => (6, 8),
+        DrumPattern::TakeFive => (5, 4),
+        DrumPattern::ProgSevenEight => (7, 8),
+        DrumPattern::NineEightCompound => (9, 8),
+        DrumPattern::TwelveEightShuffle => (12, 8),
+        _ => return None,
+    };
+    Some(TimeSignature {
+        numerator,
+        denominator,
+    })
+}
+
+fn is_fill_pattern(pattern: DrumPattern) -> bool {
+    matches!(
+        pattern,
+        DrumPattern::FillSnareRoll
+            | DrumPattern::FillTomCascade
+            | DrumPattern::FillTrapRoll
+            | DrumPattern::FillBreakbeat
+            | DrumPattern::FillDoubleKick
+            | DrumPattern::FillJazzTurnaround
+    )
+}
+
+fn step(pad_index: usize, step: u8, velocity: u8) -> DrumStep {
+    DrumStep {
+        pad: DRUM_PAD_NOTES[pad_index],
+        step,
+        velocity,
+    }
+}
+
+/// Pad indices: 0 Kick, 1 Snare, 2 Closed Hat, 3 Open Hat, 4 Tom, 5 Clap, 6
+/// Crash, 7 Ride.
+fn curated_pattern_steps(pattern: DrumPattern) -> Vec<DrumStep> {
+    match pattern {
+        DrumPattern::FourOnTheFloor => vec![
+            step(0, 0, 115),
+            step(0, 4, 115),
+            step(0, 8, 115),
+            step(0, 12, 115),
+            step(5, 4, 100),
+            step(5, 12, 100),
+            step(2, 2, 80),
+            step(2, 6, 80),
+            step(2, 10, 80),
+            step(2, 14, 80),
+        ],
+        DrumPattern::BoomBap => vec![
+            step(0, 0, 115),
+            step(0, 10, 110),
+            step(1, 4, 110),
+            step(1, 12, 110),
+            step(2, 0, 70),
+            step(2, 2, 65),
+            step(2, 4, 70),
+            step(2, 6, 65),
+            step(2, 8, 70),
+            step(2, 10, 65),
+            step(2, 12, 70),
+            step(2, 14, 65),
+        ],
+        DrumPattern::Trap => vec![
+            step(0, 0, 118),
+            step(0, 7, 105),
+            step(0, 10, 110),
+            step(5, 4, 105),
+            step(5, 12, 105),
+            step(2, 0, 70),
+            step(2, 1, 60),
+            step(2, 2, 95),
+            step(2, 3, 60),
+            step(2, 4, 70),
+            step(2, 5, 60),
+            step(2, 6, 95),
+            step(2, 7, 60),
+            step(2, 8, 70),
+            step(2, 9, 60),
+            step(2, 10, 95),
+            step(2, 11, 60),
+            step(2, 12, 70),
+            step(2, 13, 60),
+            step(2, 14, 95),
+            step(2, 15, 60),
+        ],
+        DrumPattern::HouseShuffle => vec![
+            step(0, 0, 115),
+            step(0, 4, 115),
+            step(0, 8, 115),
+            step(0, 12, 115),
+            step(5, 4, 95),
+            step(5, 12, 95),
+            step(3, 2, 90),
+            step(3, 6, 90),
+            step(3, 10, 90),
+            step(3, 14, 90),
+        ],
+        DrumPattern::DrumAndBass => vec![
+            step(0, 0, 118),
+            step(0, 10, 112),
+            step(1, 4, 115),
+            step(1, 12, 115),
+            step(1, 7, 60),
+            step(2, 0, 70),
+            step(2, 2, 70),
+            step(2, 4, 70),
+            step(2, 6, 70),
+            step(2, 8, 70),
+            step(2, 10, 70),
+            step(2, 12, 70),
+            step(2, 14, 70),
+        ],
+        DrumPattern::Rock => vec![
+            step(6, 0, 110),
+            step(0, 0, 118),
+            step(0, 6, 100),
+            step(0, 8, 115),
+            step(1, 4, 115),
+            step(1, 12, 118),
+            step(1, 15, 65),
+            step(2, 2, 80),
+            step(2, 4, 85),
+            step(2, 6, 80),
+            step(2, 8, 85),
+            step(2, 10, 80),
+            step(2, 12, 85),
+            step(3, 14, 95),
+        ],
+        DrumPattern::Metal => vec![
+            step(6, 0, 118),
+            step(0, 0, 120),
+            step(0, 1, 105),
+            step(0, 2, 112),
+            step(0, 3, 105),
+            step(0, 6, 112),
+            step(0, 7, 105),
+            step(0, 8, 120),
+            step(0, 9, 105),
+            step(0, 10, 112),
+            step(0, 11, 105),
+            step(0, 14, 112),
+            step(0, 15, 108),
+            step(1, 4, 122),
+            step(1, 12, 122),
+            step(7, 0, 95),
+            step(7, 4, 95),
+            step(7, 8, 95),
+            step(7, 12, 95),
+        ],
+        DrumPattern::Funk => vec![
+            step(0, 0, 118),
+            step(0, 2, 95),
+            step(0, 10, 110),
+            step(0, 13, 92),
+            step(1, 4, 115),
+            step(1, 7, 52),
+            step(1, 9, 55),
+            step(1, 12, 118),
+            step(1, 15, 58),
+            step(2, 0, 85),
+            step(2, 2, 70),
+            step(2, 4, 85),
+            step(2, 6, 75),
+            step(2, 8, 85),
+            step(2, 10, 75),
+            step(2, 12, 85),
+            step(3, 14, 90),
+        ],
+        DrumPattern::JazzSwing => vec![
+            step(7, 0, 95),
+            step(7, 3, 72),
+            step(7, 4, 90),
+            step(7, 8, 95),
+            step(7, 11, 72),
+            step(7, 12, 90),
+            step(2, 4, 80),
+            step(2, 12, 80),
+            step(0, 0, 62),
+            step(0, 8, 58),
+            step(1, 7, 65),
+            step(1, 14, 72),
+        ],
+        DrumPattern::BossaNova => vec![
+            step(0, 0, 105),
+            step(0, 3, 82),
+            step(0, 4, 100),
+            step(0, 7, 82),
+            step(0, 8, 105),
+            step(0, 11, 82),
+            step(0, 12, 100),
+            step(0, 15, 82),
+            step(5, 0, 85),
+            step(5, 3, 85),
+            step(5, 6, 85),
+            step(5, 10, 85),
+            step(5, 12, 85),
+            step(2, 0, 68),
+            step(2, 2, 62),
+            step(2, 4, 68),
+            step(2, 6, 62),
+            step(2, 8, 68),
+            step(2, 10, 62),
+            step(2, 12, 68),
+            step(2, 14, 62),
+        ],
+        DrumPattern::ReggaeOneDrop => vec![
+            step(0, 8, 118),
+            step(1, 8, 108),
+            step(5, 8, 95),
+            step(2, 0, 75),
+            step(2, 2, 88),
+            step(2, 4, 75),
+            step(2, 6, 88),
+            step(2, 8, 75),
+            step(2, 10, 88),
+            step(2, 12, 75),
+            step(3, 14, 92),
+            step(4, 15, 78),
+        ],
+        DrumPattern::Disco => vec![
+            step(0, 0, 116),
+            step(0, 4, 116),
+            step(0, 8, 116),
+            step(0, 12, 116),
+            step(1, 4, 110),
+            step(1, 12, 110),
+            step(5, 4, 95),
+            step(5, 12, 95),
+            step(2, 0, 80),
+            step(2, 1, 65),
+            step(3, 2, 95),
+            step(2, 4, 80),
+            step(2, 5, 65),
+            step(3, 6, 95),
+            step(2, 8, 80),
+            step(2, 9, 65),
+            step(3, 10, 95),
+            step(2, 12, 80),
+            step(2, 13, 65),
+            step(3, 14, 95),
+        ],
+        DrumPattern::Techno => vec![
+            step(0, 0, 122),
+            step(0, 4, 122),
+            step(0, 8, 122),
+            step(0, 12, 122),
+            step(0, 15, 78),
+            step(5, 4, 105),
+            step(5, 12, 105),
+            step(2, 0, 65),
+            step(2, 1, 60),
+            step(3, 2, 95),
+            step(2, 3, 65),
+            step(2, 4, 65),
+            step(2, 5, 60),
+            step(3, 6, 95),
+            step(2, 7, 65),
+            step(2, 8, 65),
+            step(2, 9, 60),
+            step(3, 10, 95),
+            step(2, 11, 65),
+            step(2, 12, 65),
+            step(2, 13, 60),
+            step(3, 14, 95),
+            step(2, 15, 70),
+            step(7, 2, 75),
+            step(7, 6, 75),
+            step(7, 10, 75),
+            step(7, 14, 82),
+        ],
+        DrumPattern::HalfTime => vec![
+            step(6, 0, 100),
+            step(0, 0, 120),
+            step(0, 11, 105),
+            step(1, 8, 120),
+            step(5, 8, 105),
+            step(1, 15, 62),
+            step(2, 0, 80),
+            step(2, 2, 72),
+            step(2, 4, 85),
+            step(2, 6, 72),
+            step(2, 8, 80),
+            step(2, 10, 72),
+            step(2, 12, 85),
+            step(3, 14, 90),
+        ],
+        DrumPattern::Afrobeat => vec![
+            step(0, 0, 115),
+            step(0, 4, 110),
+            step(0, 8, 115),
+            step(0, 12, 110),
+            step(1, 3, 98),
+            step(1, 6, 105),
+            step(1, 11, 98),
+            step(1, 14, 108),
+            step(4, 7, 85),
+            step(4, 15, 90),
+            step(2, 0, 75),
+            step(2, 2, 70),
+            step(2, 4, 75),
+            step(2, 6, 70),
+            step(2, 8, 75),
+            step(3, 10, 88),
+            step(2, 12, 75),
+            step(2, 14, 70),
+        ],
+        DrumPattern::FillSnareRoll => vec![
+            step(0, 0, 118),
+            step(0, 4, 110),
+            step(0, 8, 112),
+            step(0, 12, 116),
+            step(2, 0, 80),
+            step(2, 2, 75),
+            step(1, 4, 55),
+            step(1, 5, 60),
+            step(1, 6, 68),
+            step(1, 7, 74),
+            step(1, 8, 82),
+            step(1, 9, 88),
+            step(1, 10, 95),
+            step(1, 11, 102),
+            step(1, 12, 110),
+            step(1, 13, 115),
+            step(1, 14, 122),
+            step(1, 15, 127),
+            step(5, 12, 100),
+            step(5, 14, 112),
+            step(6, 15, 120),
+        ],
+        DrumPattern::FillTomCascade => vec![
+            step(0, 0, 118),
+            step(6, 0, 105),
+            step(1, 2, 100),
+            step(1, 3, 108),
+            step(1, 4, 112),
+            step(1, 5, 95),
+            step(4, 6, 108),
+            step(4, 7, 100),
+            step(1, 8, 115),
+            step(4, 9, 105),
+            step(4, 10, 112),
+            step(4, 11, 118),
+            step(0, 12, 118),
+            step(4, 13, 115),
+            step(4, 14, 122),
+            step(1, 15, 124),
+            step(6, 15, 118),
+        ],
+        DrumPattern::FillTrapRoll => vec![
+            step(0, 0, 120),
+            step(0, 2, 105),
+            step(0, 3, 112),
+            step(5, 4, 110),
+            step(0, 7, 108),
+            step(0, 8, 118),
+            step(1, 9, 80),
+            step(1, 10, 92),
+            step(1, 11, 104),
+            step(5, 12, 115),
+            step(1, 12, 112),
+            step(1, 13, 118),
+            step(4, 14, 115),
+            step(1, 15, 124),
+            step(2, 0, 80),
+            step(2, 1, 75),
+            step(2, 4, 85),
+            step(2, 5, 75),
+            step(2, 6, 95),
+            step(3, 8, 100),
+            step(6, 14, 115),
+        ],
+        DrumPattern::FillBreakbeat => vec![
+            step(6, 0, 110),
+            step(0, 0, 118),
+            step(1, 2, 72),
+            step(1, 4, 116),
+            step(0, 5, 105),
+            step(4, 6, 98),
+            step(1, 7, 68),
+            step(4, 8, 108),
+            step(1, 9, 85),
+            step(0, 10, 115),
+            step(1, 11, 92),
+            step(6, 12, 112),
+            step(1, 12, 118),
+            step(1, 13, 88),
+            step(1, 14, 112),
+            step(1, 15, 122),
+        ],
+        DrumPattern::FillDoubleKick => vec![
+            step(6, 0, 118),
+            step(0, 0, 122),
+            step(0, 1, 115),
+            step(1, 2, 118),
+            step(1, 3, 110),
+            step(0, 4, 122),
+            step(0, 5, 115),
+            step(4, 6, 118),
+            step(4, 7, 112),
+            step(6, 8, 115),
+            step(0, 8, 122),
+            step(0, 9, 115),
+            step(1, 10, 120),
+            step(4, 11, 115),
+            step(0, 12, 124),
+            step(0, 13, 118),
+            step(4, 14, 122),
+            step(1, 15, 126),
+            step(6, 14, 120),
+        ],
+        DrumPattern::FillJazzTurnaround => vec![
+            step(7, 0, 95),
+            step(1, 0, 92),
+            step(0, 2, 85),
+            step(1, 3, 102),
+            step(4, 4, 98),
+            step(1, 6, 105),
+            step(0, 7, 88),
+            step(4, 8, 108),
+            step(0, 10, 95),
+            step(4, 11, 112),
+            step(1, 12, 115),
+            step(0, 13, 100),
+            step(0, 14, 120),
+            step(1, 14, 120),
+            step(6, 14, 115),
+            step(7, 15, 85),
+        ],
+        // 3/4 Waltz (12 16th steps): oom-pah-pah on Kick (beat 1) + Snare/Hat (beats 2, 3).
+        DrumPattern::Waltz => vec![
+            step(0, 0, 115),
+            step(7, 0, 95),
+            step(1, 4, 85),
+            step(2, 4, 75),
+            step(7, 4, 80),
+            step(7, 6, 70),
+            step(1, 8, 80),
+            step(2, 8, 75),
+            step(7, 8, 80),
+            step(7, 10, 70),
+            step(1, 11, 55),
+        ],
+        // 6/8 Blues (12 16th steps): 2 dotted-quarter beats with snare backbeat on step 6.
+        DrumPattern::SixEightBlues => vec![
+            step(0, 0, 118),
+            step(2, 0, 70),
+            step(7, 0, 95),
+            step(2, 2, 65),
+            step(7, 2, 75),
+            step(0, 4, 85),
+            step(2, 4, 70),
+            step(7, 4, 80),
+            step(1, 6, 115),
+            step(7, 6, 95),
+            step(2, 8, 65),
+            step(7, 8, 75),
+            step(0, 10, 90),
+            step(3, 10, 78),
+            step(7, 10, 80),
+            step(1, 11, 55),
+        ],
+        // 5/4 Take Five (20 16th steps): 3+2 jazz swing ride with kick/snare comping.
+        DrumPattern::TakeFive => vec![
+            step(0, 0, 108),
+            step(7, 0, 100),
+            step(1, 4, 95),
+            step(2, 4, 82),
+            step(7, 4, 90),
+            step(0, 6, 85),
+            step(7, 7, 80),
+            step(1, 8, 78),
+            step(7, 8, 95),
+            step(1, 11, 55),
+            step(0, 12, 100),
+            step(1, 12, 100),
+            step(2, 12, 82),
+            step(7, 12, 100),
+            step(7, 15, 80),
+            step(1, 16, 88),
+            step(7, 16, 92),
+            step(0, 18, 82),
+            step(7, 19, 75),
+        ],
+        // 7/8 Prog (14 16th steps): 2+2+3 odd-meter rock groove.
+        DrumPattern::ProgSevenEight => vec![
+            step(0, 0, 118),
+            step(2, 0, 85),
+            step(1, 2, 102),
+            step(2, 2, 75),
+            step(0, 4, 110),
+            step(2, 4, 85),
+            step(1, 6, 108),
+            step(2, 6, 75),
+            step(0, 8, 115),
+            step(2, 8, 88),
+            step(0, 10, 95),
+            step(2, 10, 78),
+            step(1, 11, 65),
+            step(1, 12, 115),
+            step(3, 12, 90),
+            step(4, 13, 92),
+        ],
+        // 9/8 Compound (18 16th steps): 3+3+3 dotted-quarter flow.
+        DrumPattern::NineEightCompound => vec![
+            step(0, 0, 115),
+            step(2, 0, 72),
+            step(7, 0, 95),
+            step(7, 2, 75),
+            step(0, 4, 85),
+            step(7, 4, 80),
+            step(0, 6, 105),
+            step(1, 6, 100),
+            step(2, 6, 75),
+            step(7, 6, 92),
+            step(7, 8, 75),
+            step(1, 10, 60),
+            step(7, 10, 80),
+            step(0, 12, 108),
+            step(1, 12, 108),
+            step(2, 12, 75),
+            step(7, 12, 92),
+            step(7, 14, 75),
+            step(0, 16, 88),
+            step(7, 16, 80),
+            step(1, 17, 65),
+        ],
+        // 12/8 Shuffle (24 16th steps): slow 4-beat compound soul/blues shuffle.
+        DrumPattern::TwelveEightShuffle => vec![
+            step(0, 0, 118),
+            step(2, 0, 72),
+            step(7, 0, 92),
+            step(7, 2, 72),
+            step(0, 4, 85),
+            step(2, 4, 68),
+            step(7, 4, 80),
+            step(1, 6, 116),
+            step(2, 6, 76),
+            step(7, 6, 90),
+            step(7, 8, 72),
+            step(0, 10, 92),
+            step(2, 10, 68),
+            step(7, 10, 80),
+            step(1, 11, 58),
+            step(0, 12, 110),
+            step(2, 12, 72),
+            step(7, 12, 92),
+            step(7, 14, 72),
+            step(2, 16, 68),
+            step(7, 16, 80),
+            step(1, 18, 118),
+            step(2, 18, 76),
+            step(7, 18, 90),
+            step(7, 20, 72),
+            step(0, 22, 85),
+            step(3, 22, 82),
+            step(7, 22, 80),
+            step(1, 23, 60),
+        ],
+    }
+}
+
+const CURATED_FILL_STEPS: u16 = 16;
+
+#[derive(Clone, Copy)]
+enum StepFit {
+    /// Place steps at their exact indices, dropping any past the bar.
+    Exact,
+    /// Repeat a `period`-step groove to fill longer bars (and truncate shorter ones).
+    Tile(u16),
+    /// Align a 16-step fill so its final steps land at the end of the bar.
+    EndAlignedFill,
+}
+
+fn push_step_if_in_range(out: &mut Vec<DrumStep>, step: u16, s: &DrumStep, limit: u16) {
+    if step < limit && step <= u16::from(u8::MAX) {
+        out.push(DrumStep {
+            step: step as u8,
+            ..*s
+        });
+    }
+}
+
+fn fit_drum_steps(steps: &[DrumStep], bar_steps: u16, fit: StepFit) -> Vec<DrumStep> {
+    let mut adapted = Vec::new();
+    match fit {
+        StepFit::Tile(period) if period > 0 => {
+            for offset in (0..bar_steps).step_by(usize::from(period)) {
+                for s in steps {
+                    push_step_if_in_range(&mut adapted, offset + u16::from(s.step), s, bar_steps);
+                }
+            }
+        }
+        StepFit::EndAlignedFill if bar_steps < CURATED_FILL_STEPS => {
+            let drop = CURATED_FILL_STEPS - bar_steps;
+            for s in steps {
+                let raw = u16::from(s.step);
+                if raw >= drop && raw < CURATED_FILL_STEPS {
+                    push_step_if_in_range(&mut adapted, raw - drop, s, bar_steps);
+                }
+            }
+        }
+        StepFit::EndAlignedFill => {
+            let extra = bar_steps - CURATED_FILL_STEPS;
+            if extra > 0 {
+                for offset in (0..extra).step_by(usize::from(CURATED_FILL_STEPS)) {
+                    for s in steps {
+                        push_step_if_in_range(&mut adapted, offset + u16::from(s.step), s, extra);
+                    }
+                }
+            }
+            for s in steps {
+                push_step_if_in_range(&mut adapted, u16::from(s.step) + extra, s, bar_steps);
+            }
+        }
+        _ => {
+            for s in steps {
+                push_step_if_in_range(&mut adapted, u16::from(s.step), s, bar_steps);
+            }
+        }
+    }
+    adapted
+}
+
+/// Steps on a bar's step grid as note specs.
+fn steps_to_note_specs(steps: &[DrumStep], step_beats: f64) -> Vec<NoteSpec> {
+    steps
+        .iter()
+        .map(|s| NoteSpec {
+            pitch: s.pad,
+            start_beats: f64::from(s.step) * step_beats,
+            length_beats: step_beats,
+            velocity: s.velocity,
+        })
+        .collect()
+}
+
+/// Replaces clip `id`'s notes with `steps`' fitted to one bar of the
+/// clip's meter (or `meter_override` when a pattern also switches meter), as
+/// one undo step.
+fn apply_drum_steps(
+    project: &mut Project,
+    id: ClipId,
+    steps: &[DrumStep],
+    meter_override: Option<&MeterMap>,
+    fit: StepFit,
+) -> Result<(Vec<Edit>, Outcome), CoreError> {
+    let (_, start, length) = midi_notes(project, id)?;
+    let map = project.tempo_map();
+    let project_meter = project.meter_map();
+    let meter = meter_override.unwrap_or(&project_meter);
+    let sig = meter.meter_at(map.beat_at(start as f64) + 1e-9);
+    let adapted = fit_drum_steps(steps, sig.steps_per_bar(), fit);
+    let specs = steps_to_note_specs(&adapted, sig.step_beats());
+    let notes = new_notes(project, &specs, start, 0)?;
+    let one_bar = fit_to_bars_with(&map, meter, start, 0, 0);
+    let fitted = fit_to_bars_with(&map, meter, start, one_bar, notes_end(&notes));
+    let mut edits = vec![Edit::SetClip {
+        id,
+        prop: ClipProp::Notes(sorted(notes)),
+    }];
+    if fitted != length {
+        edits.push(Edit::SetClip {
+            id,
+            prop: ClipProp::Length(fitted),
+        });
+    }
+    Ok((edits, Outcome::none()))
+}
+
+/// Replace a MIDI clip's notes with a curated drum pattern's (see
+/// add_drum_track, which gives a track the right instrument to play them),
+/// as one undo step. Meter-specific patterns (waltz, take_five, etc.) also
+/// set the clip's bar to that pattern's time signature.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyDrumPattern {
+    pub clip: ClipId,
+    pub pattern: DrumPattern,
+}
+
+impl ApplyDrumPattern {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let (_, start, _) = midi_notes(project, self.clip)?;
+        let tempo = project.tempo_map();
+        let current_meter = project.meter_map();
+        let start_beat = tempo.beat_at(start as f64) + 1e-9;
+        let current_sig = current_meter.meter_at(start_beat);
+
+        let mut edits = Vec::new();
+        let mut meter_override = None;
+        if let Some(target_sig) = pattern_time_signature(self.pattern)
+            && target_sig != current_sig
+        {
+            let bar = current_meter.bar_at(start_beat).saturating_add(1);
+            let (mut meter_start, mut changes) =
+                (project.time_signature, project.meter_changes.clone());
+            if bar <= 1 {
+                meter_start = target_sig;
+            } else {
+                changes.retain(|c| c.bar != bar);
+                if changes.len() >= MAX_METER_CHANGES {
+                    return Err(CoreError::invalid(format!(
+                        "a project can have at most {MAX_METER_CHANGES} time signature changes"
+                    )));
+                }
+                changes.push(MeterChange {
+                    bar,
+                    numerator: target_sig.numerator,
+                    denominator: target_sig.denominator,
+                });
+                changes.sort_by_key(|c| c.bar);
+            }
+            edits.push(Edit::SetMeter {
+                start: meter_start,
+                changes: changes.clone(),
+            });
+            edits.extend(
+                update_drum_clips_for_meter(project, meter_start, &changes)
+                    .into_iter()
+                    .filter(|e| !matches!(e, Edit::SetClip { id, .. } if *id == self.clip)),
+            );
+            meter_override = Some(MeterMap::new(meter_start, &changes));
+        }
+
+        let fit = if pattern_time_signature(self.pattern).is_some() {
+            StepFit::Exact
+        } else if is_fill_pattern(self.pattern) {
+            StepFit::EndAlignedFill
+        } else {
+            StepFit::Tile(16)
+        };
+        let (pattern_edits, outcome) = apply_drum_steps(
+            project,
+            self.clip,
+            &curated_pattern_steps(self.pattern),
+            meter_override.as_ref(),
+            fit,
+        )?;
+        edits.extend(pattern_edits);
+        Ok((edits, outcome))
+    }
+}
+
+/// Save a MIDI clip's notes as a named drum step pattern of your own (a
+/// 16-step bar), alongside the curated ones apply_drum_pattern mounts.
+/// Every note must be on one of builtin:drums' pad notes (see list_plugins).
+/// Saving under a name that's already used replaces it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveDrumPattern {
+    pub clip: ClipId,
+    pub name: String,
+}
+
+impl SaveDrumPattern {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let name = validate_name(&self.name)?;
+        let (notes, start, _) = midi_notes(project, self.clip)?;
+        if notes.is_empty() {
+            return Err(CoreError::invalid("the clip has no notes to save"));
+        }
+        let map = project.tempo_map();
+        let sig = project
+            .meter_map()
+            .meter_at(map.beat_at(start as f64) + 1e-9);
+        let step_beats = sig.step_beats();
+        let max_step = sig
+            .steps_per_bar()
+            .saturating_sub(1)
+            .min(u16::from(u8::MAX));
+        let steps = notes
+            .iter()
+            .map(|n| {
+                if !DRUM_PAD_NOTES.contains(&n.pitch) {
+                    return Err(CoreError::invalid(format!(
+                        "note at pitch {} is not one of builtin:drums' pad notes",
+                        n.pitch
+                    )));
+                }
+                let step = (map.clip_beats(start, n.start) / step_beats)
+                    .round()
+                    .clamp(0.0, f64::from(max_step)) as u8;
+                Ok(DrumStep {
+                    pad: n.pitch,
+                    step,
+                    velocity: n.velocity,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut patterns = project.drum_patterns.clone();
+        match patterns.iter_mut().find(|p| p.name == name) {
+            Some(existing) => existing.steps = steps,
+            None => patterns.push(SavedDrumPattern { name, steps }),
+        }
+        Ok((vec![Edit::SetDrumPatterns(patterns)], Outcome::none()))
+    }
+}
+
+/// Remove one of your saved drum patterns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveSavedDrumPattern {
+    pub name: String,
+}
+
+impl RemoveSavedDrumPattern {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let mut patterns = project.drum_patterns.clone();
+        let before = patterns.len();
+        patterns.retain(|p| p.name != self.name);
+        if patterns.len() == before {
+            return Err(CoreError::invalid(format!(
+                "no saved drum pattern named {:?}",
+                self.name
+            )));
+        }
+        Ok((vec![Edit::SetDrumPatterns(patterns)], Outcome::none()))
+    }
+}
+
+/// Replace a MIDI clip's notes with one of your own saved drum patterns
+/// (save_drum_pattern), as one undo step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoadSavedDrumPattern {
+    pub clip: ClipId,
+    pub name: String,
+}
+
+impl LoadSavedDrumPattern {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        let steps = project
+            .drum_patterns
+            .iter()
+            .find(|p| p.name == self.name)
+            .ok_or_else(|| {
+                CoreError::invalid(format!("no saved drum pattern named {:?}", self.name))
+            })?
+            .steps
+            .clone();
+        apply_drum_steps(project, self.clip, &steps, None, StepFit::Exact)
+    }
+}
+
 fn targets_plugin(target: &AutomationTarget, id: PluginId) -> bool {
     matches!(target, AutomationTarget::Param { plugin, .. } if *plugin == id)
 }
@@ -3790,11 +5183,19 @@ fn notes_end(notes: &[Note]) -> u64 {
 /// ends on one, with the bars of the meter map; otherwise bars are as long
 /// as the one the clip starts in.
 fn fit_to_bars(project: &Project, start: u64, length: u64, end: u64) -> u64 {
+    fit_to_bars_with(
+        &project.tempo_map(),
+        &project.meter_map(),
+        start,
+        length,
+        end,
+    )
+}
+
+fn fit_to_bars_with(map: &TempoMap, meter: &MeterMap, start: u64, length: u64, end: u64) -> u64 {
     if end <= length && length > 0 {
         return length;
     }
-    let map = project.tempo_map();
-    let meter = project.meter_map();
     let start_beat = map.beat_at(start as f64);
     let first = meter.bar_at(start_beat + 1e-9);
     let first_bar = meter.bar_start(first);

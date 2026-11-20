@@ -5,7 +5,8 @@
 use crate::error::CoreError;
 use crate::model::{
     AutomationLane, Clip, ClipContent, ClipId, ControlPoint, InputChannels, MidiOutput, Note,
-    PluginSlot, Project, Region, SavedRackPreset, Send, SynthParams, TimeSignature, Track, TrackId,
+    PluginSlot, Project, Region, SavedDrumPattern, SavedRackPreset, Send, SynthParams,
+    TimeSignature, Track, TrackId,
 };
 use crate::tempo::{MeterChange, TempoChange};
 
@@ -48,6 +49,7 @@ pub(crate) enum Edit {
     SetLoop(Region),
     SetPunch(Region),
     SetRackPresets(Vec<SavedRackPreset>),
+    SetDrumPatterns(Vec<SavedDrumPattern>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -223,6 +225,9 @@ impl Edit {
             Edit::SetPunch(v) => Edit::SetPunch(std::mem::replace(&mut project.punch, v)),
             Edit::SetRackPresets(v) => {
                 Edit::SetRackPresets(std::mem::replace(&mut project.rack_presets, v))
+            }
+            Edit::SetDrumPatterns(v) => {
+                Edit::SetDrumPatterns(std::mem::replace(&mut project.drum_patterns, v))
             }
         })
     }

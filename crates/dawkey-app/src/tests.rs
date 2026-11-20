@@ -3769,3 +3769,457 @@ fn more_rack_presets_and_saving_your_own() {
     assert!(app.studio.session().project().rack_presets.is_empty());
     assert!(app.access_tree().find("rack/saved/0").is_none());
 }
+
+#[test]
+fn the_add_drum_track_button_works() {
+    let mut app = app();
+    click(&mut app, "arrange/add_drum_track").unwrap();
+    let track = app.studio.session().project().tracks[0].id;
+    let project = app.studio.session().project();
+    let track = project.track(track).unwrap();
+    assert_eq!(track.plugins[0].plugin, "builtin:drums");
+    assert_eq!(
+        app.studio.undo().unwrap().as_deref(),
+        Some("add_drum_track")
+    );
+    assert!(app.studio.session().project().tracks.is_empty());
+}
+
+/// A MIDI track with builtin:drums as its first plugin, and an empty
+/// one-bar clip, as add_drum_track would make.
+fn add_drum_clip(app: &mut App) -> (u64, u64) {
+    let outcome = app
+        .studio
+        .execute(dawkey_core::AddDrumTrack::default().into())
+        .unwrap();
+    (outcome.track.unwrap().0, outcome.clip.unwrap().0)
+}
+
+#[test]
+fn drum_clips_open_the_step_sequencer_not_the_piano_roll() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.rebuild();
+    app.double_click(&format!("clip/{clip}"), Modifiers::default())
+        .unwrap();
+    assert_eq!(app.view_state().page, Page::StepSequencer);
+    assert_eq!(app.view_state().editing_clip, Some(ClipId(clip)));
+    click(&mut app, "step_seq/close").unwrap();
+    assert_eq!(app.view_state().page, Page::Arrange);
+
+    // A regular MIDI clip still opens the piano roll.
+    let (_, midi) = add_midi(&mut app, 4.0, &[(60, 0.0, 1.0)]);
+    app.rebuild();
+    app.double_click(&format!("clip/{midi}"), Modifiers::default())
+        .unwrap();
+    assert_eq!(app.view_state().page, Page::PianoRoll);
+}
+
+#[test]
+fn clicking_a_step_toggles_a_note_one_undo_step_at_a_time() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    assert!(notes_of(&app, clip).is_empty());
+
+    // Kick (pad 0) on step 4 (beat 1.0).
+    click(&mut app, "step/0/4").unwrap();
+    assert_eq!(notes_of(&app, clip), [(36, 1.0, 0.25)]);
+    assert_eq!(
+        app.studio.undo().unwrap().as_deref(),
+        Some("add_midi_notes")
+    );
+    assert!(notes_of(&app, clip).is_empty());
+    app.rebuild();
+
+    // Clicking it again removes it.
+    click(&mut app, "step/0/4").unwrap();
+    assert_eq!(notes_of(&app, clip).len(), 1);
+    click(&mut app, "step/0/4").unwrap();
+    assert!(notes_of(&app, clip).is_empty());
+}
+
+#[test]
+fn kit_and_pattern_buttons_in_the_step_sequencer() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+
+    click(&mut app, "step_seq/kit/909").unwrap();
+    let plugins = &app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins;
+    assert_eq!(plugins[0].plugin, "builtin:drums");
+    assert_eq!(plugins[0].params["kick_decay"], 300.0);
+
+    click(&mut app, "step_seq/pattern/four_on_the_floor").unwrap();
+    let notes = notes_of(&app, clip);
+    assert!(notes.contains(&(36, 0.0, 0.25)), "{notes:?}");
+    assert_eq!(notes.len(), 10);
+}
+
+#[test]
+fn the_metal_kit_mounts_a_gate_before_the_compressor() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+
+    click(&mut app, "step_seq/kit/metal").unwrap();
+    let plugins = &app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins;
+    assert_eq!(plugins[0].plugin, "builtin:drums");
+    assert_eq!(
+        plugins
+            .iter()
+            .map(|p| p.plugin.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "builtin:drums",
+            "builtin:gate",
+            "builtin:comp",
+            "builtin:eq",
+            "builtin:drive"
+        ]
+    );
+    assert_eq!(plugins[3].params["mid_gain"], -4.0);
+}
+
+#[test]
+fn the_sound_source_toggle_switches_a_pad_between_synth_and_samples() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins[0]
+        .id;
+    assert!(
+        app.studio
+            .plugin_details(plugin)
+            .unwrap()
+            .sample_kit
+            .is_none()
+    );
+
+    click(&mut app, "step_seq/sound/acoustic_vcsl").unwrap();
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().sample_kit,
+        Some(dawkey_studio::SampleKit::AcousticVcsl)
+    );
+
+    // Each of the other bundled kits is reachable too.
+    for (id, kit) in [
+        ("jazz_virtuosity", dawkey_studio::SampleKit::JazzVirtuosity),
+        ("lofi_virtuosity", dawkey_studio::SampleKit::LofiVirtuosity),
+        ("vintage_vcsl", dawkey_studio::SampleKit::VintageVcsl),
+        ("latin_vcsl", dawkey_studio::SampleKit::LatinVcsl),
+    ] {
+        click(&mut app, &format!("step_seq/sound/{id}")).unwrap();
+        assert_eq!(
+            app.studio.plugin_details(plugin).unwrap().sample_kit,
+            Some(kit)
+        );
+    }
+
+    click(&mut app, "step_seq/sound/synth").unwrap();
+    assert!(
+        app.studio
+            .plugin_details(plugin)
+            .unwrap()
+            .sample_kit
+            .is_none()
+    );
+}
+
+#[test]
+fn clicking_a_drum_effect_preset_keeps_the_chosen_kit() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins[0]
+        .id;
+
+    click(&mut app, "step_seq/sound/acoustic_vcsl").unwrap();
+    click(&mut app, "step_seq/kit/metal").unwrap();
+
+    // The instrument's slot ID didn't change, so its sample kit survived.
+    assert_eq!(
+        plugin,
+        app.studio
+            .session()
+            .project()
+            .clip(ClipId(clip))
+            .unwrap()
+            .0
+            .plugins[0]
+            .id
+    );
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().sample_kit,
+        Some(dawkey_studio::SampleKit::AcousticVcsl)
+    );
+}
+
+#[test]
+fn the_drum_kits_rack_unit_pages_its_params_instead_of_overflowing() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .clip(ClipId(clip))
+        .unwrap()
+        .0
+        .plugins[0]
+        .id;
+
+    click(&mut app, "view/rack").unwrap();
+    click(&mut app, &format!("rack/track/{track}")).unwrap();
+
+    // The first page shows the first 8 of its 24 params...
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/kick_tone"))
+            .is_some()
+    );
+    // ...not every pad's, which is what overflowed the rack's width.
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/open_hat_level"))
+            .is_none()
+    );
+
+    click(&mut app, &format!("plugin/{plugin}/page_next")).unwrap();
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/kick_tone"))
+            .is_none()
+    );
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/closed_hat_level"))
+            .is_some()
+    );
+}
+
+#[test]
+fn the_pad_patch_button_cycles_master_then_a_bus_then_back() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .clip(ClipId(clip))
+        .unwrap()
+        .0
+        .plugins[0]
+        .id;
+    let bus = app
+        .studio
+        .execute(
+            dawkey_core::AddTrack {
+                name: Some("Kick Bus".into()),
+                kind: dawkey_core::TrackKind::Bus,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+
+    assert!(
+        app.studio
+            .plugin_details(plugin)
+            .unwrap()
+            .outputs
+            .iter()
+            .all(|o| o.bus.is_none()),
+        "every pad defaults to Master"
+    );
+
+    click(&mut app, "step_seq/pad/0/output").unwrap();
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().outputs[0].bus,
+        Some(TrackId(bus))
+    );
+
+    // Switching Drum Effect Presets keeps the pad patched to its bus.
+    click(&mut app, "step_seq/kit/metal").unwrap();
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().outputs[0].bus,
+        Some(TrackId(bus))
+    );
+
+    click(&mut app, "step_seq/pad/0/output").unwrap();
+    assert!(
+        app.studio.plugin_details(plugin).unwrap().outputs[0]
+            .bus
+            .is_none(),
+        "cycling past the only bus returns to Master"
+    );
+}
+
+#[test]
+fn saving_and_loading_a_drum_pattern_in_the_step_sequencer() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    click(&mut app, "step_seq/pattern/boom_bap").unwrap();
+
+    assert!(app.access_tree().find("step_seq/saved/0").is_none());
+    click(&mut app, "step_seq/save_as").unwrap();
+    let field = app
+        .access_tree()
+        .find("step_seq/save_name")
+        .unwrap()
+        .clone();
+    assert_eq!(field.role, Role::TextField);
+    type_keys(&mut app, &["m", "y", "space", "b", "e", "a", "t", "return"]);
+    assert_eq!(app.studio.session().project().drum_patterns.len(), 1);
+    assert_eq!(
+        app.access_tree()
+            .find("step_seq/saved/0")
+            .and_then(|n| n.name.clone()),
+        Some("Load \"my beat\"".to_owned())
+    );
+
+    // Loading it onto another drum clip reproduces the same steps.
+    let (_, other) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(other)).unwrap();
+    click(&mut app, "step_seq/saved/0").unwrap();
+    assert_eq!(notes_of(&app, other), notes_of(&app, clip));
+
+    // Removing it clears the list.
+    click(&mut app, "step_seq/remove_saved/0").unwrap();
+    assert!(app.studio.session().project().drum_patterns.is_empty());
+    assert!(app.access_tree().find("step_seq/saved/0").is_none());
+}
+
+#[test]
+fn the_step_sequencer_pads_follow_time_signature_changes() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    app.rebuild();
+
+    // 4/4: 16 steps (0..=15).
+    assert!(app.ui.find("step/0/15").is_some());
+    assert!(app.ui.find("step/0/16").is_none());
+
+    // 3/4: 12 steps (0..=11).
+    app.studio
+        .execute(dawkey_core::SetTimeSignature::new(3, 4).into())
+        .unwrap();
+    app.rebuild();
+    assert!(app.ui.find("step/0/11").is_some());
+    assert!(app.ui.find("step/0/12").is_none());
+
+    // 5/4: 20 steps (0..=19), and step 16 lands at beat 4.0.
+    app.studio
+        .execute(dawkey_core::SetTimeSignature::new(5, 4).into())
+        .unwrap();
+    app.rebuild();
+    assert!(app.ui.find("step/0/19").is_some());
+    assert!(app.ui.find("step/0/20").is_none());
+    click(&mut app, "step/0/16").unwrap();
+    assert_eq!(notes_of(&app, clip), [(36, 4.0, 0.25)]);
+
+    // 7/8: 14 steps (0..=13).
+    app.studio
+        .execute(dawkey_core::SetTimeSignature::new(7, 8).into())
+        .unwrap();
+    app.rebuild();
+    assert!(app.ui.find("step/0/13").is_some());
+    assert!(app.ui.find("step/0/14").is_none());
+}
+
+#[test]
+fn genre_and_fill_pattern_buttons_in_the_step_sequencer() {
+    use crate::view::step_sequencer::{FILLS, PAD_NOTES, PATTERNS};
+
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    app.rebuild();
+
+    let sidebar = app.ui.find("step_seq/sidebar").unwrap().rect();
+    let save_as = app.ui.find("step_seq/save_as").unwrap().rect();
+    assert!(
+        save_as.y + save_as.h <= sidebar.y + sidebar.h,
+        "sidebar buttons should fit without clipping save_as: save_as={save_as:?}, sidebar={sidebar:?}"
+    );
+
+    for &(id, _, _) in PATTERNS {
+        click(&mut app, &format!("step_seq/pattern/{id}")).unwrap();
+        let notes = notes_of(&app, clip);
+        assert!(!notes.is_empty(), "pattern {id} should produce notes");
+        assert!(
+            notes.iter().all(|(pitch, _, _)| PAD_NOTES.contains(pitch)),
+            "pattern {id} emitted non-pad pitch: {notes:?}"
+        );
+    }
+
+    // Applying a 5/4 pattern resizes the step grid to 20 steps.
+    click(&mut app, "step_seq/pattern/take_five").unwrap();
+    assert!(app.ui.find("step/0/19").is_some());
+    assert!(app.ui.find("step/0/20").is_none());
+
+    // Header meter quick-buttons resize the grid and stay within the view.
+    let root = app.ui.find("step_seq").unwrap().rect();
+    let close = app.ui.find("step_seq/close").unwrap().rect();
+    assert!(close.x + close.w <= root.x + root.w);
+
+    click(&mut app, "step_seq/meter/3_4").unwrap();
+    assert!(app.ui.find("step/0/11").is_some());
+    assert!(app.ui.find("step/0/12").is_none());
+    click(&mut app, "step_seq/pattern/fill_snare_roll").unwrap();
+    assert!(
+        notes_of(&app, clip)
+            .iter()
+            .any(|&(pitch, start_beats, _)| pitch == 49 && (start_beats - 2.75).abs() < 1e-6),
+        "3/4 fill crash should end-align to step 11 (beat 2.75)"
+    );
+
+    click(&mut app, "step_seq/meter/4_4").unwrap();
+    assert!(app.ui.find("step/0/15").is_some());
+    assert!(app.ui.find("step/0/16").is_none());
+
+    for &(id, _, _) in FILLS {
+        click(&mut app, &format!("step_seq/pattern/{id}")).unwrap();
+        let notes = notes_of(&app, clip);
+        assert!(!notes.is_empty(), "fill {id} should produce notes");
+        assert!(
+            notes.iter().all(|(pitch, _, _)| PAD_NOTES.contains(pitch)),
+            "fill {id} emitted non-pad pitch: {notes:?}"
+        );
+        assert!(
+            notes.iter().any(|&(_, start_beats, _)| start_beats >= 3.0),
+            "fill {id} should land in the final beat (steps 12..=15): {notes:?}"
+        );
+    }
+}

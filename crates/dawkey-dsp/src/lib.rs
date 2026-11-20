@@ -6,9 +6,13 @@
 
 #![forbid(unsafe_code)]
 
+mod drums;
 mod rack;
 mod synth;
 
+pub use drums::{
+    DrumEngine, DrumEvent, DrumEventKind, PAD_NAMES, PAD_NOTES, Pad, PadOutput, SampleKitData,
+};
 pub use rack::{
     BuiltinChoice, BuiltinParam, BuiltinSpec, RackEffect, RackProcessor, builtin_specs,
     cab_response_db, eq_response_db,

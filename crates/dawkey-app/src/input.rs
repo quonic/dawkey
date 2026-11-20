@@ -3,9 +3,9 @@
 //! project goes through studio commands, so it's undoable like any MCP call.
 
 use dawkey_core::{
-    AddGuitarTrack, AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project, RemoveClip,
-    RemoveTrackSend, SetLoop, SetPunch, SetTrackArm, SetTrackGain, SetTrackInput, SetTrackMute,
-    SetTrackOutput, SetTrackPan, SetTrackSend, SetTrackSolo, TrackId, TrackKind,
+    AddDrumTrack, AddGuitarTrack, AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project,
+    RemoveClip, RemoveTrackSend, SetLoop, SetPunch, SetTrackArm, SetTrackGain, SetTrackInput,
+    SetTrackMute, SetTrackOutput, SetTrackPan, SetTrackSend, SetTrackSolo, TrackId, TrackKind,
 };
 use dawkey_ui::{ChromeAction, DragPhase, Modifiers, MouseButton, Point, Rect, UiAction};
 
@@ -100,6 +100,9 @@ impl App {
         if let Some(result) = self.on_roll_click(&parts, pos, count, modifiers) {
             return result;
         }
+        if let Some(result) = self.on_step_click(&parts, pos, count, modifiers) {
+            return result;
+        }
         if let Some(result) = self.on_tempo_click(&parts, pos, count) {
             return result;
         }
@@ -155,6 +158,7 @@ impl App {
             }
             ["arrange", "add_track"] => self.execute(AddTrack::default().into()),
             ["arrange", "add_guitar_track"] => self.execute(AddGuitarTrack::default().into()),
+            ["arrange", "add_drum_track"] => self.execute(AddDrumTrack::default().into()),
             ["arrange", "add_midi_track"] => self.execute(
                 AddTrack {
                     kind: TrackKind::Midi,
@@ -872,7 +876,9 @@ impl App {
             ("tab", false, _) => {
                 self.view.page = match self.view.page {
                     Page::Arrange => Page::Mixer,
-                    Page::Mixer | Page::Rack | Page::PianoRoll => Page::Arrange,
+                    Page::Mixer | Page::Rack | Page::PianoRoll | Page::StepSequencer => {
+                        Page::Arrange
+                    }
                 };
                 Ok(())
             }
