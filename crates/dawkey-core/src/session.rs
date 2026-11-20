@@ -2960,6 +2960,222 @@ mod tests {
     }
 
     #[test]
+    fn meter_specific_drum_patterns_switch_meter_and_undo_together() {
+        use crate::{AddDrumTrack, AddMidiClip, ApplyDrumPattern, DrumPattern, TimeSignature};
+        let mut s = Session::default();
+        let track = s
+            .execute(
+                AddDrumTrack {
+                    name: None,
+                    kit: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let clip = s
+            .execute(
+                AddMidiClip {
+                    track: Some(track),
+                    track_name: None,
+                    position_s: 0.0,
+                    length_s: None,
+                    notes: vec![],
+                    controls: vec![],
+                    muted: false,
+                    take: false,
+                }
+                .into(),
+            )
+            .unwrap()
+            .clip
+            .unwrap();
+        let per_beat = s.project().tempo_map().clip_frames(0, 1.0);
+        let step = per_beat / 4;
+
+        // 3/4 Waltz switches the meter from 4/4 and reverts in one undo.
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::Waltz,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 3,
+                denominator: 4,
+            }
+        );
+        let (_, waltz) = s.project().clip(clip).unwrap();
+        assert_eq!(waltz.length, 3 * per_beat);
+        assert!(waltz.notes().iter().any(|n| n.pitch == 36 && n.start == 0));
+        assert!(waltz.notes().iter().all(|n| n.start < 12 * step));
+
+        s.undo().unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 4,
+                denominator: 4,
+            }
+        );
+        let (_, reverted) = s.project().clip(clip).unwrap();
+        assert_eq!(reverted.length, 4 * per_beat);
+        assert!(reverted.notes().is_empty());
+
+        // 5/4, 7/8, and 12/8 patterns switch meter and populate their full bars.
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::TakeFive,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 5,
+                denominator: 4,
+            }
+        );
+        let (_, take_five) = s.project().clip(clip).unwrap();
+        assert_eq!(take_five.length, 5 * per_beat);
+        assert!(
+            take_five
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 51 && n.start == 19 * step)
+        );
+
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::ProgSevenEight,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 7,
+                denominator: 8,
+            }
+        );
+        let (_, seven_eight) = s.project().clip(clip).unwrap();
+        assert_eq!(seven_eight.length, 14 * step);
+        assert!(
+            seven_eight
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 45 && n.start == 13 * step)
+        );
+
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::TwelveEightShuffle,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 12,
+                denominator: 8,
+            }
+        );
+        let (_, twelve_eight) = s.project().clip(clip).unwrap();
+        assert_eq!(twelve_eight.length, 6 * per_beat);
+        assert!(
+            twelve_eight
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 38 && n.start == 23 * step)
+        );
+    }
+
+    #[test]
+    fn drum_fills_end_align_to_any_measure() {
+        use crate::{AddDrumTrack, AddMidiClip, ApplyDrumPattern, DrumPattern, SetTimeSignature};
+        let mut s = Session::default();
+        let track = s
+            .execute(
+                AddDrumTrack {
+                    name: None,
+                    kit: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let clip = s
+            .execute(
+                AddMidiClip {
+                    track: Some(track),
+                    track_name: None,
+                    position_s: 0.0,
+                    length_s: None,
+                    notes: vec![],
+                    controls: vec![],
+                    muted: false,
+                    take: false,
+                }
+                .into(),
+            )
+            .unwrap()
+            .clip
+            .unwrap();
+        let step = s.project().tempo_map().clip_frames(0, 0.25);
+
+        // 3/4 (12 steps): FillSnareRoll's climax crash lands on step 11.
+        s.execute(SetTimeSignature::new(3, 4).into()).unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FillSnareRoll,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, three_four) = s.project().clip(clip).unwrap();
+        assert!(
+            three_four
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 49 && n.start == 11 * step),
+            "crash should land on step 11 in 3/4"
+        );
+
+        // 5/4 (20 steps): FillSnareRoll's crash lands on step 19 and keeps a beat-1 hit.
+        s.execute(SetTimeSignature::new(5, 4).into()).unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FillSnareRoll,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, five_four) = s.project().clip(clip).unwrap();
+        assert!(five_four.notes().iter().any(|n| n.start == 0));
+        assert!(
+            five_four
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 49 && n.start == 19 * step),
+            "crash should land on step 19 in 5/4"
+        );
+    }
+
+    #[test]
     fn time_signature_changes() {
         use crate::command::NoteSpec;
         use crate::command::{

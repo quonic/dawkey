@@ -4184,6 +4184,31 @@ fn genre_and_fill_pattern_buttons_in_the_step_sequencer() {
         );
     }
 
+    // Applying a 5/4 pattern resizes the step grid to 20 steps.
+    click(&mut app, "step_seq/pattern/take_five").unwrap();
+    assert!(app.ui.find("step/0/19").is_some());
+    assert!(app.ui.find("step/0/20").is_none());
+
+    // Header meter quick-buttons resize the grid and stay within the view.
+    let root = app.ui.find("step_seq").unwrap().rect();
+    let close = app.ui.find("step_seq/close").unwrap().rect();
+    assert!(close.x + close.w <= root.x + root.w);
+
+    click(&mut app, "step_seq/meter/3_4").unwrap();
+    assert!(app.ui.find("step/0/11").is_some());
+    assert!(app.ui.find("step/0/12").is_none());
+    click(&mut app, "step_seq/pattern/fill_snare_roll").unwrap();
+    assert!(
+        notes_of(&app, clip)
+            .iter()
+            .any(|&(pitch, start_beats, _)| pitch == 49 && (start_beats - 2.75).abs() < 1e-6),
+        "3/4 fill crash should end-align to step 11 (beat 2.75)"
+    );
+
+    click(&mut app, "step_seq/meter/4_4").unwrap();
+    assert!(app.ui.find("step/0/15").is_some());
+    assert!(app.ui.find("step/0/16").is_none());
+
     for &(id, _, _) in FILLS {
         click(&mut app, &format!("step_seq/pattern/{id}")).unwrap();
         let notes = notes_of(&app, clip);

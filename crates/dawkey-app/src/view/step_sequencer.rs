@@ -19,6 +19,16 @@ pub(crate) const PAD_NAMES: [&str; 8] = [
     "Kick", "Snare", "C.Hat", "O.Hat", "Tom", "Clap", "Crash", "Ride",
 ];
 
+pub(crate) const METERS: &[(&str, u8, u8)] = &[
+    ("4_4", 4, 4),
+    ("3_4", 3, 4),
+    ("5_4", 5, 4),
+    ("6_8", 6, 8),
+    ("7_8", 7, 8),
+    ("9_8", 9, 8),
+    ("12_8", 12, 8),
+];
+
 pub(crate) const PATTERNS: &[(&str, &str, DrumPattern)] = &[
     (
         "four_on_the_floor",
@@ -39,6 +49,20 @@ pub(crate) const PATTERNS: &[(&str, &str, DrumPattern)] = &[
     ("techno", "Techno", DrumPattern::Techno),
     ("half_time", "Half-Time", DrumPattern::HalfTime),
     ("afrobeat", "Afrobeat", DrumPattern::Afrobeat),
+    ("waltz", "3/4 Waltz", DrumPattern::Waltz),
+    ("six_eight_blues", "6/8 Blues", DrumPattern::SixEightBlues),
+    ("take_five", "5/4 Take5", DrumPattern::TakeFive),
+    ("prog_seven_eight", "7/8 Prog", DrumPattern::ProgSevenEight),
+    (
+        "nine_eight_compound",
+        "9/8 Comp",
+        DrumPattern::NineEightCompound,
+    ),
+    (
+        "twelve_eight_shuffle",
+        "12/8 Shuf",
+        DrumPattern::TwelveEightShuffle,
+    ),
 ];
 
 pub(crate) const FILLS: &[(&str, &str, DrumPattern)] = &[
@@ -111,7 +135,7 @@ pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState, window_w:
         Node::column()
             .fill()
             .clip()
-            .child(header(track, clip, ui))
+            .child(header(track, clip, sig, ui))
             .child(grid(model, track, notes, sig, playhead_step, window_w, ui)),
     )
 }
@@ -123,7 +147,37 @@ fn bus_name(model: &ViewModel, bus: Option<dawkey_core::TrackId>) -> String {
         .map_or_else(|| "Master".to_owned(), |t| t.name.clone())
 }
 
-fn header(track: &TrackView, clip: &ClipView, ui: &UiState) -> Node {
+fn header(track: &TrackView, clip: &ClipView, sig: TimeSignature, ui: &UiState) -> Node {
+    let mut meters = Node::row().gap(4.0).child(
+        Node::label("Meter")
+            .height(Sizing::Fixed(22.0))
+            .padding(Insets::xy(4.0, 0.0))
+            .style(|s| {
+                s.font_size = 10.5;
+                s.color = pal().text_dim;
+            }),
+    );
+    for &(id, num, den) in METERS {
+        let active = sig.numerator == num && sig.denominator == den;
+        let btn = button(
+            &format!("step_seq/meter/{id}"),
+            &format!("Set bar time signature to {num}/{den}"),
+            ui,
+            None,
+        )
+        .text(format!("{num}/{den}"))
+        .padding(Insets::xy(6.0, 0.0))
+        .height(Sizing::Fixed(22.0))
+        .style(move |s| {
+            s.font_size = 11.0;
+            if active {
+                s.background = Some(pal().accent);
+                s.color = pal().on_text;
+            }
+        });
+        meters = meters.child(btn);
+    }
+
     Node::row()
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(32.0))
@@ -141,6 +195,7 @@ fn header(track: &TrackView, clip: &ClipView, ui: &UiState) -> Node {
                 }),
         )
         .child(Node::spacer())
+        .child(meters)
         .child(
             button("step_seq/close", "Back to arrange", ui, None)
                 .text("Close")
@@ -357,20 +412,15 @@ fn sidebar(
     let sound = Node::column()
         .width(Sizing::Fill(1.0))
         .gap(4.0)
-        .child(sound_btn("synth", "Synth", active_kit.is_none()))
         .child(
             Node::row()
                 .width(Sizing::Fill(1.0))
                 .gap(4.0)
+                .child(sound_btn("synth", "Synth", active_kit.is_none()))
                 .child(sound_btn(
                     "acoustic_vcsl",
                     "Acoustic",
                     is_kit(dawkey_studio::SampleKit::AcousticVcsl),
-                ))
-                .child(sound_btn(
-                    "jazz_virtuosity",
-                    "Jazz",
-                    is_kit(dawkey_studio::SampleKit::JazzVirtuosity),
                 )),
         )
         .child(
@@ -378,21 +428,31 @@ fn sidebar(
                 .width(Sizing::Fill(1.0))
                 .gap(4.0)
                 .child(sound_btn(
+                    "jazz_virtuosity",
+                    "Jazz",
+                    is_kit(dawkey_studio::SampleKit::JazzVirtuosity),
+                ))
+                .child(sound_btn(
                     "lofi_virtuosity",
                     "LoFi",
                     is_kit(dawkey_studio::SampleKit::LofiVirtuosity),
-                ))
+                )),
+        )
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
                 .child(sound_btn(
                     "vintage_vcsl",
                     "Vintage",
                     is_kit(dawkey_studio::SampleKit::VintageVcsl),
+                ))
+                .child(sound_btn(
+                    "latin_vcsl",
+                    "Latin",
+                    is_kit(dawkey_studio::SampleKit::LatinVcsl),
                 )),
-        )
-        .child(sound_btn(
-            "latin_vcsl",
-            "Latin Percussion",
-            is_kit(dawkey_studio::SampleKit::LatinVcsl),
-        ));
+        );
 
     let kits = Node::column()
         .width(Sizing::Fill(1.0))

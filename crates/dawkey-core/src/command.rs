@@ -3801,7 +3801,7 @@ impl ApplyDrumKit {
     }
 }
 
-/// Curated drum step patterns, 16 steps (one bar of 16th notes).
+/// Curated drum step patterns (4/4 grooves, fills, and non-4/4 meter grooves).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DrumPattern {
@@ -3820,12 +3820,47 @@ pub enum DrumPattern {
     Techno,
     HalfTime,
     Afrobeat,
+    Waltz,
+    SixEightBlues,
+    TakeFive,
+    ProgSevenEight,
+    NineEightCompound,
+    TwelveEightShuffle,
     FillSnareRoll,
     FillTomCascade,
     FillTrapRoll,
     FillBreakbeat,
     FillDoubleKick,
     FillJazzTurnaround,
+}
+
+/// Time signature required by a meter-specific curated pattern, if any.
+fn pattern_time_signature(pattern: DrumPattern) -> Option<TimeSignature> {
+    let (numerator, denominator) = match pattern {
+        DrumPattern::Waltz => (3, 4),
+        DrumPattern::SixEightBlues => (6, 8),
+        DrumPattern::TakeFive => (5, 4),
+        DrumPattern::ProgSevenEight => (7, 8),
+        DrumPattern::NineEightCompound => (9, 8),
+        DrumPattern::TwelveEightShuffle => (12, 8),
+        _ => return None,
+    };
+    Some(TimeSignature {
+        numerator,
+        denominator,
+    })
+}
+
+fn is_fill_pattern(pattern: DrumPattern) -> bool {
+    matches!(
+        pattern,
+        DrumPattern::FillSnareRoll
+            | DrumPattern::FillTomCascade
+            | DrumPattern::FillTrapRoll
+            | DrumPattern::FillBreakbeat
+            | DrumPattern::FillDoubleKick
+            | DrumPattern::FillJazzTurnaround
+    )
 }
 
 fn step(pad_index: usize, step: u8, velocity: u8) -> DrumStep {
@@ -4232,7 +4267,199 @@ fn curated_pattern_steps(pattern: DrumPattern) -> Vec<DrumStep> {
             step(6, 14, 115),
             step(7, 15, 85),
         ],
+        // 3/4 Waltz (12 16th steps): oom-pah-pah on Kick (beat 1) + Snare/Hat (beats 2, 3).
+        DrumPattern::Waltz => vec![
+            step(0, 0, 115),
+            step(7, 0, 95),
+            step(1, 4, 85),
+            step(2, 4, 75),
+            step(7, 4, 80),
+            step(7, 6, 70),
+            step(1, 8, 80),
+            step(2, 8, 75),
+            step(7, 8, 80),
+            step(7, 10, 70),
+            step(1, 11, 55),
+        ],
+        // 6/8 Blues (12 16th steps): 2 dotted-quarter beats with snare backbeat on step 6.
+        DrumPattern::SixEightBlues => vec![
+            step(0, 0, 118),
+            step(2, 0, 70),
+            step(7, 0, 95),
+            step(2, 2, 65),
+            step(7, 2, 75),
+            step(0, 4, 85),
+            step(2, 4, 70),
+            step(7, 4, 80),
+            step(1, 6, 115),
+            step(7, 6, 95),
+            step(2, 8, 65),
+            step(7, 8, 75),
+            step(0, 10, 90),
+            step(3, 10, 78),
+            step(7, 10, 80),
+            step(1, 11, 55),
+        ],
+        // 5/4 Take Five (20 16th steps): 3+2 jazz swing ride with kick/snare comping.
+        DrumPattern::TakeFive => vec![
+            step(0, 0, 108),
+            step(7, 0, 100),
+            step(1, 4, 95),
+            step(2, 4, 82),
+            step(7, 4, 90),
+            step(0, 6, 85),
+            step(7, 7, 80),
+            step(1, 8, 78),
+            step(7, 8, 95),
+            step(1, 11, 55),
+            step(0, 12, 100),
+            step(1, 12, 100),
+            step(2, 12, 82),
+            step(7, 12, 100),
+            step(7, 15, 80),
+            step(1, 16, 88),
+            step(7, 16, 92),
+            step(0, 18, 82),
+            step(7, 19, 75),
+        ],
+        // 7/8 Prog (14 16th steps): 2+2+3 odd-meter rock groove.
+        DrumPattern::ProgSevenEight => vec![
+            step(0, 0, 118),
+            step(2, 0, 85),
+            step(1, 2, 102),
+            step(2, 2, 75),
+            step(0, 4, 110),
+            step(2, 4, 85),
+            step(1, 6, 108),
+            step(2, 6, 75),
+            step(0, 8, 115),
+            step(2, 8, 88),
+            step(0, 10, 95),
+            step(2, 10, 78),
+            step(1, 11, 65),
+            step(1, 12, 115),
+            step(3, 12, 90),
+            step(4, 13, 92),
+        ],
+        // 9/8 Compound (18 16th steps): 3+3+3 dotted-quarter flow.
+        DrumPattern::NineEightCompound => vec![
+            step(0, 0, 115),
+            step(2, 0, 72),
+            step(7, 0, 95),
+            step(7, 2, 75),
+            step(0, 4, 85),
+            step(7, 4, 80),
+            step(0, 6, 105),
+            step(1, 6, 100),
+            step(2, 6, 75),
+            step(7, 6, 92),
+            step(7, 8, 75),
+            step(1, 10, 60),
+            step(7, 10, 80),
+            step(0, 12, 108),
+            step(1, 12, 108),
+            step(2, 12, 75),
+            step(7, 12, 92),
+            step(7, 14, 75),
+            step(0, 16, 88),
+            step(7, 16, 80),
+            step(1, 17, 65),
+        ],
+        // 12/8 Shuffle (24 16th steps): slow 4-beat compound soul/blues shuffle.
+        DrumPattern::TwelveEightShuffle => vec![
+            step(0, 0, 118),
+            step(2, 0, 72),
+            step(7, 0, 92),
+            step(7, 2, 72),
+            step(0, 4, 85),
+            step(2, 4, 68),
+            step(7, 4, 80),
+            step(1, 6, 116),
+            step(2, 6, 76),
+            step(7, 6, 90),
+            step(7, 8, 72),
+            step(0, 10, 92),
+            step(2, 10, 68),
+            step(7, 10, 80),
+            step(1, 11, 58),
+            step(0, 12, 110),
+            step(2, 12, 72),
+            step(7, 12, 92),
+            step(7, 14, 72),
+            step(2, 16, 68),
+            step(7, 16, 80),
+            step(1, 18, 118),
+            step(2, 18, 76),
+            step(7, 18, 90),
+            step(7, 20, 72),
+            step(0, 22, 85),
+            step(3, 22, 82),
+            step(7, 22, 80),
+            step(1, 23, 60),
+        ],
     }
+}
+
+const CURATED_FILL_STEPS: u16 = 16;
+
+#[derive(Clone, Copy)]
+enum StepFit {
+    /// Place steps at their exact indices, dropping any past the bar.
+    Exact,
+    /// Repeat a `period`-step groove to fill longer bars (and truncate shorter ones).
+    Tile(u16),
+    /// Align a 16-step fill so its final steps land at the end of the bar.
+    EndAlignedFill,
+}
+
+fn push_step_if_in_range(out: &mut Vec<DrumStep>, step: u16, s: &DrumStep, limit: u16) {
+    if step < limit && step <= u16::from(u8::MAX) {
+        out.push(DrumStep {
+            step: step as u8,
+            ..*s
+        });
+    }
+}
+
+fn fit_drum_steps(steps: &[DrumStep], bar_steps: u16, fit: StepFit) -> Vec<DrumStep> {
+    let mut adapted = Vec::new();
+    match fit {
+        StepFit::Tile(period) if period > 0 => {
+            for offset in (0..bar_steps).step_by(usize::from(period)) {
+                for s in steps {
+                    push_step_if_in_range(&mut adapted, offset + u16::from(s.step), s, bar_steps);
+                }
+            }
+        }
+        StepFit::EndAlignedFill if bar_steps < CURATED_FILL_STEPS => {
+            let drop = CURATED_FILL_STEPS - bar_steps;
+            for s in steps {
+                let raw = u16::from(s.step);
+                if raw >= drop && raw < CURATED_FILL_STEPS {
+                    push_step_if_in_range(&mut adapted, raw - drop, s, bar_steps);
+                }
+            }
+        }
+        StepFit::EndAlignedFill => {
+            let extra = bar_steps - CURATED_FILL_STEPS;
+            if extra > 0 {
+                for offset in (0..extra).step_by(usize::from(CURATED_FILL_STEPS)) {
+                    for s in steps {
+                        push_step_if_in_range(&mut adapted, offset + u16::from(s.step), s, extra);
+                    }
+                }
+            }
+            for s in steps {
+                push_step_if_in_range(&mut adapted, u16::from(s.step) + extra, s, bar_steps);
+            }
+        }
+        _ => {
+            for s in steps {
+                push_step_if_in_range(&mut adapted, u16::from(s.step), s, bar_steps);
+            }
+        }
+    }
+    adapted
 }
 
 /// Steps on a bar's step grid as note specs.
@@ -4249,49 +4476,25 @@ fn steps_to_note_specs(steps: &[DrumStep], step_beats: f64) -> Vec<NoteSpec> {
 }
 
 /// Replaces clip `id`'s notes with `steps`' fitted to one bar of the
-/// clip's meter, as one undo step. When `tile_from` is given, patterns
-/// repeat every `tile_from` steps to fill longer bars (and truncate to
-/// shorter ones).
+/// clip's meter (or `meter_override` when a pattern also switches meter), as
+/// one undo step.
 fn apply_drum_steps(
     project: &mut Project,
     id: ClipId,
     steps: &[DrumStep],
-    tile_from: Option<u16>,
+    meter_override: Option<&MeterMap>,
+    fit: StepFit,
 ) -> Result<(Vec<Edit>, Outcome), CoreError> {
     let (_, start, length) = midi_notes(project, id)?;
     let map = project.tempo_map();
-    let sig = project
-        .meter_map()
-        .meter_at(map.beat_at(start as f64) + 1e-9);
-    let bar_steps = sig.steps_per_bar();
-    let step_beats = sig.step_beats();
-    let mut adapted = Vec::new();
-    match tile_from {
-        Some(period) if period > 0 => {
-            for offset in (0..bar_steps).step_by(usize::from(period)) {
-                for s in steps {
-                    let step = offset + u16::from(s.step);
-                    if step < bar_steps && step <= u16::from(u8::MAX) {
-                        adapted.push(DrumStep {
-                            step: step as u8,
-                            ..*s
-                        });
-                    }
-                }
-            }
-        }
-        _ => {
-            for s in steps {
-                if u16::from(s.step) < bar_steps {
-                    adapted.push(*s);
-                }
-            }
-        }
-    }
-    let specs = steps_to_note_specs(&adapted, step_beats);
+    let project_meter = project.meter_map();
+    let meter = meter_override.unwrap_or(&project_meter);
+    let sig = meter.meter_at(map.beat_at(start as f64) + 1e-9);
+    let adapted = fit_drum_steps(steps, sig.steps_per_bar(), fit);
+    let specs = steps_to_note_specs(&adapted, sig.step_beats());
     let notes = new_notes(project, &specs, start, 0)?;
-    let one_bar = fit_to_bars(project, start, 0, 0);
-    let fitted = fit_to_bars(project, start, one_bar, notes_end(&notes));
+    let one_bar = fit_to_bars_with(&map, meter, start, 0, 0);
+    let fitted = fit_to_bars_with(&map, meter, start, one_bar, notes_end(&notes));
     let mut edits = vec![Edit::SetClip {
         id,
         prop: ClipProp::Notes(sorted(notes)),
@@ -4307,7 +4510,8 @@ fn apply_drum_steps(
 
 /// Replace a MIDI clip's notes with a curated drum pattern's (see
 /// add_drum_track, which gives a track the right instrument to play them),
-/// as one undo step.
+/// as one undo step. Meter-specific patterns (waltz, take_five, etc.) also
+/// set the clip's bar to that pattern's time signature.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyDrumPattern {
@@ -4317,12 +4521,64 @@ pub struct ApplyDrumPattern {
 
 impl ApplyDrumPattern {
     fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
-        apply_drum_steps(
+        let (_, start, _) = midi_notes(project, self.clip)?;
+        let tempo = project.tempo_map();
+        let current_meter = project.meter_map();
+        let start_beat = tempo.beat_at(start as f64) + 1e-9;
+        let current_sig = current_meter.meter_at(start_beat);
+
+        let mut edits = Vec::new();
+        let mut meter_override = None;
+        if let Some(target_sig) = pattern_time_signature(self.pattern)
+            && target_sig != current_sig
+        {
+            let bar = current_meter.bar_at(start_beat).saturating_add(1);
+            let (mut meter_start, mut changes) =
+                (project.time_signature, project.meter_changes.clone());
+            if bar <= 1 {
+                meter_start = target_sig;
+            } else {
+                changes.retain(|c| c.bar != bar);
+                if changes.len() >= MAX_METER_CHANGES {
+                    return Err(CoreError::invalid(format!(
+                        "a project can have at most {MAX_METER_CHANGES} time signature changes"
+                    )));
+                }
+                changes.push(MeterChange {
+                    bar,
+                    numerator: target_sig.numerator,
+                    denominator: target_sig.denominator,
+                });
+                changes.sort_by_key(|c| c.bar);
+            }
+            edits.push(Edit::SetMeter {
+                start: meter_start,
+                changes: changes.clone(),
+            });
+            edits.extend(
+                update_drum_clips_for_meter(project, meter_start, &changes)
+                    .into_iter()
+                    .filter(|e| !matches!(e, Edit::SetClip { id, .. } if *id == self.clip)),
+            );
+            meter_override = Some(MeterMap::new(meter_start, &changes));
+        }
+
+        let fit = if pattern_time_signature(self.pattern).is_some() {
+            StepFit::Exact
+        } else if is_fill_pattern(self.pattern) {
+            StepFit::EndAlignedFill
+        } else {
+            StepFit::Tile(16)
+        };
+        let (pattern_edits, outcome) = apply_drum_steps(
             project,
             self.clip,
             &curated_pattern_steps(self.pattern),
-            Some(16),
-        )
+            meter_override.as_ref(),
+            fit,
+        )?;
+        edits.extend(pattern_edits);
+        Ok((edits, outcome))
     }
 }
 
@@ -4423,7 +4679,7 @@ impl LoadSavedDrumPattern {
             })?
             .steps
             .clone();
-        apply_drum_steps(project, self.clip, &steps, None)
+        apply_drum_steps(project, self.clip, &steps, None, StepFit::Exact)
     }
 }
 
@@ -4927,11 +5183,19 @@ fn notes_end(notes: &[Note]) -> u64 {
 /// ends on one, with the bars of the meter map; otherwise bars are as long
 /// as the one the clip starts in.
 fn fit_to_bars(project: &Project, start: u64, length: u64, end: u64) -> u64 {
+    fit_to_bars_with(
+        &project.tempo_map(),
+        &project.meter_map(),
+        start,
+        length,
+        end,
+    )
+}
+
+fn fit_to_bars_with(map: &TempoMap, meter: &MeterMap, start: u64, length: u64, end: u64) -> u64 {
     if end <= length && length > 0 {
         return length;
     }
-    let map = project.tempo_map();
-    let meter = project.meter_map();
     let start_beat = map.beat_at(start as f64);
     let first = meter.bar_at(start_beat + 1e-9);
     let first_bar = meter.bar_start(first);

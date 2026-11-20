@@ -5,12 +5,13 @@
 
 use dawkey_core::{
     AddMidiNotes, ApplyDrumKit, ApplyDrumPattern, ClipId, DrumKit, NoteSpec, RemoveMidiNotes,
+    SetTimeSignature,
 };
 use dawkey_ui::{Modifiers, Point};
 
 use crate::App;
 use crate::state::{Page, TextField};
-use crate::view::step_sequencer::{PAD_NOTES, pattern_from_id};
+use crate::view::step_sequencer::{METERS, PAD_NOTES, pattern_from_id};
 
 /// Default velocity for a step clicked on.
 const DEFAULT_VELOCITY: u8 = 100;
@@ -95,6 +96,25 @@ impl App {
                 let pattern = pattern_from_id(name)?;
                 let clip = self.view.editing_clip?;
                 self.execute(ApplyDrumPattern { clip, pattern }.into())
+            }
+            ["step_seq", "meter", slug] => {
+                let &(_, numerator, denominator) = METERS.iter().find(|&&(id, ..)| id == *slug)?;
+                let clip = self.view.editing_clip?;
+                let project = self.studio.session().project();
+                let (_, clip_data) = project.clip(clip)?;
+                let bar = project
+                    .meter_map()
+                    .bar_at(project.tempo_map().beat_at(clip_data.start as f64) + 1e-9)
+                    .saturating_add(1);
+                let at_bar = (bar > 1).then_some(bar);
+                self.execute(
+                    SetTimeSignature {
+                        numerator,
+                        denominator,
+                        at_bar,
+                    }
+                    .into(),
+                )
             }
             ["step_seq", "saved", index] => {
                 let index: usize = index.parse().ok()?;
