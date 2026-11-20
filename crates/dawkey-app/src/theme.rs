@@ -172,6 +172,32 @@ impl Elevation {
         (self.high, pal().shadow)
     }
 }
+
+/// The spacing scale the floating dialogs (export, confirm, recovery,
+/// prefs, the plugin picker/editor) already share, so their padding and
+/// gaps come from one place instead of repeated literals.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Spacing {
+    pub(crate) xs: f32,
+    pub(crate) sm: f32,
+    pub(crate) md: f32,
+    pub(crate) lg: f32,
+    pub(crate) xl: f32,
+    pub(crate) xxl: f32,
+}
+
+pub(crate) const SPACING: Spacing = Spacing {
+    xs: 2.0,
+    sm: 6.0,
+    md: 8.0,
+    lg: 10.0,
+    xl: 14.0,
+    xxl: 20.0,
+};
+
+/// Corner radius those same dialogs already share.
+pub(crate) const PANEL_RADIUS: f32 = 8.0;
+
 /// Track colors, cycled by track position (the same in either theme).
 pub(crate) const TRACK_COLORS: [Color; 8] = [
     Color::hex(0x4c8dff),

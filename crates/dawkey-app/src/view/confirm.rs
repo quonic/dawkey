@@ -40,7 +40,7 @@ pub(super) fn dialog(
     let action_button = |id: &str, label: &str, text: &str, active: Option<Color>| {
         button(id, label, ui, active)
             .text(text)
-            .padding(Insets::xy(14.0, 0.0))
+            .padding(Insets::xy(SPACING.xl, 0.0))
             .height(Sizing::Fixed(30.0))
             .style(|s| s.weight = FontWeight::SemiBold)
     };
@@ -49,13 +49,13 @@ pub(super) fn dialog(
         .role(Role::Group)
         .accessible_label("Save changes?")
         .width(Sizing::Fixed(PANEL_W))
-        .padding(Insets::all(20.0))
-        .gap(6.0)
+        .padding(Insets::all(SPACING.xxl))
+        .gap(SPACING.sm)
         .align(Align::Start)
         .style(|s| {
             s.background = Some(pal().panel);
             s.border = Some((1.0, pal().border));
-            s.radius = [8.0; 4];
+            s.radius = [PANEL_RADIUS; 4];
             s.shadow = Some(ELEVATION.medium());
         })
         .child(Node::label("Save changes?").style(|s| {
@@ -68,9 +68,9 @@ pub(super) fn dialog(
         .child(
             Node::row()
                 .width(Sizing::Fill(1.0))
-                .gap(8.0)
+                .gap(SPACING.md)
                 .padding(Insets {
-                    top: 14.0,
+                    top: SPACING.xl,
                     ..Insets::default()
                 })
                 .child(action_button(
