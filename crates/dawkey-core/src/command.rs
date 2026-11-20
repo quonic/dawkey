@@ -3339,6 +3339,7 @@ pub enum DrumKit {
     Acoustic,
     LoFi,
     Trap,
+    Metal,
 }
 
 #[allow(clippy::type_complexity)]
@@ -3473,6 +3474,60 @@ fn drum_kit_spec(
                 (
                     "builtin:reverb",
                     vec![("mode", 0.0), ("decay", 0.8), ("mix", 6.0)],
+                ),
+            ],
+        ),
+        DrumKit::Metal => (
+            [
+                (0.65, 200.0, 2.0),
+                (0.6, 140.0, 1.0),
+                (0.5, 50.0, -2.0),
+                (0.45, 220.0, -4.0),
+                (0.55, 200.0, -1.0),
+                (0.5, 100.0, -1.0),
+                (0.45, 1100.0, -5.0),
+                (0.4, 750.0, -6.0),
+            ],
+            vec![
+                (
+                    "builtin:gate",
+                    vec![
+                        ("threshold", -35.0),
+                        ("floor", -70.0),
+                        ("hysteresis", 3.0),
+                        ("attack", 0.5),
+                        ("hold", 20.0),
+                        ("release", 60.0),
+                    ],
+                ),
+                (
+                    "builtin:comp",
+                    vec![
+                        ("threshold", -22.0),
+                        ("ratio", 6.0),
+                        ("attack", 2.0),
+                        ("makeup", 3.0),
+                    ],
+                ),
+                (
+                    "builtin:eq",
+                    vec![
+                        ("low_cut", 50.0),
+                        ("low_gain", 3.0),
+                        ("mid_gain", -4.0),
+                        ("high_mid_gain", 3.0),
+                        ("high_gain", 2.0),
+                    ],
+                ),
+                (
+                    "builtin:drive",
+                    vec![
+                        ("drive", 4.0),
+                        ("tone", 6.0),
+                        ("level", 0.0),
+                        ("tight", 1.0),
+                        ("mix", 35.0),
+                    ],
                 ),
             ],
         ),

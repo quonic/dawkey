@@ -3863,6 +3863,37 @@ fn kit_and_pattern_buttons_in_the_step_sequencer() {
 }
 
 #[test]
+fn the_metal_kit_mounts_a_gate_before_the_compressor() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+
+    click(&mut app, "step_seq/kit/metal").unwrap();
+    let plugins = &app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins;
+    assert_eq!(plugins[0].plugin, "builtin:drums");
+    assert_eq!(
+        plugins
+            .iter()
+            .map(|p| p.plugin.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "builtin:drums",
+            "builtin:gate",
+            "builtin:comp",
+            "builtin:eq",
+            "builtin:drive"
+        ]
+    );
+    assert_eq!(plugins[3].params["mid_gain"], -4.0);
+}
+
+#[test]
 fn the_sound_source_toggle_switches_a_pad_between_synth_and_samples() {
     let mut app = app();
     let (track, clip) = add_drum_clip(&mut app);

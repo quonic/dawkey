@@ -320,7 +320,13 @@ fn sidebar(
                 .child(kit_btn("acoustic", "Acoustic"))
                 .child(kit_btn("lofi", "LoFi")),
         )
-        .child(kit_btn("trap", "Trap"));
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
+                .child(kit_btn("trap", "Trap"))
+                .child(kit_btn("metal", "Metal")),
+        );
 
     let patterns = Node::column()
         .width(Sizing::Fill(1.0))

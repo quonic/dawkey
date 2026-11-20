@@ -61,6 +61,7 @@ impl App {
                     "acoustic" => DrumKit::Acoustic,
                     "lofi" => DrumKit::LoFi,
                     "trap" => DrumKit::Trap,
+                    "metal" => DrumKit::Metal,
                     _ => return None,
                 };
                 let clip = self.view.editing_clip?;
