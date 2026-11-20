@@ -25,6 +25,7 @@ pub(crate) const STEP_BEATS: f64 = 0.25;
 const ROW_LABEL_W: f32 = 48.0;
 const CELL: f32 = 26.0;
 const GAP: f32 = 3.0;
+const SIDEBAR_W: f32 = 212.0;
 
 fn lerp(a: Color, b: Color, t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
@@ -37,7 +38,7 @@ fn lerp(a: Color, b: Color, t: f32) -> Color {
 }
 
 pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
-    let page = Node::column()
+    let page = Node::row()
         .id("step_seq")
         .accessible_label("Drum step sequencer")
         .fill()
@@ -59,9 +60,13 @@ pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
         let step = (beat / STEP_BEATS).floor();
         (step >= 0.0 && step < f64::from(STEPS)).then_some(step as u8)
     };
-    page.child(header(track, clip, ui))
-        .child(grid(notes, playhead_step))
-        .child(presets(model, view, clip.id, ui))
+    page.child(sidebar(model, view, clip.id, ui)).child(
+        Node::column()
+            .fill()
+            .clip()
+            .child(header(track, clip, ui))
+            .child(grid(notes, playhead_step)),
+    )
 }
 
 fn header(track: &TrackView, clip: &ClipView, ui: &UiState) -> Node {
@@ -140,7 +145,22 @@ fn grid(notes: &[NoteView], playhead_step: Option<u8>) -> Node {
     rows
 }
 
-fn presets(model: &ViewModel, view: &ViewState, clip: dawkey_core::ClipId, ui: &UiState) -> Node {
+fn sidebar(model: &ViewModel, view: &ViewState, clip: dawkey_core::ClipId, ui: &UiState) -> Node {
+    let section = |title: &str| {
+        Node::label(title)
+            .width(Sizing::Fill(1.0))
+            .padding(Insets {
+                top: 6.0,
+                bottom: 2.0,
+                ..Insets::default()
+            })
+            .style(|s| {
+                s.font_size = 10.0;
+                s.weight = FontWeight::SemiBold;
+                s.color = pal().text_dim;
+                s.text_align = TextAlign::Start;
+            })
+    };
     let kit_btn = |id: &str, label: &str| {
         button(
             &format!("step_seq/kit/{id}"),
@@ -164,13 +184,6 @@ fn presets(model: &ViewModel, view: &ViewState, clip: dawkey_core::ClipId, ui: &
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(22.0))
         .style(|s| s.font_size = 10.0)
-    };
-    let label = |text: &str| {
-        Node::label(text).style(|s| {
-            s.font_size = 10.0;
-            s.color = pal().text_dim;
-            s.weight = FontWeight::SemiBold;
-        })
     };
 
     let mut your_patterns = Node::column().width(Sizing::Fill(1.0)).gap(4.0);
@@ -230,30 +243,60 @@ fn presets(model: &ViewModel, view: &ViewState, clip: dawkey_core::ClipId, ui: &
         ),
     );
 
-    Node::column()
+    let kits = Node::column()
         .width(Sizing::Fill(1.0))
-        .padding(Insets::all(10.0))
-        .gap(6.0)
-        .child(label("KITS"))
+        .gap(4.0)
         .child(
             Node::row()
+                .width(Sizing::Fill(1.0))
                 .gap(4.0)
                 .child(kit_btn("808", "808"))
-                .child(kit_btn("909", "909"))
-                .child(kit_btn("acoustic", "Acoustic"))
-                .child(kit_btn("lofi", "LoFi"))
-                .child(kit_btn("trap", "Trap")),
+                .child(kit_btn("909", "909")),
         )
-        .child(label("PATTERNS"))
         .child(
             Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
+                .child(kit_btn("acoustic", "Acoustic"))
+                .child(kit_btn("lofi", "LoFi")),
+        )
+        .child(kit_btn("trap", "Trap"));
+
+    let patterns = Node::column()
+        .width(Sizing::Fill(1.0))
+        .gap(4.0)
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
                 .gap(4.0)
                 .child(pattern_btn("four_on_the_floor", "4 On Floor"))
-                .child(pattern_btn("boom_bap", "Boom Bap"))
-                .child(pattern_btn("trap", "Trap"))
-                .child(pattern_btn("house_shuffle", "House"))
-                .child(pattern_btn("drum_and_bass", "D&B")),
+                .child(pattern_btn("boom_bap", "Boom Bap")),
         )
-        .child(label("YOUR PATTERNS"))
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
+                .child(pattern_btn("trap", "Trap"))
+                .child(pattern_btn("house_shuffle", "House")),
+        )
+        .child(pattern_btn("drum_and_bass", "D&B"));
+
+    Node::column()
+        .id("step_seq/sidebar")
+        .width(Sizing::Fixed(SIDEBAR_W))
+        .height(Sizing::Fill(1.0))
+        .padding(Insets::all(10.0))
+        .gap(6.0)
+        .scrollable()
+        .clip()
+        .style(|s| {
+            s.background = Some(pal().panel);
+            s.border = Some((1.0, pal().border));
+        })
+        .child(section("KITS"))
+        .child(kits)
+        .child(section("PATTERNS"))
+        .child(patterns)
+        .child(section("YOUR PATTERNS"))
         .child(your_patterns)
 }
