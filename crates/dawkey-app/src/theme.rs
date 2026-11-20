@@ -144,6 +144,34 @@ pub const SHADOW_MARGIN: f32 = 16.0;
 pub(crate) const SHADOW_BLUR: f32 = 12.0;
 pub(crate) const WINDOW_RADIUS: f32 = 10.0;
 pub(crate) const TITLEBAR_HEIGHT: f32 = 38.0;
+
+/// A `(blur, color)` pair for `Style::shadow`, so every floating surface
+/// (dialogs, popovers, the window itself) picks from the same depth scale
+/// instead of inventing its own blur radius.
+pub(crate) type ElevationShadow = (f32, Color);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Elevation {
+    /// A dialog or picker panel.
+    pub(crate) medium: f32,
+    /// The window itself, the highest surface.
+    pub(crate) high: f32,
+}
+
+pub(crate) const ELEVATION: Elevation = Elevation {
+    medium: 12.0,
+    high: SHADOW_BLUR,
+};
+
+impl Elevation {
+    pub(crate) fn medium(self) -> ElevationShadow {
+        (self.medium, pal().shadow)
+    }
+
+    pub(crate) fn high(self) -> ElevationShadow {
+        (self.high, pal().shadow)
+    }
+}
 /// Track colors, cycled by track position (the same in either theme).
 pub(crate) const TRACK_COLORS: [Color; 8] = [
     Color::hex(0x4c8dff),

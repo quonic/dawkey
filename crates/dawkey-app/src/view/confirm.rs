@@ -56,7 +56,7 @@ pub(super) fn dialog(
             s.background = Some(pal().panel);
             s.border = Some((1.0, pal().border));
             s.radius = [8.0; 4];
-            s.shadow = Some((12.0, pal().shadow));
+            s.shadow = Some(ELEVATION.medium());
         })
         .child(Node::label("Save changes?").style(|s| {
             s.color = pal().text;

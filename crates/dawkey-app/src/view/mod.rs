@@ -372,7 +372,7 @@ pub(crate) fn build(
             s.background = Some(pal().window);
             s.radius = [radius; 4];
             if margin > 0.0 {
-                s.shadow = Some((SHADOW_BLUR, pal().shadow));
+                s.shadow = Some(ELEVATION.high());
                 s.border = Some((1.0, pal().border));
             }
         });
