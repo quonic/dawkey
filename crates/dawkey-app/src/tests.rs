@@ -2786,6 +2786,7 @@ fn clicking_a_field_being_typed_in_keeps_the_typing() {
     click(&mut app, "prefs/record_offset").unwrap();
     type_keys(&mut app, &["return"]);
     assert_eq!(app.preferences().record_offset_ms, 12.0);
+    click(&mut app, "prefs/page/mcp").unwrap();
     click(&mut app, "prefs/mcp_port").unwrap();
     type_keys(&mut app, &["8", "0", "8", "0"]);
     click(&mut app, "prefs/mcp_port").unwrap();
@@ -3421,6 +3422,7 @@ fn preferences_apply_at_once_and_are_saved() {
     assert_eq!(Preferences::load(&path).audio, AudioChoice::Virtual);
 
     // Autosave every 5 minutes, then never.
+    click(&mut app, "prefs/page/project_safety").unwrap();
     click(&mut app, "prefs/autosave_every").unwrap();
     assert_eq!(
         app.autosave_every,
@@ -3430,12 +3432,14 @@ fn preferences_apply_at_once_and_are_saved() {
     assert_eq!(app.autosave_every, None);
 
     // A record offset, typed.
+    click(&mut app, "prefs/page/audio_midi").unwrap();
     click(&mut app, "prefs/record_offset").unwrap();
     type_keys(&mut app, &["-", "1", "2", ".", "5", "return"]);
     assert_eq!(app.studio.engine_status().record_offset_ms, -12.5);
     assert_eq!(Preferences::load(&path).record_offset_ms, -12.5);
 
     // The UI scale: the same window, in bigger units.
+    click(&mut app, "prefs/page/appearance").unwrap();
     let before = app.access_tree().find("window").unwrap().bounds;
     click(&mut app, "prefs/scale").unwrap();
     assert_eq!(app.preferences().ui_scale, 1.1);
@@ -3447,6 +3451,7 @@ fn preferences_apply_at_once_and_are_saved() {
     assert_eq!(app.window().size, WindowInfo::headless().size);
 
     // Plugin processes, shared by default.
+    click(&mut app, "prefs/page/plugins").unwrap();
     assert!(app.preferences().share_plugin_processes);
     click(&mut app, "prefs/plugins/share").unwrap();
     assert!(!Preferences::load(&path).share_plugin_processes);
@@ -3519,6 +3524,32 @@ fn keys_stay_in_the_preferences() {
 }
 
 #[test]
+fn preferences_pages_expose_live_backend_information() {
+    let mut app = app();
+    click(&mut app, "status/preferences").unwrap();
+    let audio_status = app
+        .access_tree()
+        .find("prefs/audio_status")
+        .unwrap()
+        .value
+        .clone()
+        .unwrap();
+    assert!(audio_status.contains("Virtual audio"));
+    assert!(app.access_tree().find("prefs/midi_inputs").is_some());
+    assert!(app.access_tree().find("prefs/midi_outputs").is_some());
+
+    for (page, control) in [
+        ("plugins", "prefs/plugins/bridge"),
+        ("project_safety", "prefs/autosave"),
+        ("appearance", "prefs/theme"),
+        ("mcp", "prefs/mcp_http"),
+    ] {
+        click(&mut app, &format!("prefs/page/{page}")).unwrap();
+        assert!(app.access_tree().find(control).is_some(), "{page}");
+    }
+}
+
+#[test]
 fn the_preferences_serve_mcp_over_http() {
     use std::cell::RefCell;
     use std::net::SocketAddr;
@@ -3552,6 +3583,7 @@ fn the_preferences_serve_mcp_over_http() {
             .unwrap()
     };
     click(&mut app, "status/preferences").unwrap();
+    click(&mut app, "prefs/page/mcp").unwrap();
     assert_eq!(app.mcp_http_state(), &McpHttpState::Unavailable);
     assert!(status(&mut app).starts_with("Only the window"));
 
@@ -3563,6 +3595,7 @@ fn the_preferences_serve_mcp_over_http() {
     assert_eq!(app.mcp_http_state(), &McpHttpState::Off);
     assert!(!token_path.exists());
 
+    click(&mut app, "prefs/page/mcp").unwrap();
     click(&mut app, "prefs/mcp_http").unwrap();
     let token = std::fs::read_to_string(&token_path).unwrap();
     let served = calls.borrow().last().cloned().flatten().unwrap();
@@ -3630,6 +3663,7 @@ fn the_theme_follows_the_preferences_or_the_desktop() {
     assert_eq!(app.theme(), Theme::Dark);
     assert_eq!(toolbar(&mut app), dark);
     click(&mut app, "status/preferences").unwrap();
+    click(&mut app, "prefs/page/appearance").unwrap();
     click(&mut app, "prefs/theme").unwrap();
     assert_eq!(app.preferences().theme, ThemeChoice::Light);
     assert_eq!(app.theme(), Theme::Light);

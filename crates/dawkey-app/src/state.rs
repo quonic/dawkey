@@ -697,6 +697,8 @@ pub struct ViewState {
     pub recovery: Option<dawkey_studio::Recovery>,
     /// The preferences panel is open.
     pub prefs_open: bool,
+    /// Current category in the Preferences panel.
+    pub prefs_page: PrefsPage,
     /// The export dialog is open.
     pub export_dialog: bool,
     /// What the export dialog exports (kept between exports).
@@ -719,6 +721,16 @@ pub struct ViewState {
     /// Write passes so far, so each has its own undo step.
     #[serde(skip)]
     pub(crate) passes: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum PrefsPage {
+    #[default]
+    AudioMidi,
+    Plugins,
+    ProjectSafety,
+    Appearance,
+    Mcp,
 }
 
 /// What the export dialog writes.
@@ -859,6 +871,7 @@ impl Default for ViewState {
             text_edit: None,
             recovery: None,
             prefs_open: false,
+            prefs_page: PrefsPage::AudioMidi,
             export_dialog: false,
             export: ExportSettings::default(),
             automation_write: false,

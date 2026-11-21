@@ -76,6 +76,10 @@ pub(crate) struct ViewModel {
     pub(crate) master_track: TrackView,
     pub(crate) master: [f32; 2],
     pub(crate) engine: String,
+    /// Audio backend details for the Preferences page.
+    pub(crate) audio_status: String,
+    pub(crate) midi_inputs: Vec<String>,
+    pub(crate) midi_outputs: Vec<String>,
     pub(crate) message: Option<String>,
     /// The plugin in the editor, if open.
     pub(crate) editor: Option<PluginDetails>,

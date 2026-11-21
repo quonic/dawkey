@@ -844,6 +844,25 @@ impl App {
                 line
             }
         };
+        let audio_status = match &status.pipewire {
+            None => format!("Virtual audio · {} Hz", status.sample_rate),
+            Some(pw) => {
+                let mut details = format!("PipeWire · {} · {} Hz", pw.state, status.sample_rate);
+                if let Some(sink) = &pw.linked_to {
+                    details.push_str(&format!(" · Output: {sink}"));
+                }
+                if let Some(source) = &pw.capture_from {
+                    details.push_str(&format!(" · Input: {source}"));
+                }
+                if let Some(quantum) = pw.quantum {
+                    details.push_str(&format!(" · Quantum: {quantum} frames"));
+                }
+                if let Some(error) = &pw.error {
+                    details.push_str(&format!(" · {error}"));
+                }
+                details
+            }
+        };
         let tempo = project.tempo_map();
         // Faders and pan show what their automation has at the playhead.
         let now = project.seconds_to_frames(status.transport.position_s);
@@ -1031,6 +1050,9 @@ impl App {
             master_track,
             master: meters.master,
             engine,
+            audio_status,
+            midi_inputs: status.midi_inputs.clone(),
+            midi_outputs: status.midi_outputs.clone(),
             message: self.message.clone(),
             editor,
             picker,
