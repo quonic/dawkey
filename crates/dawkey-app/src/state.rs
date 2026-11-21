@@ -191,6 +191,16 @@ pub(crate) enum Gesture {
         from: (f64, i32),
         to: (f64, i32),
     },
+    /// Dragging a rectangle over the arrange timeline: the clips it
+    /// touches are selected (added to `base`, the selection before, with
+    /// Shift or Ctrl).
+    ClipMarquee {
+        base: Vec<ClipId>,
+        /// Corners as (time in seconds, lane content y: the track rows'
+        /// own unscrolled coordinate space, as `track_rows` returns it).
+        from: (f64, f32),
+        to: (f64, f32),
+    },
     /// Dragging a velocity bar: these notes (with their velocities before)
     /// change by `delta`; one `edit_midi_notes` on release.
     Velocity {
@@ -600,6 +610,12 @@ pub struct ViewState {
     /// Open confirmation dialog for deleting selected tracks.
     pub delete_confirm: Option<DeleteConfirm>,
     pub selected_clip: Option<ClipId>,
+    /// Every clip selected in the arrange view, including `selected_clip`
+    /// (its most recently touched one, used for single-target actions
+    /// like rename or split): a click replaces it, Shift or Ctrl toggles
+    /// a clip in or out, and dragging a rectangle over empty timeline adds
+    /// every clip it touches.
+    pub selected_clips: Vec<ClipId>,
     /// The clip Ctrl+C copied, which Ctrl+V pastes.
     pub clipboard: Option<ClipId>,
     /// Snap clip moves to beats.
@@ -795,6 +811,7 @@ impl Default for ViewState {
             mixdown_confirm: None,
             delete_confirm: None,
             selected_clip: None,
+            selected_clips: Vec::new(),
             clipboard: None,
             snap: true,
             editing_clip: None,

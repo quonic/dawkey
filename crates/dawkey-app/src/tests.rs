@@ -388,6 +388,75 @@ fn dragging_a_clip_to_another_lane_changes_track() {
 }
 
 #[test]
+fn dragging_a_rectangle_over_empty_timeline_selects_the_clips_it_touches() {
+    let mut app = app();
+    let (_, clip_a) = add_clip(&mut app, 0.0);
+    let (_, clip_b) = add_clip(&mut app, 0.0);
+    let lanes = app.ui.find("timeline/lanes").unwrap().rect();
+    // Starts past both 2s clips' right edge (160 px at the default 80
+    // px/s) in the first track's row, empty space; ends before their
+    // left edge, past the second track's row: the rectangle sweeps over
+    // both without ever landing on a clip widget itself.
+    let from = Point::new(lanes.x + 200.0, lanes.y + 5.0);
+    app.drag(
+        DragFrom::Point(from),
+        Point::new(-195.0, crate::state::LANE_H + 10.0),
+        5,
+        Modifiers::default(),
+    )
+    .unwrap();
+    let mut selected = app.view_state().selected_clips.clone();
+    selected.sort();
+    assert_eq!(selected, [ClipId(clip_a), ClipId(clip_b)]);
+
+    // Clicking empty space again clears the selection.
+    click(&mut app, "timeline/lanes").unwrap();
+    assert!(app.view_state().selected_clips.is_empty());
+    assert_eq!(app.view_state().selected_clip, None);
+}
+
+#[test]
+fn shift_click_toggles_a_clip_in_the_multi_selection() {
+    let mut app = app();
+    let (_, clip_a) = add_clip(&mut app, 0.0);
+    let (_, clip_b) = add_clip(&mut app, 4.0);
+    click(&mut app, &format!("clip/{clip_a}")).unwrap();
+    assert_eq!(app.view_state().selected_clips, [ClipId(clip_a)]);
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    app.click(&format!("clip/{clip_b}"), MouseButton::Left, shift)
+        .unwrap();
+    let mut selected = app.view_state().selected_clips.clone();
+    selected.sort();
+    assert_eq!(selected, [ClipId(clip_a), ClipId(clip_b)]);
+    // Shift-clicking an already-selected clip removes it.
+    app.click(&format!("clip/{clip_a}"), MouseButton::Left, shift)
+        .unwrap();
+    assert_eq!(app.view_state().selected_clips, [ClipId(clip_b)]);
+}
+
+#[test]
+fn delete_removes_every_selected_clip() {
+    let mut app = app();
+    let (_, clip_a) = add_clip(&mut app, 0.0);
+    let (_, clip_b) = add_clip(&mut app, 4.0);
+    click(&mut app, &format!("clip/{clip_a}")).unwrap();
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    app.click(&format!("clip/{clip_b}"), MouseButton::Left, shift)
+        .unwrap();
+    app.key("delete", Modifiers::default()).unwrap();
+    let project = app.studio.session().project();
+    assert!(project.clip(ClipId(clip_a)).is_none());
+    assert!(project.clip(ClipId(clip_b)).is_none());
+    assert!(app.view_state().selected_clips.is_empty());
+}
+
+#[test]
 fn mixer_faders_and_pan() {
     let mut app = app();
     let (track, _) = add_clip(&mut app, 0.0);

@@ -290,7 +290,7 @@ impl App {
                 if name && self.editing(&TextField::ClipName(clip)) {
                     return Ok(());
                 }
-                self.view.selected_clip = Some(clip);
+                self.select_clip(clip, modifiers);
                 self.view.selected_marker = None;
                 if count == 2 && name {
                     return self.start_text_edit(TextField::ClipName(clip));
@@ -319,6 +319,7 @@ impl App {
             ["timeline", "ruler"] => self.locate_at(pos.x),
             ["timeline", "lanes"] => {
                 self.view.selected_clip = None;
+                self.view.selected_clips.clear();
                 self.view.selected_marker = None;
                 // Double-clicking an empty MIDI lane makes a clip there.
                 if count == 2
@@ -488,6 +489,19 @@ impl App {
                     self.view.gesture = None;
                 }
                 self.locate_at(pos.x)
+            }
+            Gesture::ClipMarquee { base, from, .. } => {
+                let to = (self.time_at(pos.x).max(0.0), self.lane_content_y(pos.y));
+                let mut selected = base.clone();
+                for id in self.clips_touched(from, to) {
+                    if !selected.contains(&id) {
+                        selected.push(id);
+                    }
+                }
+                self.view.selected_clips = selected.clone();
+                self.view.selected_clip = selected.last().copied();
+                self.view.gesture = (!end).then_some(Gesture::ClipMarquee { base, from, to });
+                Ok(())
             }
             Gesture::MoveNotes { .. }
             | Gesture::ResizeNote { .. }
@@ -708,13 +722,18 @@ impl App {
                     .clip(clip)
                     .ok_or_else(|| format!("clip {clip} does not exist"))?;
                 let start = project.frames_to_seconds(c.start);
-                self.view.selected_clip = Some(clip);
+                let preview_track = track.id;
+                // Grabbing a clip already in a multi-selection keeps the
+                // whole selection; grabbing any other one selects just it.
+                if !self.view.selected_clips.contains(&clip) {
+                    self.select_clip(clip, modifiers);
+                }
                 self.view.selected_marker = None;
                 Some(Gesture::Clip {
                     clip,
                     grab_s: self.time_at(origin.x) - start,
                     preview_start_s: start,
-                    preview_track: track.id,
+                    preview_track,
                     copy: modifiers.ctrl,
                 })
             }
@@ -777,6 +796,24 @@ impl App {
                 })
             }
             ["timeline", "ruler"] => Some(Gesture::Scrub),
+            ["timeline", "lanes"] => {
+                let at = (
+                    self.time_at(origin.x).max(0.0),
+                    self.lane_content_y(origin.y),
+                );
+                let base = if modifiers.shift || modifiers.ctrl {
+                    self.view.selected_clips.clone()
+                } else {
+                    Vec::new()
+                };
+                self.view.selected_clips = base.clone();
+                self.view.selected_clip = base.last().copied();
+                Some(Gesture::ClipMarquee {
+                    base,
+                    from: at,
+                    to: at,
+                })
+            }
             _ => None,
         })
     }
@@ -926,10 +963,18 @@ impl App {
                 Ok(())
             }
             ("v", true, false) if self.view.page == Page::Arrange => self.paste_clip(),
-            ("delete" | "backspace", false, _) => match self.view.selected_clip.take() {
-                Some(clip) => self.execute(RemoveClip { clip }.into()),
-                None => Ok(()),
-            },
+            ("delete" | "backspace", false, _) => {
+                let mut clips = std::mem::take(&mut self.view.selected_clips);
+                if clips.is_empty() {
+                    clips.extend(self.view.selected_clip.take());
+                } else {
+                    self.view.selected_clip = None;
+                }
+                for clip in clips {
+                    self.execute(RemoveClip { clip }.into())?;
+                }
+                Ok(())
+            }
             ("tab", false, _) => {
                 self.view.page = match self.view.page {
                     Page::Arrange => Page::Mixer,
@@ -953,6 +998,7 @@ impl App {
             }
             ("escape", ..) => {
                 self.view.selected_clip = None;
+                self.view.selected_clips.clear();
                 self.view.selected_tracks.clear();
                 self.view.track_anchor = None;
                 Ok(())
@@ -1101,6 +1147,57 @@ impl App {
             .project()
             .clip(clip)
             .map(|(_, c)| c.kind())
+    }
+
+    /// Window y to the arrange lanes' own unscrolled coordinate space (as
+    /// `track_rows`' tops are in), so a marquee's corners stay comparable
+    /// to each other across scrolling.
+    fn lane_content_y(&self, y: f32) -> f32 {
+        y - self.lanes_rect().y + self.view.scroll_y
+    }
+
+    /// The clips a marquee from `a` to `b` ((time in seconds, lane content
+    /// y) corners) touches: every clip on a track whose row the marquee's
+    /// y span crosses, that overlaps its time span.
+    fn clips_touched(&self, a: (f64, f32), b: (f64, f32)) -> Vec<ClipId> {
+        let (from_s, to_s) = (a.0.min(b.0), a.0.max(b.0));
+        let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
+        let (tops, total) = self.track_rows();
+        let project = self.studio.session().project();
+        let mut ids = Vec::new();
+        for (i, &top) in tops.iter().enumerate() {
+            let bottom = tops.get(i + 1).copied().unwrap_or(total);
+            if bottom <= y0 || top >= y1 {
+                continue;
+            }
+            let Some(track) = project.tracks.get(i) else {
+                continue;
+            };
+            for clip in &track.clips {
+                let start = project.frames_to_seconds(clip.start);
+                let end = project.frames_to_seconds(clip.start + clip.length);
+                if end > from_s && start < to_s {
+                    ids.push(clip.id);
+                }
+            }
+        }
+        ids
+    }
+
+    /// Selects clip `clip` in the arrange view: a plain click replaces
+    /// the selection with just it; Shift or Ctrl toggles it in the
+    /// multi-selection instead.
+    pub(crate) fn select_clip(&mut self, clip: ClipId, modifiers: Modifiers) {
+        if modifiers.shift || modifiers.ctrl {
+            if let Some(pos) = self.view.selected_clips.iter().position(|&c| c == clip) {
+                self.view.selected_clips.remove(pos);
+            } else {
+                self.view.selected_clips.push(clip);
+            }
+        } else {
+            self.view.selected_clips = vec![clip];
+        }
+        self.view.selected_clip = self.view.selected_clips.last().copied();
     }
 
     /// Selects track `track` in the arrange view (`Ctrl` toggles, `Shift`

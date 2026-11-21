@@ -443,6 +443,7 @@ fn timeline(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
         .role(Role::Timeline)
         .accessible_label("Timeline")
         .clickable()
+        .draggable()
         .scrollable()
         .fill()
         .clip()
@@ -544,6 +545,21 @@ fn timeline(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
                 );
             }
         }
+    }
+    if let Some(Gesture::ClipMarquee { from, to, .. }) = &view.gesture {
+        let (x0, x1) = (x_of(view, from.0.min(to.0)), x_of(view, from.0.max(to.0)));
+        let (y0, y1) = (
+            from.1.min(to.1) - view.scroll_y,
+            from.1.max(to.1) - view.scroll_y,
+        );
+        lanes = lanes.child(
+            Node::row()
+                .style(|s| {
+                    s.background = Some(pal().text.with_alpha(0.08));
+                    s.border = Some((1.0, pal().text.with_alpha(0.6)));
+                })
+                .absolute(Rect::new(x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0))),
+        );
     }
     let playhead_x = x_of(view, model.position_s);
     lanes = lanes.child(Node::row().background(pal().accent).absolute(Rect::new(
@@ -892,7 +908,8 @@ fn clip_node(
     let moving = matches!(look, Look::Moving | Look::Repeat);
     // Drawn only: the clip's widget is elsewhere.
     let ghost = matches!(look, Look::Original | Look::Repeat);
-    let selected = view.selected_clip == Some(clip.id) && !ghost;
+    let selected =
+        (view.selected_clips.contains(&clip.id) || view.selected_clip == Some(clip.id)) && !ghost;
     let color = track_color(track_index);
     let color = if clip.muted {
         color.mix(pal().panel, if look == Look::Take { 0.75 } else { 0.6 })
