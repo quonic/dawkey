@@ -301,6 +301,8 @@ impl App {
                 }
                 Ok(())
             }
+            // Double-clicking the window title renames the project.
+            ["window", "title"] if count == 2 => self.start_text_edit(TextField::ProjectName),
             ["status", "new_project"] => {
                 self.request_action(PendingAction::NewProject);
                 Ok(())

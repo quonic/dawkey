@@ -402,7 +402,7 @@ pub(crate) fn build(
             }
         });
     if window.csd {
-        frame = frame.child(titlebar(model, ui, window, radius));
+        frame = frame.child(titlebar(model, view, ui, window, radius));
     }
     let top = if window.csd { TITLEBAR_HEIGHT } else { 0.0 };
     let area = dawkey_ui::Rect::new(
@@ -448,7 +448,13 @@ pub(crate) fn window_title(name: &str, dirty: bool) -> String {
     format!("{}{name} — Dawkey", if dirty { "• " } else { "" })
 }
 
-fn titlebar(model: &ViewModel, ui: &UiState, window: &WindowInfo, radius: f32) -> Node {
+fn titlebar(
+    model: &ViewModel,
+    view: &ViewState,
+    ui: &UiState,
+    window: &WindowInfo,
+    radius: f32,
+) -> Node {
     let active = window.activated;
     let fg = if active { pal().text } else { pal().text_dim };
     let maximize_icon = if window.maximized {
@@ -482,12 +488,16 @@ fn titlebar(model: &ViewModel, ui: &UiState, window: &WindowInfo, radius: f32) -
             s.radius = [5.0; 4];
         }))
         .child(
-            Node::label(window_title(&model.title, model.dirty))
-                .id("window/title")
-                .style(|s| {
-                    s.color = fg;
-                    s.weight = FontWeight::SemiBold;
-                }),
+            // Double-click to rename the project.
+            name_editor(&TextField::ProjectName, "Project name", view, ui).unwrap_or_else(|| {
+                Node::label(window_title(&model.title, model.dirty))
+                    .id("window/title")
+                    .clickable()
+                    .style(|s| {
+                        s.color = fg;
+                        s.weight = FontWeight::SemiBold;
+                    })
+            }),
         )
         .child(Node::spacer())
         .child(window_button(

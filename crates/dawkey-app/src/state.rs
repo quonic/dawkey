@@ -338,6 +338,8 @@ pub enum TextField {
     RackPresetName(TrackId),
     /// A name to save a drum clip's current steps as a pattern under.
     DrumPatternName(ClipId),
+    /// The project's own name, shown in the window title.
+    ProjectName,
 }
 
 /// Slider position (0 to 1, cubic) of a MIDI device latency in ms.

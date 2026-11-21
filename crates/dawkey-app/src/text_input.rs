@@ -12,7 +12,7 @@
 //! type nothing).
 
 use dawkey_core::{
-    DEVICE_LATENCY_MS_MAX, RenameClip, RenameTrack, SaveDrumPattern, SaveRackPreset,
+    DEVICE_LATENCY_MS_MAX, RenameClip, RenameProject, RenameTrack, SaveDrumPattern, SaveRackPreset,
     SetPluginParam, SetTempo, SetTimeSignature, SetTrackMidiOutput, TEMPO_BPM_MAX, TEMPO_BPM_MIN,
 };
 use dawkey_ui::Modifiers;
@@ -35,6 +35,7 @@ pub(crate) fn field_id(field: &TextField) -> String {
         TextField::ClipName(clip) => format!("clip/{clip}/name"),
         TextField::RackPresetName(_) => "rack/save_name".into(),
         TextField::DrumPatternName(_) => "step_seq/save_name".into(),
+        TextField::ProjectName => "window/title".into(),
     }
 }
 
@@ -45,7 +46,7 @@ fn max_len(field: &TextField) -> usize {
         TextField::McpPort => 5,
         TextField::Tempo(_) | TextField::DeviceLatency(_) | TextField::RecordOffset => 10,
         TextField::PluginParam { .. } => 40,
-        TextField::TrackName(_) | TextField::ClipName(_) => 256,
+        TextField::TrackName(_) | TextField::ClipName(_) | TextField::ProjectName => 256,
         TextField::RackPresetName(_) => 64,
         TextField::DrumPatternName(_) => 64,
     }
@@ -60,6 +61,7 @@ fn free_text(field: &TextField) -> bool {
             | TextField::ClipName(_)
             | TextField::RackPresetName(_)
             | TextField::DrumPatternName(_)
+            | TextField::ProjectName
     )
 }
 
@@ -144,6 +146,7 @@ impl App {
                 clip_label(project, track, c)
             }
             TextField::RackPresetName(_) | TextField::DrumPatternName(_) => String::new(),
+            TextField::ProjectName => self.studio.session().project().name.clone(),
         };
         self.view.text_edit = Some(TextEdit {
             field,
@@ -407,6 +410,19 @@ impl App {
                         numerator,
                         denominator,
                         at_bar: (n > 0).then_some(bar + 1),
+                    }
+                    .into(),
+                )
+            }
+            TextField::ProjectName => {
+                let current = self.studio.session().project().name.clone();
+                let text = text.trim();
+                if selected || text.is_empty() || text == current {
+                    return Ok(());
+                }
+                self.execute(
+                    RenameProject {
+                        name: text.to_owned(),
                     }
                     .into(),
                 )

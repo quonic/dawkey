@@ -586,6 +586,39 @@ fn project_buttons_in_the_status_bar() {
 }
 
 #[test]
+fn double_clicking_the_window_title_renames_the_project() {
+    let mut app = app();
+    let shown = |app: &mut App| app.access_tree().find("window/title").unwrap().clone();
+    assert_eq!(shown(&mut app).name.as_deref(), Some("Test — Dawkey"));
+
+    app.double_click("window/title", Modifiers::default())
+        .unwrap();
+    let field = shown(&mut app);
+    assert_eq!(
+        (field.role, field.value.as_deref()),
+        (Role::TextField, Some("Test"))
+    );
+    type_keys(&mut app, &["d", "escape"]);
+    assert_eq!(
+        app.studio.session().project().name,
+        "Test",
+        "escape leaves it as it was"
+    );
+
+    app.double_click("window/title", Modifiers::default())
+        .unwrap();
+    type_keys(&mut app, &["s", "o", "n", "g", "return"]);
+    assert_eq!(app.studio.session().project().name, "song");
+    assert_eq!(shown(&mut app).name.as_deref(), Some("• song — Dawkey"));
+
+    // An empty name is refused.
+    app.double_click("window/title", Modifiers::default())
+        .unwrap();
+    type_keys(&mut app, &["backspace", "return"]);
+    assert_eq!(app.studio.session().project().name, "song");
+}
+
+#[test]
 fn closing_over_unsaved_changes_asks_first() {
     let mut app = app();
     assert!(app.request_close());
