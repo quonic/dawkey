@@ -1174,6 +1174,63 @@ fn zoom_scroll_ruler_and_drops() {
 }
 
 #[test]
+fn scrolling_over_a_track_scrolls_it_vertically() {
+    let mut app = app();
+    // Enough tracks that the list is taller than the view, so there's
+    // somewhere for it to scroll to.
+    for i in 0..20 {
+        add_track(&mut app, &format!("Track {i}"));
+    }
+    let lanes = app.lanes_rect();
+    let over_track = Point::new(lanes.x + 200.0, lanes.y + 10.0);
+
+    // Plain scrolling over a track scrolls the track list, not the
+    // timeline.
+    app.scroll(over_track, Point::new(0.0, 100.0), Modifiers::default());
+    assert_eq!(app.view_state().scroll_s, 0.0);
+    assert!(app.view_state().scroll_y > 0.0);
+
+    // Shift forces a horizontal pan instead, even over a track.
+    let scroll_y = app.view_state().scroll_y;
+    app.scroll(
+        over_track,
+        Point::new(0.0, 100.0),
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    assert!(app.view_state().scroll_s > 0.0);
+    assert_eq!(app.view_state().scroll_y, scroll_y);
+}
+
+#[test]
+fn scrolling_past_the_last_track_or_over_the_ruler_pans() {
+    let mut app = app();
+    add_track(&mut app, "Drums");
+    let lanes = app.lanes_rect();
+
+    // Below the one track's row, still inside the lanes area: empty
+    // space, no track of its own to scroll.
+    app.scroll(
+        Point::new(lanes.x + 200.0, lanes.y + crate::state::LANE_H + 40.0),
+        Point::new(0.0, 100.0),
+        Modifiers::default(),
+    );
+    assert!(app.view_state().scroll_s > 0.0);
+    assert_eq!(app.view_state().scroll_y, 0.0);
+
+    // The ruler has no track rows of its own either: it always pans.
+    let scroll_s = app.view_state().scroll_s;
+    app.scroll(
+        Point::new(lanes.x + 200.0, lanes.y - 10.0),
+        Point::new(0.0, 100.0),
+        Modifiers::default(),
+    );
+    assert!(app.view_state().scroll_s > scroll_s);
+}
+
+#[test]
 fn playback_scrolls_the_arrange_view_to_follow_the_playhead() {
     let mut app = app();
     add_track(&mut app, "Drums");

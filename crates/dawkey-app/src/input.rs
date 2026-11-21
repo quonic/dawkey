@@ -950,10 +950,19 @@ impl App {
                 (anchor - f64::from(pos.x - self.lanes_rect().x) / f64::from(pps)).max(0.0);
             return;
         }
+        // Shift forces a horizontal pan; otherwise scrolling over a track's
+        // own row scrolls the track list vertically (there's something to
+        // scroll to), and scrolling anywhere else over the timeline (empty
+        // space past the last track, the ruler, a tempo or meter lane) pans
+        // it, since those have no track rows of their own.
+        let over_track = matches!(id, Some("timeline/lanes" | "arrange/headers"))
+            && self.track_at(pos.y).is_some();
         let (dx, dy) = if modifiers.shift {
             (delta.y, 0.0)
-        } else {
+        } else if over_track {
             (delta.x, delta.y)
+        } else {
+            (delta.x + delta.y, 0.0)
         };
         self.view.scroll_s = (self.view.scroll_s + f64::from(dx / self.view.px_per_s)).max(0.0);
         let (_, content) = self.track_rows();
