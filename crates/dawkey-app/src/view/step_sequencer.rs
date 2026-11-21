@@ -452,6 +452,16 @@ fn sidebar(
                     "Latin",
                     is_kit(dawkey_studio::SampleKit::LatinVcsl),
                 )),
+        )
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
+                .child(sound_btn(
+                    "house",
+                    "House",
+                    is_kit(dawkey_studio::SampleKit::House),
+                )),
         );
 
     let kits = Node::column()

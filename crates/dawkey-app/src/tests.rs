@@ -4067,6 +4067,7 @@ fn the_sound_source_toggle_switches_a_pad_between_synth_and_samples() {
         ("lofi_virtuosity", dawkey_studio::SampleKit::LofiVirtuosity),
         ("vintage_vcsl", dawkey_studio::SampleKit::VintageVcsl),
         ("latin_vcsl", dawkey_studio::SampleKit::LatinVcsl),
+        ("house", dawkey_studio::SampleKit::House),
     ] {
         click(&mut app, &format!("step_seq/sound/{id}")).unwrap();
         assert_eq!(

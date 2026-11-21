@@ -62,15 +62,22 @@ pub enum SampleKit {
     /// `crates/dawkey-plugins/assets/drums/latin_vcsl/README.md`). Cymbals
     /// and clap are shared with `acoustic_vcsl`.
     LatinVcsl,
+    /// A house/dance-style kit: punchy sine-sweep kick and tom, a
+    /// noise-and-tone snare, bright noise-shaped hats and clap, and
+    /// metallic cymbals. Not a recording — synthesized for Dawkey and
+    /// rendered once (see
+    /// `crates/dawkey-plugins/assets/drums/house/README.md`).
+    House,
 }
 
 impl SampleKit {
-    pub const ALL: [SampleKit; 5] = [
+    pub const ALL: [SampleKit; 6] = [
         SampleKit::AcousticVcsl,
         SampleKit::JazzVirtuosity,
         SampleKit::LofiVirtuosity,
         SampleKit::VintageVcsl,
         SampleKit::LatinVcsl,
+        SampleKit::House,
     ];
 
     pub fn id(self) -> &'static str {
@@ -80,6 +87,7 @@ impl SampleKit {
             SampleKit::LofiVirtuosity => "lofi_virtuosity",
             SampleKit::VintageVcsl => "vintage_vcsl",
             SampleKit::LatinVcsl => "latin_vcsl",
+            SampleKit::House => "house",
         }
     }
 
@@ -141,6 +149,16 @@ impl SampleKit {
                 Some(VCSL_CLAP),
                 Some(VCSL_CRASH),
                 Some(VCSL_RIDE),
+            ],
+            SampleKit::House => [
+                Some(include_bytes!("../assets/drums/house/kick.flac").as_slice()),
+                Some(include_bytes!("../assets/drums/house/snare.flac").as_slice()),
+                Some(include_bytes!("../assets/drums/house/closed_hat.flac").as_slice()),
+                Some(include_bytes!("../assets/drums/house/open_hat.flac").as_slice()),
+                Some(include_bytes!("../assets/drums/house/tom.flac").as_slice()),
+                Some(include_bytes!("../assets/drums/house/clap.flac").as_slice()),
+                Some(include_bytes!("../assets/drums/house/crash.flac").as_slice()),
+                Some(include_bytes!("../assets/drums/house/ride.flac").as_slice()),
             ],
         }
     }

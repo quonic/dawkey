@@ -76,6 +76,7 @@ impl App {
                     "lofi_virtuosity" => Some(dawkey_studio::SampleKit::LofiVirtuosity),
                     "vintage_vcsl" => Some(dawkey_studio::SampleKit::VintageVcsl),
                     "latin_vcsl" => Some(dawkey_studio::SampleKit::LatinVcsl),
+                    "house" => Some(dawkey_studio::SampleKit::House),
                     _ => return None,
                 };
                 let clip = self.view.editing_clip?;
