@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::App;
 use crate::prefs::{
-    AUTOSAVE_MINUTES, AudioChoice, PluginKind, Preferences, ThemeChoice, UI_SCALES,
+    AUTOSAVE_MINUTES, AudioChoice, LayoutChoice, PluginKind, Preferences, ThemeChoice, UI_SCALES,
 };
 use crate::state::{PlatformRequest, PrefsPage, TextField};
 
@@ -52,6 +52,9 @@ impl App {
         }
         if all || prefs.theme != before.theme {
             self.apply_theme();
+        }
+        if all || prefs.layout != before.layout {
+            self.apply_layout();
         }
         if all || (prefs.mcp_http, prefs.mcp_http_port) != (before.mcp_http, before.mcp_http_port) {
             self.apply_mcp_http();
@@ -141,6 +144,16 @@ impl App {
                         ThemeChoice::System => ThemeChoice::Dark,
                         ThemeChoice::Dark => ThemeChoice::Light,
                         ThemeChoice::Light => ThemeChoice::System,
+                    }
+                });
+                Ok(())
+            }
+            ["prefs", "layout"] => {
+                self.change_preferences(|p| {
+                    p.layout = match p.layout {
+                        LayoutChoice::Standard => LayoutChoice::MultiMonitor,
+                        LayoutChoice::MultiMonitor => LayoutChoice::Widescreen,
+                        LayoutChoice::Widescreen => LayoutChoice::Standard,
                     }
                 });
                 Ok(())

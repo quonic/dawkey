@@ -14,6 +14,7 @@ mod confirm;
 mod export;
 mod input;
 mod mcp_http;
+mod multi_window;
 mod picker;
 mod plugin_input;
 mod prefs;
@@ -46,7 +47,8 @@ pub use mcp_http::{
     DEFAULT_MCP_PORT, McpEndpoint, McpHttpServer, McpHttpState, default_token_path,
     load_or_create_token, mcp_url, new_token, tokens_match,
 };
-pub use prefs::{AudioChoice, PluginKind, Preferences, ThemeChoice};
+pub use multi_window::{MonitorInfo, ViewRole, WIDESCREEN_ROLES, plan_windows};
+pub use prefs::{AudioChoice, LayoutChoice, PluginKind, Preferences, ThemeChoice};
 pub use state::{
     ExportRange, ExportSettings, ImportRequest, Marker, Page, PendingAction, PlatformRequest,
     RollLane, ViewState,

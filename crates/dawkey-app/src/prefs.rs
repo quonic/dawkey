@@ -29,6 +29,9 @@ pub struct Preferences {
     pub autosave: bool,
     pub autosave_minutes: u32,
     pub theme: ThemeChoice,
+    /// One window with a page switcher, a window per monitor, or Arrange,
+    /// Rack and Mixer side by side in one window.
+    pub layout: LayoutChoice,
     /// Scales the whole window on top of the desktop's scale.
     pub ui_scale: f32,
     /// Folders to look for plugins in besides the standard ones.
@@ -56,6 +59,7 @@ impl Default for Preferences {
             autosave: true,
             autosave_minutes: 2,
             theme: ThemeChoice::System,
+            layout: LayoutChoice::Standard,
             ui_scale: 1.0,
             clap_folders: Vec::new(),
             lv2_folders: Vec::new(),
@@ -84,6 +88,21 @@ pub enum ThemeChoice {
     System,
     Dark,
     Light,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutChoice {
+    /// One window; Arrange, Mixer, Rack, Piano Roll and the Step Sequencer
+    /// switch in and out of it.
+    Standard,
+    /// A window per detected monitor: Arrange and a combined Mixer+Rack with
+    /// two monitors, or Arrange, Rack and Mixer with three or more. Falls
+    /// back to `Standard` with fewer than two monitors.
+    MultiMonitor,
+    /// Arrange, Rack and Mixer side by side in one window, for an ultra-wide
+    /// monitor.
+    Widescreen,
 }
 
 /// A kind of plugin folder.
