@@ -457,6 +457,66 @@ fn delete_removes_every_selected_clip() {
 }
 
 #[test]
+fn dragging_one_of_several_selected_clips_moves_the_group() {
+    let mut app = app();
+    let (track_a, clip_a) = add_clip(&mut app, 0.0);
+    let (track_b, clip_b) = add_clip(&mut app, 0.0);
+    let (track_c, _) = add_clip(&mut app, 10.0);
+    click(&mut app, &format!("clip/{clip_a}")).unwrap();
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    app.click(&format!("clip/{clip_b}"), MouseButton::Left, shift)
+        .unwrap();
+
+    // Horizontal only: dragging clip_a right by 1 s (80 px at the
+    // default zoom) moves clip_b by the same amount, on its own track.
+    app.drag(
+        DragFrom::Widget(format!("clip/{clip_a}")),
+        Point::new(80.0, 0.0),
+        4,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert_eq!(clip_start_s(&app, clip_a), 1.0);
+    assert_eq!(clip_start_s(&app, clip_b), 1.0);
+    assert_eq!(
+        app.studio
+            .session()
+            .project()
+            .clip(ClipId(clip_b))
+            .unwrap()
+            .0
+            .id
+            .0,
+        track_b
+    );
+
+    // Vertical: dragging clip_a down one row carries clip_b down one row
+    // too, onto the next track over.
+    app.drag(
+        DragFrom::Widget(format!("clip/{clip_a}")),
+        Point::new(0.0, crate::state::LANE_H),
+        4,
+        Modifiers::default(),
+    )
+    .unwrap();
+    let project = app.studio.session().project();
+    assert_eq!(project.clip(ClipId(clip_a)).unwrap().0.id.0, track_b);
+    assert_eq!(project.clip(ClipId(clip_b)).unwrap().0.id.0, track_c);
+    assert!(
+        project
+            .track(dawkey_core::TrackId(track_a))
+            .unwrap()
+            .clips
+            .is_empty()
+    );
+    // Still one undo step for the whole group.
+    assert_eq!(app.studio.session().undo_label(), Some("move_clips"));
+}
+
+#[test]
 fn mixer_faders_and_pan() {
     let mut app = app();
     let (track, _) = add_clip(&mut app, 0.0);

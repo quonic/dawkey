@@ -2,9 +2,10 @@
 //! The arrange view: track headers on the left; a ruler, track lanes with
 //! clips and waveforms, and the playhead on the right.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use dawkey_core::TrackKind;
+use dawkey_core::{ClipId, TrackId, TrackKind};
 use dawkey_ui::{
     Align, Color, Cursor, FontFamily, FontWeight, Insets, Node, Paint, Point, Rect, Role, Sizing,
     TextAlign, UiState,
@@ -457,17 +458,34 @@ fn timeline(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
         );
     }
     let layout = rows(model, view);
+    // Dragging one of several selected clips: every member's preview
+    // track and position, keyed by clip.
+    let group_preview: Option<HashMap<ClipId, (TrackId, f64)>> = match &view.gesture {
+        Some(Gesture::GroupMove {
+            members,
+            delta_s,
+            delta_rows,
+            ..
+        }) => Some(
+            members
+                .iter()
+                .filter_map(|&(clip, idx, start_s)| {
+                    let new_idx = usize::try_from(idx as i32 + delta_rows).ok()?;
+                    let track = model.tracks.get(new_idx)?;
+                    Some((clip, (track.id, start_s + delta_s)))
+                })
+                .collect(),
+        ),
+        _ => None,
+    };
     for (i, track) in model.tracks.iter().enumerate() {
         let (top, takes, shown) = layout[i];
         let y = top - view.scroll_y;
-        lanes = lanes.child(
-            lane(model, view, ui, track, i, takes > 0).absolute(Rect::new(
-                0.0,
-                y,
-                LANES_EXTENT,
-                LANE_H - 1.0,
-            )),
-        );
+        lanes =
+            lanes.child(
+                lane(model, view, ui, track, i, takes > 0, group_preview.as_ref())
+                    .absolute(Rect::new(0.0, y, LANES_EXTENT, LANE_H - 1.0)),
+            );
         for k in 0..takes {
             let ly = y + LANE_H + k as f32 * TAKE_H;
             lanes = lanes.child(take_lane(model, view, ui, track, i, k).absolute(Rect::new(
@@ -519,6 +537,42 @@ fn timeline(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
                 *preview_start_s,
                 Look::Moving,
             );
+            lanes = lanes.child(
+                Node::row()
+                    .absolute(Rect::new(0.0, y, LANES_EXTENT, LANE_H - 1.0))
+                    .child(node),
+            );
+        }
+    }
+    // Group members moving to a different track are drawn in their
+    // target lane too; one staying on its own track is drawn inline by
+    // `lane` instead.
+    if let Some(Gesture::GroupMove {
+        members,
+        delta_s,
+        delta_rows,
+        ..
+    }) = &view.gesture
+    {
+        for &(clip, idx, start_s) in members {
+            let Ok(new_idx) = usize::try_from(idx as i32 + delta_rows) else {
+                continue;
+            };
+            if new_idx == idx {
+                continue;
+            }
+            let Some(c) = model
+                .tracks
+                .get(idx)
+                .and_then(|t| t.clips.iter().find(|c| c.id == clip))
+            else {
+                continue;
+            };
+            let Some(&(top, ..)) = layout.get(new_idx) else {
+                continue;
+            };
+            let y = top - view.scroll_y;
+            let node = clip_node(model, view, ui, c, idx, start_s + delta_s, Look::Moving);
             lanes = lanes.child(
                 Node::row()
                     .absolute(Rect::new(0.0, y, LANES_EXTENT, LANE_H - 1.0))
@@ -690,6 +744,7 @@ fn lane(
     track: &TrackView,
     index: usize,
     comp_only: bool,
+    group_preview: Option<&HashMap<ClipId, (TrackId, f64)>>,
 ) -> Node {
     let bg = if index.is_multiple_of(2) {
         pal().lane_a
@@ -725,6 +780,23 @@ fn lane(
         .filter(|c| !(comp_only && c.muted))
         .flat_map(|c| {
             let mut nodes = Vec::new();
+            // Being dragged as part of a multi-selection: drawn here only
+            // if it hasn't also moved to a different track (then the
+            // overlay in `timeline` draws it there instead).
+            if let Some(&(target_track, new_start)) = group_preview.and_then(|m| m.get(&c.id)) {
+                if target_track == track.id {
+                    nodes.push(clip_node(
+                        model,
+                        view,
+                        ui,
+                        c,
+                        index,
+                        new_start,
+                        Look::Moving,
+                    ));
+                }
+                return nodes;
+            }
             match (dragged, trimmed) {
                 // Copying: the clip stays.
                 (Some((id, to, start, true)), _) if id == c.id => {

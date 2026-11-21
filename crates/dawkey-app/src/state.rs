@@ -99,6 +99,24 @@ pub(crate) enum Gesture {
         /// Ctrl is held: the clip stays and a copy goes there.
         copy: bool,
     },
+    /// Dragging one of several selected clips moves them all together,
+    /// keeping their positions relative to each other and to each
+    /// other's track; committed as one `move_clip` per clip, batched into
+    /// a single undo step, on release. Doesn't avoid overlapping other
+    /// clips (unlike a single `Clip` move).
+    GroupMove {
+        /// The clip grabbed; dragging it defines the group's motion.
+        anchor: ClipId,
+        /// Pointer time minus the anchor's start when the drag began.
+        grab_s: f64,
+        /// Every selected clip, with its track's index into
+        /// `Project::tracks` and its start when the drag began.
+        members: Vec<(ClipId, usize, f64)>,
+        /// How far the group has moved so far: seconds, and track rows
+        /// (clamped so every member stays on a track of its own kind).
+        delta_s: f64,
+        delta_rows: i32,
+    },
     /// Dragging across a take lane: on release, one `comp_take` makes the
     /// lane play over the range.
     Comp {
@@ -612,9 +630,11 @@ pub struct ViewState {
     pub selected_clip: Option<ClipId>,
     /// Every clip selected in the arrange view, including `selected_clip`
     /// (its most recently touched one, used for single-target actions
-    /// like rename or split): a click replaces it, Shift or Ctrl toggles
-    /// a clip in or out, and dragging a rectangle over empty timeline adds
-    /// every clip it touches.
+    /// like rename or split): a click replaces it, Shift toggles a clip
+    /// in or out (Ctrl is reserved for dragging a copy of a clip), and
+    /// dragging a rectangle over empty timeline adds every clip it
+    /// touches. Dragging one of several selected clips moves them all
+    /// together.
     pub selected_clips: Vec<ClipId>,
     /// The clip Ctrl+C copied, which Ctrl+V pastes.
     pub clipboard: Option<ClipId>,

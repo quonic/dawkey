@@ -417,6 +417,72 @@ impl App {
                 });
                 Ok(())
             }
+            Gesture::GroupMove {
+                anchor,
+                grab_s,
+                members,
+                ..
+            } => {
+                let project = self.studio.session().project();
+                let anchor_start = members
+                    .iter()
+                    .find(|&&(id, ..)| id == anchor)
+                    .map_or(0.0, |&(_, _, s)| s);
+                let anchor_idx = members
+                    .iter()
+                    .find(|&&(id, ..)| id == anchor)
+                    .map_or(0, |&(_, idx, _)| idx);
+                let mut new_anchor_start = (self.time_at(pos.x) - grab_s).max(0.0);
+                if self.view.snap && !modifiers.shift {
+                    new_anchor_start = snap(project, new_anchor_start);
+                }
+                let delta_s = new_anchor_start - anchor_start;
+                let target_idx = self
+                    .track_at(pos.y)
+                    .and_then(|t| project.tracks.iter().position(|pt| pt.id == t));
+                let mut delta_rows = target_idx.map_or(0, |t| t as i32 - anchor_idx as i32);
+                // Clamp toward zero until every member lands on a track
+                // of its own kind (or off the end, which keeps it put).
+                while delta_rows != 0
+                    && !members.iter().all(|&(id, idx, _)| {
+                        usize::try_from(idx as i32 + delta_rows).is_ok_and(|new_idx| {
+                            project.tracks.get(new_idx).map(|t| t.kind) == self.clip_kind(id)
+                        })
+                    })
+                {
+                    delta_rows -= delta_rows.signum();
+                }
+                if end {
+                    self.view.gesture = None;
+                    let mut commands = Vec::new();
+                    for &(id, idx, start_s) in &members {
+                        let Ok(new_idx) = usize::try_from(idx as i32 + delta_rows) else {
+                            continue;
+                        };
+                        let Some(new_track) = project.tracks.get(new_idx).map(|t| t.id) else {
+                            continue;
+                        };
+                        let current_track = project.clip(id).map(|(t, _)| t.id);
+                        commands.push(
+                            MoveClip {
+                                clip: id,
+                                position_s: Some((start_s + delta_s).max(0.0)),
+                                track: (Some(new_track) != current_track).then_some(new_track),
+                            }
+                            .into(),
+                        );
+                    }
+                    return self.execute_batch("move_clips", commands);
+                }
+                self.view.gesture = Some(Gesture::GroupMove {
+                    anchor,
+                    grab_s,
+                    members,
+                    delta_s,
+                    delta_rows,
+                });
+                Ok(())
+            }
             Gesture::TrimClip { .. } => self.on_trim_drag(gesture, pos, end, modifiers),
             Gesture::Repeat { .. } => self.on_repeat_drag(gesture, pos, end, modifiers),
             Gesture::Fader {
@@ -724,18 +790,40 @@ impl App {
                 let start = project.frames_to_seconds(c.start);
                 let preview_track = track.id;
                 // Grabbing a clip already in a multi-selection keeps the
-                // whole selection; grabbing any other one selects just it.
+                // whole selection and moves it as a group; grabbing any
+                // other one selects just it.
                 if !self.view.selected_clips.contains(&clip) {
                     self.select_clip(clip, modifiers);
                 }
                 self.view.selected_marker = None;
-                Some(Gesture::Clip {
-                    clip,
-                    grab_s: self.time_at(origin.x) - start,
-                    preview_start_s: start,
-                    preview_track,
-                    copy: modifiers.ctrl,
-                })
+                if self.view.selected_clips.len() > 1 {
+                    let project = self.studio.session().project();
+                    let members: Vec<(ClipId, usize, f64)> = self
+                        .view
+                        .selected_clips
+                        .iter()
+                        .filter_map(|&id| {
+                            let (t, c) = project.clip(id)?;
+                            let idx = project.tracks.iter().position(|pt| pt.id == t.id)?;
+                            Some((id, idx, project.frames_to_seconds(c.start)))
+                        })
+                        .collect();
+                    Some(Gesture::GroupMove {
+                        anchor: clip,
+                        grab_s: self.time_at(origin.x) - start,
+                        members,
+                        delta_s: 0.0,
+                        delta_rows: 0,
+                    })
+                } else {
+                    Some(Gesture::Clip {
+                        clip,
+                        grab_s: self.time_at(origin.x) - start,
+                        preview_start_s: start,
+                        preview_track,
+                        copy: modifiers.ctrl,
+                    })
+                }
             }
             ["track", track, "fader"] => {
                 let track = parse_track(track)?;
@@ -1061,6 +1149,20 @@ impl App {
             .map_err(|e| e.to_string())
     }
 
+    /// Runs several commands as one undo step (see
+    /// [`Session::execute_batch`](dawkey_core::Session::execute_batch)).
+    pub(crate) fn execute_batch(
+        &mut self,
+        label: &str,
+        commands: Vec<Command>,
+    ) -> Result<(), String> {
+        let mut commands = commands.into_iter();
+        self.studio
+            .execute_batch_with(label, |_, _| Ok(commands.next()))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// Saves over the project's own file, or asks where if it doesn't have
     /// one yet.
     pub(crate) fn save_project(&mut self) -> Result<(), String> {
@@ -1185,10 +1287,13 @@ impl App {
     }
 
     /// Selects clip `clip` in the arrange view: a plain click replaces
-    /// the selection with just it; Shift or Ctrl toggles it in the
-    /// multi-selection instead.
+    /// the selection with just it; Shift toggles it in the
+    /// multi-selection instead (Ctrl is reserved for dragging a copy of
+    /// a clip).
     pub(crate) fn select_clip(&mut self, clip: ClipId, modifiers: Modifiers) {
-        if modifiers.shift || modifiers.ctrl {
+        // Ctrl is reserved for dragging a copy of a clip, so only Shift
+        // toggles it in the multi-selection here.
+        if modifiers.shift {
             if let Some(pos) = self.view.selected_clips.iter().position(|&c| c == clip) {
                 self.view.selected_clips.remove(pos);
             } else {
