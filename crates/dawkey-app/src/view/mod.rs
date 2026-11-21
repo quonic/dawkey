@@ -402,7 +402,7 @@ pub(crate) fn build(
             }
         });
     if window.csd {
-        frame = frame.child(titlebar(model, ui, window, radius));
+        frame = frame.child(titlebar(model, view, ui, window, radius));
     }
     let top = if window.csd { TITLEBAR_HEIGHT } else { 0.0 };
     let area = dawkey_ui::Rect::new(
@@ -448,7 +448,13 @@ pub(crate) fn window_title(name: &str, dirty: bool) -> String {
     format!("{}{name} — Dawkey", if dirty { "• " } else { "" })
 }
 
-fn titlebar(model: &ViewModel, ui: &UiState, window: &WindowInfo, radius: f32) -> Node {
+fn titlebar(
+    model: &ViewModel,
+    view: &ViewState,
+    ui: &UiState,
+    window: &WindowInfo,
+    radius: f32,
+) -> Node {
     let active = window.activated;
     let fg = if active { pal().text } else { pal().text_dim };
     let maximize_icon = if window.maximized {
@@ -482,12 +488,16 @@ fn titlebar(model: &ViewModel, ui: &UiState, window: &WindowInfo, radius: f32) -
             s.radius = [5.0; 4];
         }))
         .child(
-            Node::label(window_title(&model.title, model.dirty))
-                .id("window/title")
-                .style(|s| {
-                    s.color = fg;
-                    s.weight = FontWeight::SemiBold;
-                }),
+            // Double-click to rename the project.
+            name_editor(&TextField::ProjectName, "Project name", view, ui).unwrap_or_else(|| {
+                Node::label(window_title(&model.title, model.dirty))
+                    .id("window/title")
+                    .clickable()
+                    .style(|s| {
+                        s.color = fg;
+                        s.weight = FontWeight::SemiBold;
+                    })
+            }),
         )
         .child(Node::spacer())
         .child(window_button(
@@ -1034,6 +1044,30 @@ fn statusbar(model: &ViewModel, ui: &UiState, radius: [f32; 4]) -> Node {
                 .id("status/engine")
                 .style(small),
         )
+        .child(status_button(
+            "status/new_project",
+            "New project",
+            "New",
+            ui,
+        ))
+        .child(status_button(
+            "status/open_project",
+            "Open a project",
+            "Open…",
+            ui,
+        ))
+        .child(status_button(
+            "status/save_project",
+            "Save the project",
+            "Save",
+            ui,
+        ))
+        .child(status_button(
+            "status/close_project",
+            "Close the project",
+            "Close",
+            ui,
+        ))
         .child(Node::spacer());
     if let Some((name, done)) = &model.exporting {
         bar = bar
@@ -1063,16 +1097,24 @@ fn statusbar(model: &ViewModel, ui: &UiState, radius: [f32; 4]) -> Node {
         );
     }
     bar.child(Node::label(project).id("status/project").style(small))
-        .child(
-            button("status/preferences", "Preferences", ui, None)
-                .text("Preferences")
-                .padding(Insets::xy(8.0, 0.0))
-                .height(Sizing::Fixed(20.0))
-                .style(|s| {
-                    s.font_size = 11.0;
-                    s.color = pal().text_dim;
-                }),
-        )
+        .child(status_button(
+            "status/preferences",
+            "Preferences",
+            "Preferences",
+            ui,
+        ))
+}
+
+/// A small text button for the status bar, like `status/preferences`.
+fn status_button(id: &'static str, description: &'static str, text: &str, ui: &UiState) -> Node {
+    button(id, description, ui, None)
+        .text(text)
+        .padding(Insets::xy(8.0, 0.0))
+        .height(Sizing::Fixed(20.0))
+        .style(|s| {
+            s.font_size = 11.0;
+            s.color = pal().text_dim;
+        })
 }
 
 /// "92.5" for 92.5, "100" for 100.
