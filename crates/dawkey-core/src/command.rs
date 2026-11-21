@@ -3418,6 +3418,10 @@ pub enum RackPreset {
     Acoustic,
     Bass,
     BassDrive,
+    Funk,
+    Reggae,
+    FunkDrive,
+    Psychedelic,
 }
 
 /// Mount a curated studio guitar effects rack preset onto a track (replaces
@@ -3910,6 +3914,149 @@ fn preset_chain(preset: RackPreset) -> Vec<(&'static str, Vec<(&'static str, f64
                     ("low_cut", 35.0),
                     ("high_cut", 5000.0),
                 ],
+            ),
+        ],
+        // Clean touch-wah: no drive or amp dirt, just the envelope filter
+        // quacking over a clean tone.
+        RackPreset::Funk => vec![
+            (
+                "builtin:comp",
+                vec![("threshold", -22.0), ("ratio", 4.0), ("makeup", 2.0)],
+            ),
+            (
+                "builtin:autowah",
+                vec![
+                    ("sensitivity", 70.0),
+                    ("freq_low", 280.0),
+                    ("freq_high", 2600.0),
+                    ("q", 3.5),
+                    ("attack", 2.0),
+                    ("release", 90.0),
+                    ("direction", 0.0),
+                ],
+            ),
+            (
+                "builtin:amp",
+                vec![
+                    ("channel", 0.0),
+                    ("gain", 3.0),
+                    ("treble", 6.0),
+                    ("presence", 5.5),
+                ],
+            ),
+            ("builtin:cab", vec![("cabinet", 1.0), ("mic", 0.0)]),
+        ],
+        // A mellower, slower clean wah with chorus and a touch of reverb.
+        RackPreset::Reggae => vec![
+            (
+                "builtin:comp",
+                vec![("threshold", -24.0), ("ratio", 3.0), ("makeup", 2.0)],
+            ),
+            (
+                "builtin:autowah",
+                vec![
+                    ("sensitivity", 55.0),
+                    ("freq_low", 220.0),
+                    ("freq_high", 1600.0),
+                    ("q", 2.5),
+                    ("attack", 6.0),
+                    ("release", 220.0),
+                    ("direction", 0.0),
+                    ("mix", 85.0),
+                ],
+            ),
+            (
+                "builtin:amp",
+                vec![
+                    ("channel", 0.0),
+                    ("gain", 2.5),
+                    ("bass", 6.0),
+                    ("treble", 5.0),
+                ],
+            ),
+            (
+                "builtin:chorus",
+                vec![("rate", 0.5), ("depth", 35.0), ("mix", 25.0)],
+            ),
+            (
+                "builtin:reverb",
+                vec![("mode", 1.0), ("decay", 1.8), ("mix", 18.0)],
+            ),
+        ],
+        // Wah into overdrive: the envelope filter shapes the signal before
+        // it hits the dirt, like a wah pedal in front of a driven amp.
+        RackPreset::FunkDrive => vec![
+            ("builtin:gate", vec![("threshold", -44.0)]),
+            (
+                "builtin:autowah",
+                vec![
+                    ("sensitivity", 65.0),
+                    ("freq_low", 300.0),
+                    ("freq_high", 2400.0),
+                    ("q", 3.0),
+                    ("attack", 2.5),
+                    ("release", 100.0),
+                    ("direction", 0.0),
+                ],
+            ),
+            (
+                "builtin:drive",
+                vec![("drive", 3.5), ("tone", 5.5), ("tight", 1.0), ("mix", 80.0)],
+            ),
+            (
+                "builtin:amp",
+                vec![
+                    ("channel", 1.0),
+                    ("gain", 5.5),
+                    ("mid", 6.5),
+                    ("treble", 6.0),
+                ],
+            ),
+            ("builtin:cab", vec![("cabinet", 2.0), ("mic", 0.0)]),
+        ],
+        // Hendrix-style fuzz-wah: the wah comes after the dirt for a
+        // resonant, vocal sweep, with a wide high-Q range and the filter
+        // opening on quiet passages (Down) for a more unpredictable swirl.
+        RackPreset::Psychedelic => vec![
+            ("builtin:gate", vec![("threshold", -40.0)]),
+            (
+                "builtin:drive",
+                vec![
+                    ("drive", 7.5),
+                    ("tone", 6.0),
+                    ("tight", 0.0),
+                    ("mix", 100.0),
+                ],
+            ),
+            (
+                "builtin:autowah",
+                vec![
+                    ("sensitivity", 75.0),
+                    ("freq_low", 350.0),
+                    ("freq_high", 3200.0),
+                    ("q", 6.0),
+                    ("attack", 3.0),
+                    ("release", 140.0),
+                    ("direction", 1.0),
+                ],
+            ),
+            (
+                "builtin:amp",
+                vec![
+                    ("channel", 2.0),
+                    ("gain", 7.0),
+                    ("mid", 6.0),
+                    ("treble", 6.5),
+                    ("presence", 6.0),
+                ],
+            ),
+            (
+                "builtin:delay",
+                vec![("sync", 2.0), ("feedback", 30.0), ("mix", 20.0)],
+            ),
+            (
+                "builtin:reverb",
+                vec![("mode", 2.0), ("decay", 3.5), ("mix", 25.0)],
             ),
         ],
     }

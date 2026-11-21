@@ -211,6 +211,10 @@ impl App {
                     "acoustic" => RackPreset::Acoustic,
                     "bass" => RackPreset::Bass,
                     "bass_drive" => RackPreset::BassDrive,
+                    "funk" => RackPreset::Funk,
+                    "reggae" => RackPreset::Reggae,
+                    "funk_drive" => RackPreset::FunkDrive,
+                    "psychedelic" => RackPreset::Psychedelic,
                     _ => return None,
                 };
                 let track = self.rack_track();

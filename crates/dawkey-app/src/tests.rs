@@ -3698,6 +3698,10 @@ fn more_rack_presets_and_saving_your_own() {
         ("acoustic", "builtin:gate"),
         ("bass", "builtin:gate"),
         ("bass_drive", "builtin:gate"),
+        ("funk", "builtin:comp"),
+        ("reggae", "builtin:comp"),
+        ("funk_drive", "builtin:gate"),
+        ("psychedelic", "builtin:gate"),
     ] {
         click(&mut app, &format!("rack/preset/{id}")).unwrap();
         let plugins = &app
