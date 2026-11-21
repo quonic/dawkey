@@ -4721,6 +4721,230 @@ fn multi_select_tracks_and_mixdown_from_context_menu() {
 }
 
 #[test]
+fn select_all_clips_from_the_context_menu() {
+    let mut app = app();
+    let (t1, clip_a) = add_clip(&mut app, 0.0);
+    let clip_b = app
+        .studio
+        .execute(
+            AddClip::new(
+                app.studio
+                    .session()
+                    .project()
+                    .clip(ClipId(clip_a))
+                    .unwrap()
+                    .1
+                    .source()
+                    .unwrap(),
+                Some(TrackId(t1)),
+                4.0,
+            )
+            .into(),
+        )
+        .unwrap()
+        .clip
+        .unwrap()
+        .0;
+    app.rebuild();
+
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/select_all_clips").unwrap();
+
+    let mut selected = app.view_state().selected_clips.clone();
+    selected.sort();
+    assert_eq!(selected, [ClipId(clip_a), ClipId(clip_b)]);
+    assert!(app.view_state().track_menu.is_none());
+}
+
+#[test]
+fn rename_from_the_context_menu_opens_the_track_name_editor() {
+    let mut app = app();
+    let (t1, _) = add_clip(&mut app, 0.0);
+
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/rename").unwrap();
+
+    assert!(app.editing(&crate::state::TextField::TrackName(TrackId(t1))));
+    assert!(app.view_state().track_menu.is_none());
+}
+
+#[test]
+fn duplicate_track_from_the_context_menu() {
+    let mut app = app();
+    let (t1, clip) = add_clip(&mut app, 0.0);
+
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/duplicate").unwrap();
+
+    let project = app.studio.session().project();
+    assert_eq!(project.tracks.len(), 2);
+    assert_eq!(project.tracks[0].id, TrackId(t1));
+    let copy = project.tracks[1].id;
+    assert_eq!(
+        project.tracks[1].name,
+        format!("{} copy", project.tracks[0].name)
+    );
+    assert_eq!(project.tracks[1].clips.len(), 1);
+    assert_ne!(project.tracks[1].clips[0].id, ClipId(clip));
+    // The new track is selected, in place of the one right-clicked.
+    assert_eq!(app.view_state().selected_tracks, vec![copy]);
+    assert_eq!(app.studio.session().undo_label(), Some("duplicate_track"));
+}
+
+#[test]
+fn insert_track_above_and_below_from_the_context_menu() {
+    let mut app = app();
+    let (t1, _) = add_clip(&mut app, 0.0);
+
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/insert_below").unwrap();
+    let project = app.studio.session().project();
+    assert_eq!(project.tracks.len(), 2);
+    assert_eq!(project.tracks[0].id, TrackId(t1));
+    assert_eq!(project.tracks[1].kind, TrackKind::Audio);
+
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/insert_above").unwrap();
+    let project = app.studio.session().project();
+    assert_eq!(project.tracks.len(), 3);
+    assert_eq!(project.tracks[1].id, TrackId(t1));
+}
+
+#[test]
+fn change_output_from_the_context_menu() {
+    let mut app = app();
+    let (t1, _) = add_clip(&mut app, 0.0);
+    let bus = app
+        .studio
+        .execute(
+            AddTrack {
+                name: Some("FX Bus".into()),
+                kind: TrackKind::Bus,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+    app.rebuild();
+
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/output").unwrap();
+    assert!(app.view_state().track_menu.is_none());
+    assert!(app.ui.find("track_popup").is_some());
+
+    click(&mut app, &format!("track_popup/output/bus/{bus}")).unwrap();
+    assert_eq!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(t1))
+            .unwrap()
+            .output,
+        Some(TrackId(bus))
+    );
+    assert!(app.view_state().track_popup.is_none());
+
+    // Back to Master.
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/output").unwrap();
+    click(&mut app, "track_popup/output/master").unwrap();
+    assert_eq!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(t1))
+            .unwrap()
+            .output,
+        None
+    );
+}
+
+#[test]
+fn color_from_the_context_menu() {
+    let mut app = app();
+    let (t1, _) = add_clip(&mut app, 0.0);
+
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/color").unwrap();
+    assert!(app.view_state().track_menu.is_none());
+    assert!(app.ui.find("track_popup").is_some());
+
+    click(&mut app, "track_popup/color/swatch/2").unwrap();
+    assert_eq!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(t1))
+            .unwrap()
+            .color,
+        Some(crate::theme::TRACK_COLOR_HEX[2])
+    );
+    assert!(app.view_state().track_popup.is_none());
+
+    // Default clears it.
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/color").unwrap();
+    click(&mut app, "track_popup/color/default").unwrap();
+    assert_eq!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(t1))
+            .unwrap()
+            .color,
+        None
+    );
+}
+
+#[test]
 fn delete_track_context_menu_archives_by_default_and_can_permanently_delete() {
     let dir = tempfile::tempdir().unwrap();
     let rec_dir = dir.path().join("recordings");

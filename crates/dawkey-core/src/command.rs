@@ -126,6 +126,7 @@ macro_rules! commands {
 
 commands! {
     AddTrack => "add_track", Additive;
+    DuplicateTrack => "duplicate_track", Additive;
     AddGuitarTrack => "add_guitar_track", Additive;
     RemoveTrack => "remove_track", Destructive;
     DeleteTracks => "delete_tracks", Destructive;
@@ -133,6 +134,7 @@ commands! {
     ArchiveTracksForMixdown => "archive_tracks_for_mixdown", Destructive;
     RestoreMixdownTracks => "restore_mixdown_tracks", Additive;
     RenameTrack => "rename_track", Setter;
+    SetTrackColor => "set_track_color", Setter;
     SetTrackGain => "set_track_gain", Setter;
     SetTrackPan => "set_track_pan", Setter;
     SetTrackMute => "set_track_mute", Setter;
@@ -231,6 +233,118 @@ impl AddTrack {
         let track = Track::new(id, name, self.kind);
         Ok((vec![Edit::InsertTrack { index, track }], Outcome::track(id)))
     }
+}
+
+/// Copy a track — its clips, plugins and automation, fader/pan/mute/solo,
+/// routing, and synth or MIDI device settings — to a new track right after
+/// it (or at `index`). Not armed, even if the source is. The master can't
+/// be duplicated. Returns the new track's ID; its plugin slots come back in
+/// `plugins`, in the same order as the source track's own, so a plugin's
+/// saved state (set_plugin_property and the like, which this command
+/// doesn't copy) can be carried over to the matching new slot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicateTrack {
+    pub track: TrackId,
+    /// Position in the track list (0 = top). Defaults to right after the
+    /// source track.
+    #[serde(default)]
+    pub index: Option<usize>,
+}
+
+impl DuplicateTrack {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        require_not_master(project, self.track, "duplicated")?;
+        let source = project
+            .track(self.track)
+            .ok_or(CoreError::TrackNotFound(self.track))?
+            .clone();
+        let index = match self.index {
+            Some(index) => index,
+            None => project.track_index(self.track).expect("checked above") + 1,
+        };
+        let id = project.alloc_track_id();
+        let name = duplicate_track_name(project, &source.name);
+
+        let clips = source
+            .clips
+            .iter()
+            .map(|clip| {
+                let mut copy = Clip {
+                    id: project.alloc_clip_id(),
+                    ..clip.clone()
+                };
+                if let ClipContent::Midi { notes, .. } = &mut copy.content {
+                    for note in notes {
+                        note.id = project.alloc_note_id();
+                    }
+                }
+                copy
+            })
+            .collect();
+
+        let plugins: Vec<PluginSlot> = source
+            .plugins
+            .iter()
+            .map(|slot| PluginSlot {
+                id: project.alloc_plugin_id(),
+                ..slot.clone()
+            })
+            .collect();
+        let plugin_ids: Vec<PluginId> = plugins.iter().map(|p| p.id).collect();
+        let old_to_new: BTreeMap<PluginId, PluginId> = source
+            .plugins
+            .iter()
+            .map(|slot| slot.id)
+            .zip(plugin_ids.iter().copied())
+            .collect();
+        let automation = source
+            .automation
+            .iter()
+            .map(|lane| {
+                let target = match &lane.target {
+                    AutomationTarget::Param { plugin, param } => AutomationTarget::Param {
+                        plugin: old_to_new.get(plugin).copied().unwrap_or(*plugin),
+                        param: param.clone(),
+                    },
+                    other => other.clone(),
+                };
+                AutomationLane {
+                    target,
+                    points: lane.points.clone(),
+                }
+            })
+            .collect();
+
+        let track = Track {
+            id,
+            name,
+            armed: false,
+            clips,
+            plugins,
+            automation,
+            ..source
+        };
+        Ok((
+            vec![Edit::InsertTrack { index, track }],
+            Outcome {
+                track: Some(id),
+                plugins: plugin_ids,
+                ..Outcome::default()
+            },
+        ))
+    }
+}
+
+fn duplicate_track_name(project: &Project, base: &str) -> String {
+    let once = format!("{base} copy");
+    if project.tracks.iter().all(|t| t.name != once) {
+        return once;
+    }
+    (2..)
+        .map(|n| format!("{base} copy {n}"))
+        .find(|name| project.tracks.iter().all(|t| &t.name != name))
+        .expect("unbounded range always yields a free name")
 }
 
 /// Adds an audio track already set up to monitor a single instrument live:
@@ -1042,6 +1156,24 @@ impl RenameTrack {
         require_not_master(project, self.track, "renamed")?;
         let name = validate_name(&self.name)?;
         Ok(set_track(self.track, TrackProp::Name(name)))
+    }
+}
+
+/// Set a track's own color override in the arrange and mixer views, as
+/// packed 0xRRGGBB (e.g. 0x4c8dff); omit to go back to the automatic color
+/// cycled by the track's position.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetTrackColor {
+    pub track: TrackId,
+    #[serde(default)]
+    pub color: Option<u32>,
+}
+
+impl SetTrackColor {
+    fn lower(self, project: &mut Project) -> Result<(Vec<Edit>, Outcome), CoreError> {
+        require_track(project, self.track)?;
+        Ok(set_track(self.track, TrackProp::Color(self.color)))
     }
 }
 

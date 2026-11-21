@@ -876,6 +876,7 @@ impl App {
             id: t.id,
             name: t.name.clone(),
             kind: t.kind,
+            color: t.color.map(dawkey_ui::Color::hex),
             output: t.output,
             output_name: t
                 .output

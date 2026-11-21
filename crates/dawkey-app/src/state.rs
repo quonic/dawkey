@@ -590,6 +590,22 @@ pub struct TrackMenu {
     pub pos: dawkey_ui::Point,
 }
 
+/// A small floating panel anchored on a track, opened from its context menu:
+/// a bus list ("Change Output…") or a color swatch grid ("Color").
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct TrackPopup {
+    pub kind: TrackPopupKind,
+    pub track: TrackId,
+    pub pos: dawkey_ui::Point,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackPopupKind {
+    Output,
+    Color,
+}
+
 /// The confirmation dialog for mixing selected tracks down into one audio
 /// track.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -623,6 +639,8 @@ pub struct ViewState {
     pub(crate) track_anchor: Option<TrackId>,
     /// Open right-click context menu on a track header in the arrange view.
     pub track_menu: Option<TrackMenu>,
+    /// Open "Change Output…" or "Color" popup from the track context menu.
+    pub track_popup: Option<TrackPopup>,
     /// Open confirmation dialog for mixing down selected tracks.
     pub mixdown_confirm: Option<MixdownConfirm>,
     /// Open confirmation dialog for deleting selected tracks.
@@ -840,6 +858,7 @@ impl Default for ViewState {
             selected_tracks: Vec::new(),
             track_anchor: None,
             track_menu: None,
+            track_popup: None,
             mixdown_confirm: None,
             delete_confirm: None,
             selected_clip: None,

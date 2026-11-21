@@ -131,6 +131,11 @@ pub struct Track {
     /// besides `output`. At most one per bus.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sends: Vec<Send>,
+    /// The user's own color for this track in the arrange and mixer views,
+    /// as packed 0xRRGGBB. `None` keeps the automatic color cycled by the
+    /// track's position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
 }
 
 /// An aux send: a copy of a track's signal to a bus, at its own level,
@@ -169,6 +174,7 @@ impl Track {
             plugins: Vec::new(),
             automation: Vec::new(),
             output: None,
+            color: None,
         }
     }
 
@@ -1535,6 +1541,25 @@ mod tests {
         // A clip doesn't get in its own way.
         assert_eq!(track.free_start(120, 100, Some(ClipId(1))), 120);
         assert_eq!(track.free_start(120, 140, Some(ClipId(1))), 110);
+    }
+
+    #[test]
+    fn track_color_round_trips_and_is_left_out_when_unset() {
+        let plain = Track::new(TrackId(1), "T".to_owned(), TrackKind::Audio);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("color"), "{json}");
+        assert_eq!(serde_json::from_str::<Track>(&json).unwrap(), plain);
+
+        let colored = Track {
+            color: Some(0x4c8dff),
+            ..Track::new(TrackId(1), "T".to_owned(), TrackKind::Audio)
+        };
+        let json = serde_json::to_string(&colored).unwrap();
+        assert!(
+            json.contains(&format!("\"color\":{}", 0x4c8dffu32)),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<Track>(&json).unwrap(), colored);
     }
 
     #[test]

@@ -2,13 +2,13 @@
 //! Arrange track header context menu and the Mix Down / Delete Track
 //! confirmation dialogs (with non-destructive archival by default).
 
-use dawkey_core::TrackId;
+use dawkey_core::{TrackId, TrackKind};
 use dawkey_ui::{
     Align, Color, FontWeight, Insets, Justify, Node, Rect, Role, Sizing, TextAlign, UiState,
 };
 
 use super::{ViewModel, button};
-use crate::state::ViewState;
+use crate::state::{TrackPopupKind, ViewState};
 use crate::theme::*;
 
 const MENU_W: f32 = 270.0;
@@ -33,6 +33,11 @@ pub(super) fn menu(model: &ViewModel, view: &ViewState, ui: &UiState, area: Rect
         format!("Delete {selected_count} Tracks…")
     } else {
         "Delete Track…".to_owned()
+    };
+    let select_clips_text = if selected_count > 1 {
+        format!("Select All Clips on {selected_count} Tracks")
+    } else {
+        "Select All Clips".to_owned()
     };
 
     let item = |id: &str, text: String| {
@@ -67,7 +72,7 @@ pub(super) fn menu(model: &ViewModel, view: &ViewState, ui: &UiState, area: Rect
             )
     };
 
-    let items = 2
+    let items = 9
         + usize::from(target.has_mixdown_archive)
         + usize::from(model.deleted_archive_summary.is_some());
     let est_h = items as f32 * 28.0 + (items.saturating_sub(1)) as f32 * 2.0 + 12.0;
@@ -95,6 +100,19 @@ pub(super) fn menu(model: &ViewModel, view: &ViewState, ui: &UiState, area: Rect
             s.radius = [6.0; 4];
             s.shadow = Some(ELEVATION.medium());
         })
+        .child(item("track_menu/rename", "Rename".to_owned()))
+        .child(item("track_menu/duplicate", "Duplicate Track".to_owned()))
+        .child(item("track_menu/color", "Color…".to_owned()))
+        .child(item(
+            "track_menu/insert_above",
+            "Insert Track Above".to_owned(),
+        ))
+        .child(item(
+            "track_menu/insert_below",
+            "Insert Track Below".to_owned(),
+        ))
+        .child(item("track_menu/output", "Change Output…".to_owned()))
+        .child(item("track_menu/select_all_clips", select_clips_text))
         .child(item("track_menu/mixdown", mixdown_text));
 
     if target.has_mixdown_archive {
@@ -119,6 +137,116 @@ pub(super) fn menu(model: &ViewModel, view: &ViewState, ui: &UiState, area: Rect
             .absolute(area)
             .child(panel.absolute(Rect::new(x, y, MENU_W, est_h))),
     )
+}
+
+/// Floating popup anchored at `view.track_popup`, if open: a bus list
+/// ("Change Output…") or a color swatch grid ("Color").
+pub(super) fn popup(model: &ViewModel, view: &ViewState, area: Rect) -> Option<Node> {
+    let popup = view.track_popup?;
+    let buses: Vec<(TrackId, &str)> = model
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Bus && t.id != popup.track)
+        .map(|t| (t.id, t.name.as_str()))
+        .collect();
+    let (w, content): (f32, Node) = match popup.kind {
+        TrackPopupKind::Output => {
+            let mut list = Node::column().gap(2.0).align(Align::Start);
+            list = list.child(popup_item("track_popup/output/master", "Master".to_owned()));
+            for (bus, name) in &buses {
+                list = list.child(popup_item(
+                    &format!("track_popup/output/bus/{bus}"),
+                    name.to_string(),
+                ));
+            }
+            (MENU_W, list)
+        }
+        TrackPopupKind::Color => {
+            let mut grid = Node::row().gap(6.0).align(Align::Start);
+            for (n, color) in TRACK_COLORS.iter().enumerate() {
+                grid = grid.child(
+                    Node::row()
+                        .id(format!("track_popup/color/swatch/{n}"))
+                        .role(Role::Button)
+                        .accessible_label(format!("Color {}", n + 1))
+                        .clickable()
+                        .size(24.0, 24.0)
+                        .style(|s| {
+                            s.background = Some(*color);
+                            s.radius = [4.0; 4];
+                        }),
+                );
+            }
+            let column = Node::column()
+                .gap(SPACING.sm)
+                .align(Align::Start)
+                .child(grid)
+                .child(popup_item(
+                    "track_popup/color/default",
+                    "Default".to_owned(),
+                ));
+            (8.0 * 24.0 + 7.0 * 6.0 + 2.0 * 6.0, column)
+        }
+    };
+    let est_h = match popup.kind {
+        TrackPopupKind::Output => (buses.len() + 1) as f32 * 28.0 + buses.len() as f32 * 2.0 + 12.0,
+        TrackPopupKind::Color => 24.0 + SPACING.sm + 28.0 + 2.0 * SPACING.sm,
+    };
+    let x = popup
+        .pos
+        .x
+        .clamp(area.x + 4.0, (area.right() - w - 4.0).max(area.x + 4.0))
+        - area.x;
+    let y = popup.pos.y.clamp(
+        area.y + 4.0,
+        (area.bottom() - est_h - 4.0).max(area.y + 4.0),
+    ) - area.y;
+    let panel = Node::column()
+        .id("track_popup")
+        .role(Role::Group)
+        .accessible_label("Track popup")
+        .clickable()
+        .width(Sizing::Fixed(w))
+        .padding(Insets::all(6.0))
+        .align(Align::Start)
+        .style(|s| {
+            s.background = Some(pal().panel);
+            s.border = Some((1.0, pal().border));
+            s.radius = [6.0; 4];
+            s.shadow = Some(ELEVATION.medium());
+        })
+        .child(content);
+    Some(
+        Node::row()
+            .id("track_popup/backdrop")
+            .accessible_label("Track popup")
+            .clickable()
+            .scrollable()
+            .absolute(area)
+            .child(panel.absolute(Rect::new(x, y, w, est_h))),
+    )
+}
+
+fn popup_item(id: &str, text: String) -> Node {
+    Node::row()
+        .id(id)
+        .role(Role::Button)
+        .accessible_label(text.clone())
+        .clickable()
+        .width(Sizing::Fill(1.0))
+        .height(Sizing::Fixed(28.0))
+        .padding(Insets::xy(SPACING.lg, 0.0))
+        .style(|s| s.radius = [4.0; 4])
+        .child(
+            Node::label(text)
+                .width(Sizing::Fill(1.0))
+                .clip()
+                .style(|s| {
+                    s.color = pal().text;
+                    s.font_size = 12.0;
+                    s.text_align = TextAlign::Start;
+                }),
+        )
 }
 
 /// Confirmation dialog for mixing down selected tracks into one stereo audio track.

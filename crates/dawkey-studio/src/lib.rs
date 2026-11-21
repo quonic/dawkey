@@ -25,9 +25,9 @@ use dawkey_backend_pipewire::{
 };
 use dawkey_core::{
     AddClip, AddMidiClip, AddTrack, ArchiveTracksForMixdown, AutomationTarget, Command,
-    ControlSpec, Controller, CoreError, DeleteTracks, MeterChange, MeterMap, NoteSpec, Outcome,
-    PluginId, Project, RemoveClip, Session, SetTempoMap, SetTimeSignatureMap, SourceId,
-    TempoChange, TempoMap, TimeRange, TimeSignature, Track, TrackId, TrackKind,
+    ControlSpec, Controller, CoreError, DeleteTracks, DuplicateTrack, MeterChange, MeterMap,
+    NoteSpec, Outcome, PluginId, Project, RemoveClip, Session, SetTempoMap, SetTimeSignatureMap,
+    SourceId, TempoChange, TempoMap, TimeRange, TimeSignature, Track, TrackId, TrackKind,
 };
 use dawkey_engine::{
     EngineBusy, EngineController, EngineProcessor, Graph, InputFilter, MediaPool, MeterReading,
@@ -2018,6 +2018,36 @@ impl Studio {
             clip: mix_clip,
             ..Outcome::default()
         })
+    }
+
+    /// Duplicates `track` (see `DuplicateTrack`), carrying over any saved
+    /// state its plugins reported beyond their parameters (a soundfont path,
+    /// an LV2 plugin's file, and the like) to the matching new slot. That
+    /// copy isn't part of the undo step (`plugin_states` never is): undoing
+    /// the duplicate removes the new track, and its copied state is simply
+    /// orphaned and harmless until the project is saved, like any other
+    /// plugin state belonging to a slot that no longer exists.
+    pub fn duplicate_track(&mut self, track: TrackId) -> Result<Outcome, StudioError> {
+        let project = self.session.project();
+        let old_plugins: Vec<PluginId> = project
+            .track(track)
+            .ok_or(CoreError::TrackNotFound(track))?
+            .plugins
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        self.capture_plugin_states(false);
+        let outcome = self.execute(Command::from(DuplicateTrack { track, index: None }))?;
+        let project = self.session.project();
+        let copied: Vec<(PluginId, dawkey_core::PluginState)> = old_plugins
+            .iter()
+            .zip(&outcome.plugins)
+            .filter_map(|(old, &new)| project.plugin_states.get(old).cloned().map(|s| (new, s)))
+            .collect();
+        for (new, state) in copied {
+            self.session.set_plugin_state(new, Some(state));
+        }
+        Ok(outcome)
     }
 
     /// Deletes `tracks` (and/or buses). By default (`permanent` is false),

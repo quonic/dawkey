@@ -123,6 +123,9 @@ pub(crate) struct TrackView {
     pub(crate) id: TrackId,
     pub(crate) name: String,
     pub(crate) kind: TrackKind,
+    /// The user's own color override, if set (`None`: the automatic color
+    /// cycled by the track's position; see `track_color`).
+    pub(crate) color: Option<Color>,
     /// The bus it goes to (`None`: the master), and that bus's name.
     pub(crate) output: Option<TrackId>,
     pub(crate) output_name: String,
@@ -437,6 +440,7 @@ pub(crate) fn build(
         .children(prefs::panel(model, view, ui, area, radius))
         .children(recovery::dialog(view, ui, area, radius))
         .children(track_menu::menu(model, view, ui, area))
+        .children(track_menu::popup(model, view, area))
         .children(track_menu::confirm_dialog(model, view, ui, area, radius))
         .children(track_menu::delete_confirm_dialog(
             model, view, ui, area, radius,

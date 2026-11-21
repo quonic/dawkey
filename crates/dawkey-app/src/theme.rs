@@ -271,16 +271,22 @@ pub(crate) const SPACING: Spacing = Spacing {
 /// Corner radius those same dialogs already share.
 pub(crate) const PANEL_RADIUS: f32 = 8.0;
 
-/// Track colors, cycled by track position (the same in either theme).
+/// Track colors, cycled by track position (the same in either theme), as
+/// `0xRRGGBB`; the swatch picker and `set_track_color` use these same
+/// values so a user-picked color round-trips through the project file.
+pub(crate) const TRACK_COLOR_HEX: [u32; 8] = [
+    0x4c8dff, 0x3dd68c, 0xf0b429, 0xe5484d, 0xb072ff, 0x2ec4c4, 0xff8a3d, 0xe864b5,
+];
+
 pub(crate) const TRACK_COLORS: [Color; 8] = [
-    Color::hex(0x4c8dff),
-    Color::hex(0x3dd68c),
-    Color::hex(0xf0b429),
-    Color::hex(0xe5484d),
-    Color::hex(0xb072ff),
-    Color::hex(0x2ec4c4),
-    Color::hex(0xff8a3d),
-    Color::hex(0xe864b5),
+    Color::hex(TRACK_COLOR_HEX[0]),
+    Color::hex(TRACK_COLOR_HEX[1]),
+    Color::hex(TRACK_COLOR_HEX[2]),
+    Color::hex(TRACK_COLOR_HEX[3]),
+    Color::hex(TRACK_COLOR_HEX[4]),
+    Color::hex(TRACK_COLOR_HEX[5]),
+    Color::hex(TRACK_COLOR_HEX[6]),
+    Color::hex(TRACK_COLOR_HEX[7]),
 ];
 
 impl crate::App {

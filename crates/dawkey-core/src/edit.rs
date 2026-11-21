@@ -75,6 +75,8 @@ pub(crate) enum TrackProp {
     Output(Option<TrackId>),
     /// Its aux sends.
     Sends(Vec<Send>),
+    /// Its user-assigned color override (`None`: back to automatic).
+    Color(Option<u32>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +145,7 @@ impl Edit {
                         TrackProp::Output(std::mem::replace(&mut track.output, v))
                     }
                     TrackProp::Sends(v) => TrackProp::Sends(std::mem::replace(&mut track.sends, v)),
+                    TrackProp::Color(v) => TrackProp::Color(std::mem::replace(&mut track.color, v)),
                     TrackProp::Synth(v) => {
                         let Some(synth) = &mut track.synth else {
                             return Err(CoreError::invalid(format!(

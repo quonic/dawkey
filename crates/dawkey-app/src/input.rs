@@ -5,8 +5,8 @@
 use dawkey_core::{
     AddDrumTrack, AddGuitarTrack, AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project,
     RemoveClip, RemoveTrackSend, RestoreDeletedTracks, RestoreMixdownTracks, SetLoop, SetPunch,
-    SetTrackArm, SetTrackGain, SetTrackInput, SetTrackMute, SetTrackOutput, SetTrackPan,
-    SetTrackSend, SetTrackSolo, TrackId, TrackKind,
+    SetTrackArm, SetTrackColor, SetTrackGain, SetTrackInput, SetTrackMute, SetTrackOutput,
+    SetTrackPan, SetTrackSend, SetTrackSolo, TrackId, TrackKind,
 };
 use dawkey_ui::{ChromeAction, DragPhase, Modifiers, MouseButton, Point, Rect, UiAction};
 
@@ -14,7 +14,7 @@ use crate::App;
 use crate::state::{
     ClipEdge, DeleteConfirm, FADER_H, Gesture, ImportRequest, MAX_ZOOM, MIN_ZOOM, MixdownConfirm,
     PAN_W, Page, PendingAction, PlatformRequest, RangeKind, SEND_W, TextField, TrackMenu,
-    takes_shown, track_tops,
+    TrackPopup, TrackPopupKind, takes_shown, track_tops,
 };
 use crate::view::{db_from_position, position_from_db};
 
@@ -95,9 +95,11 @@ impl App {
                     self.select_track(track, Modifiers::default())?;
                 }
                 self.view.track_menu = Some(TrackMenu { track, pos });
+                self.view.track_popup = None;
                 return Ok(());
             }
             self.view.track_menu = None;
+            self.view.track_popup = None;
             return Ok(());
         }
         if button != MouseButton::Left {
@@ -116,6 +118,9 @@ impl App {
             return result;
         }
         if let Some(result) = self.on_track_menu_click(&parts) {
+            return result;
+        }
+        if let Some(result) = self.on_track_popup_click(&parts) {
             return result;
         }
         if let Some(result) = self.on_prefs_click(&parts) {
@@ -1421,6 +1426,129 @@ impl App {
                 self.view.track_menu = None;
                 self.restore_deleted_tracks()
             }
+            ["track_menu", "select_all_clips"] => {
+                let tracks = self.menu_tracks(menu.track);
+                self.view.track_menu = None;
+                let project = self.studio.session().project();
+                self.view.selected_clips = project
+                    .tracks
+                    .iter()
+                    .filter(|t| tracks.contains(&t.id))
+                    .flat_map(|t| t.clips.iter().map(|c| c.id))
+                    .collect();
+                self.view.selected_clip = self.view.selected_clips.last().copied();
+                Ok(())
+            }
+            ["track_menu", "rename"] => {
+                self.view.track_menu = None;
+                self.start_text_edit(TextField::TrackName(menu.track))
+            }
+            ["track_menu", "insert_above" | "insert_below"] => {
+                let below = parts[1] == "insert_below";
+                let project = self.studio.session().project();
+                let kind = project
+                    .track(menu.track)
+                    .map(|t| t.kind)
+                    .unwrap_or_default();
+                let index = project
+                    .track_index(menu.track)
+                    .map(|i| if below { i + 1 } else { i });
+                self.view.track_menu = None;
+                self.execute(
+                    AddTrack {
+                        kind,
+                        index,
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+            }
+            ["track_menu", "duplicate"] => {
+                self.view.track_menu = None;
+                match self.studio.duplicate_track(menu.track) {
+                    Ok(outcome) => {
+                        if let Some(track) = outcome.track {
+                            self.view.selected_tracks = vec![track];
+                            self.view.track_anchor = Some(track);
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            ["track_menu", "output"] => {
+                self.view.track_popup = Some(TrackPopup {
+                    kind: TrackPopupKind::Output,
+                    track: menu.track,
+                    pos: menu.pos,
+                });
+                self.view.track_menu = None;
+                Ok(())
+            }
+            ["track_menu", "color"] => {
+                self.view.track_popup = Some(TrackPopup {
+                    kind: TrackPopupKind::Color,
+                    track: menu.track,
+                    pos: menu.pos,
+                });
+                self.view.track_menu = None;
+                Ok(())
+            }
+            _ => return None,
+        })
+    }
+
+    fn on_track_popup_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
+        let popup = self.view.track_popup?;
+        Some(match parts {
+            ["track_popup"] => Ok(()),
+            ["track_popup", "backdrop"] => {
+                self.view.track_popup = None;
+                Ok(())
+            }
+            ["track_popup", "output", "master"] => {
+                self.view.track_popup = None;
+                self.execute(
+                    SetTrackOutput {
+                        track: popup.track,
+                        bus: None,
+                    }
+                    .into(),
+                )
+            }
+            ["track_popup", "output", "bus", bus] => {
+                let bus = parse_track(bus).ok()?;
+                self.view.track_popup = None;
+                self.execute(
+                    SetTrackOutput {
+                        track: popup.track,
+                        bus: Some(bus),
+                    }
+                    .into(),
+                )
+            }
+            ["track_popup", "color", "swatch", n] => {
+                let n: usize = n.parse().ok()?;
+                let color = *crate::theme::TRACK_COLOR_HEX.get(n)?;
+                self.view.track_popup = None;
+                self.execute(
+                    SetTrackColor {
+                        track: popup.track,
+                        color: Some(color),
+                    }
+                    .into(),
+                )
+            }
+            ["track_popup", "color", "default"] => {
+                self.view.track_popup = None;
+                self.execute(
+                    SetTrackColor {
+                        track: popup.track,
+                        color: None,
+                    }
+                    .into(),
+                )
+            }
             _ => return None,
         })
     }
@@ -1486,6 +1614,10 @@ impl App {
         }
         if self.view.track_menu.is_some() && key == "escape" {
             self.view.track_menu = None;
+            return Some(Ok(()));
+        }
+        if self.view.track_popup.is_some() && key == "escape" {
+            self.view.track_popup = None;
             return Some(Ok(()));
         }
         None

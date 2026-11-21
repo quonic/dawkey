@@ -760,3 +760,74 @@ fn delete_tracks_non_destructive_and_permanent_cleanup() {
             .contains_key(&plug1)
     );
 }
+
+#[test]
+fn duplicate_track_copies_plugin_state_to_the_new_slot() {
+    use dawkey_core::{AddClip, AddPlugin, AddTrack, PluginState};
+    use dawkey_media::DecodedFile;
+
+    let mut studio = Studio::new(
+        LoadedProject::new(Project::default()),
+        AudioBackend::Virtual,
+    )
+    .unwrap();
+    let t1 = studio
+        .execute(
+            AddTrack {
+                name: Some("Guitar".into()),
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap();
+    let src = studio.add_source(
+        Path::new("/tmp/guitar.wav"),
+        DecodedFile {
+            audio: AudioData::new(vec![vec![0.1; 1024]]),
+            source_rate: 48_000,
+        },
+    );
+    studio
+        .execute(AddClip::new(src, Some(t1), 0.0).into())
+        .unwrap();
+    let plug1 = studio
+        .execute(
+            AddPlugin {
+                track: t1,
+                plugin: "builtin:eq".into(),
+                index: None,
+            }
+            .into(),
+        )
+        .unwrap()
+        .plugin
+        .unwrap();
+    studio
+        .session
+        .set_plugin_state(plug1, Some(PluginState::new(vec![42])));
+
+    let outcome = studio.duplicate_track(t1).unwrap();
+    let new_track = outcome.track.unwrap();
+    assert_ne!(new_track, t1);
+    let plug2 = outcome.plugins[0];
+    assert_ne!(plug2, plug1);
+
+    let project = studio.session().project();
+    assert_eq!(
+        project.plugin_states.get(&plug2),
+        Some(&PluginState::new(vec![42]))
+    );
+    // The original slot's own state is untouched.
+    assert_eq!(
+        project.plugin_states.get(&plug1),
+        Some(&PluginState::new(vec![42]))
+    );
+
+    // Undoing removes the duplicate; its plugin state is simply orphaned
+    // (not part of the undo step, same as plugin_states generally).
+    studio.undo().unwrap();
+    assert!(studio.session().project().track(new_track).is_none());
+    assert!(studio.session().project().track(t1).is_some());
+}

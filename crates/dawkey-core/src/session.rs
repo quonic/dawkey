@@ -34,6 +34,10 @@ pub struct Outcome {
     /// The plugin slot the command created, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin: Option<PluginId>,
+    /// Every plugin slot the command created, when it can make several
+    /// (duplicate_track, in the same order as the source track's own).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<PluginId>,
 }
 
 impl Outcome {
@@ -3807,6 +3811,109 @@ mod tests {
         reopened.redo().unwrap();
         assert!(reopened.project().track(mix).is_none());
         assert!(reopened.project().track(drums).is_some());
+    }
+
+    #[test]
+    fn duplicate_track_copies_clips_plugins_and_automation_with_fresh_ids() {
+        use crate::{
+            AddDrumTrack, AddMidiNotes, AutomationTarget, DuplicateTrack, NoteSpec, PointSpec,
+            SetAutomation,
+        };
+        let mut s = Session::default();
+        let drums = s
+            .execute(
+                AddDrumTrack {
+                    name: Some("Drums".into()),
+                    kit: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let old_plugin = s.project().track(drums).unwrap().plugins[0].id;
+        let clip = s.project().track(drums).unwrap().clips[0].id;
+        s.execute(
+            AddMidiNotes {
+                clip,
+                notes: vec![NoteSpec {
+                    pitch: 36,
+                    start_beats: 0.0,
+                    length_beats: 1.0,
+                    velocity: 100,
+                }],
+            }
+            .into(),
+        )
+        .unwrap();
+        s.execute(
+            SetAutomation {
+                track: drums,
+                target: AutomationTarget::Param {
+                    plugin: old_plugin,
+                    param: "gain".into(),
+                },
+                points: vec![PointSpec {
+                    time_s: 0.0,
+                    value: 0.5,
+                }],
+            }
+            .into(),
+        )
+        .unwrap();
+
+        let outcome = s
+            .execute(
+                DuplicateTrack {
+                    track: drums,
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap();
+        let new_track = outcome.track.unwrap();
+        assert_ne!(new_track, drums);
+        let source_plugin_count = s.project().track(drums).unwrap().plugins.len();
+        assert_eq!(outcome.plugins.len(), source_plugin_count);
+        // Plugin IDs come back in the same order as the source track's own,
+        // so index 0 is the duplicate of old_plugin (the drum instrument).
+        let new_plugin = outcome.plugins[0];
+        assert_ne!(new_plugin, old_plugin);
+
+        let project = s.project();
+        assert_eq!(project.track(new_track).unwrap().name, "Drums copy");
+        assert_eq!(
+            project.track_index(new_track),
+            project.track_index(drums).map(|i| i + 1)
+        );
+        let (orig_clip, new_clip) = (
+            &project.track(drums).unwrap().clips[0],
+            &project.track(new_track).unwrap().clips[0],
+        );
+        assert_ne!(orig_clip.id, new_clip.id);
+        assert_eq!(orig_clip.notes().len(), new_clip.notes().len());
+        let new_lane = &project.track(new_track).unwrap().automation[0];
+        assert_eq!(
+            new_lane.target,
+            AutomationTarget::Param {
+                plugin: new_plugin,
+                param: "gain".into()
+            }
+        );
+        // The source track's own automation still points at its own plugin.
+        let orig_lane = &project.track(drums).unwrap().automation[0];
+        assert_eq!(
+            orig_lane.target,
+            AutomationTarget::Param {
+                plugin: old_plugin,
+                param: "gain".into()
+            }
+        );
+
+        // Undo removes exactly the duplicate.
+        s.undo().unwrap();
+        assert!(s.project().track(new_track).is_none());
+        assert!(s.project().track(drums).is_some());
     }
 
     #[test]

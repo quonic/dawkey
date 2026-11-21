@@ -25,7 +25,7 @@ pub use command::{
     AddAutomationPoint, AddClip, AddDrumTrack, AddGuitarTrack, AddMidiClip, AddMidiNotes,
     AddPlugin, AddTrack, ApplyDrumKit, ApplyDrumPattern, ArchiveTracksForMixdown, COMMAND_SPECS,
     Command, CommandSpec, CompTake, ControlSpec, ControlValue, DeleteTracks, DrumKit, DrumPattern,
-    DuplicateClip, EditMidiNotes, Effect, LoadRackPreset, LoadSavedDrumPattern,
+    DuplicateClip, DuplicateTrack, EditMidiNotes, Effect, LoadRackPreset, LoadSavedDrumPattern,
     LoadSavedRackPreset, MoveClip, MovePlugin, NoteChange, NoteSpec, PointSpec, QuantizeMidiNotes,
     RackPreset, RemoveAutomationPoints, RemoveClip, RemoveMidiNotes, RemovePlugin,
     RemoveSavedDrumPattern, RemoveSavedRackPreset, RemoveTempoChange, RemoveTimeSignatureChange,
@@ -33,7 +33,7 @@ pub use command::{
     RestoreDeletedTracks, RestoreMixdownTracks, SaveDrumPattern, SaveRackPreset, SetAutomation,
     SetClipGain, SetClipLength, SetClipMute, SetLoop, SetMidiControls, SetPluginBypass,
     SetPluginOutput, SetPluginParam, SetPluginSidechain, SetPunch, SetSynth, SetTempo, SetTempoMap,
-    SetTimeSignature, SetTimeSignatureMap, SetTrackArm, SetTrackGain, SetTrackInput,
+    SetTimeSignature, SetTimeSignatureMap, SetTrackArm, SetTrackColor, SetTrackGain, SetTrackInput,
     SetTrackMidiInput, SetTrackMidiOutput, SetTrackMonitor, SetTrackMute, SetTrackOutput,
     SetTrackPan, SetTrackSend, SetTrackSolo, SplitClip, TrimClip, WriteAutomation, args_schema,
 };

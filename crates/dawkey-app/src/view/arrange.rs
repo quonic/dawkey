@@ -319,7 +319,7 @@ fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> No
         // A color tab matching the track's clips.
         .child(
             Node::row()
-                .style(|s| s.background = Some(track_color(index)))
+                .style(|s| s.background = Some(track.color.unwrap_or_else(|| track_color(index))))
                 .absolute(Rect::new(-14.0, -8.0, 4.0, LANE_H - 1.0)),
         )
         .child(
@@ -657,7 +657,7 @@ fn automation_lane(
     k: usize,
     lane: &LaneView,
 ) -> Node {
-    let color = track_color(index);
+    let color = track.color.unwrap_or_else(|| track_color(index));
     let h = AUTO_H - 1.0;
     let y_of = |value: f64| 4.0 + (1.0 - lane.kind.unit(value)) * (h - 8.0);
     // The point being dragged shows where it's going.
@@ -982,7 +982,11 @@ fn clip_node(
     let ghost = matches!(look, Look::Original | Look::Repeat);
     let selected =
         (view.selected_clips.contains(&clip.id) || view.selected_clip == Some(clip.id)) && !ghost;
-    let color = track_color(track_index);
+    let color = model
+        .tracks
+        .get(track_index)
+        .and_then(|t| t.color)
+        .unwrap_or_else(|| track_color(track_index));
     let color = if clip.muted {
         color.mix(pal().panel, if look == Look::Take { 0.75 } else { 0.6 })
     } else {
