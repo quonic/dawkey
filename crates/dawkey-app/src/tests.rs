@@ -4836,6 +4836,31 @@ fn insert_track_above_and_below_from_the_context_menu() {
 }
 
 #[test]
+fn inserting_above_or_below_a_drum_track_adds_another_drum_track() {
+    let mut app = app();
+    let (t1, _) = add_drum_clip(&mut app);
+    app.rebuild();
+
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/insert_below").unwrap();
+
+    let project = app.studio.session().project();
+    assert_eq!(project.tracks.len(), 2);
+    assert_eq!(project.tracks[0].id, TrackId(t1));
+    let new_track = &project.tracks[1];
+    assert_eq!(new_track.kind, TrackKind::Midi);
+    assert_eq!(
+        new_track.plugins.first().map(|p| p.plugin.as_str()),
+        Some("builtin:drums")
+    );
+}
+
+#[test]
 fn change_output_from_the_context_menu() {
     let mut app = app();
     let (t1, _) = add_clip(&mut app, 0.0);

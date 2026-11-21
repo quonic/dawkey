@@ -4464,6 +4464,9 @@ pub struct AddDrumTrack {
     /// Starting kit. Defaults to Kit808.
     #[serde(default)]
     pub kit: Option<DrumKit>,
+    /// Position in the track list (0 = top). Defaults to the end.
+    #[serde(default)]
+    pub index: Option<usize>,
 }
 
 impl AddDrumTrack {
@@ -4477,10 +4480,8 @@ impl AddDrumTrack {
         };
         let id = project.alloc_track_id();
         let track = Track::new(id, name, TrackKind::Midi);
-        let mut edits = vec![Edit::InsertTrack {
-            index: project.tracks.len(),
-            track,
-        }];
+        let index = self.index.unwrap_or(project.tracks.len());
+        let mut edits = vec![Edit::InsertTrack { index, track }];
         let mut plugins = Vec::new();
         for (plugin, params) in drum_kit_chain(self.kit.unwrap_or(DrumKit::Kit808)) {
             plugins.push(PluginSlot {

@@ -1446,22 +1446,34 @@ impl App {
             ["track_menu", "insert_above" | "insert_below"] => {
                 let below = parts[1] == "insert_below";
                 let project = self.studio.session().project();
-                let kind = project
-                    .track(menu.track)
-                    .map(|t| t.kind)
-                    .unwrap_or_default();
+                let source = project.track(menu.track);
+                let kind = source.map(|t| t.kind).unwrap_or_default();
+                // A drum track is a MIDI track with the drum instrument
+                // first in its chain, not a kind of its own: match it with
+                // another drum track, not a bare MIDI one.
+                let is_drum = source.is_some_and(|t| {
+                    t.plugins
+                        .first()
+                        .is_some_and(|p| p.plugin == "builtin:drums")
+                });
                 let index = project
                     .track_index(menu.track)
                     .map(|i| if below { i + 1 } else { i });
                 self.view.track_menu = None;
-                self.execute(
+                self.execute(if is_drum {
+                    AddDrumTrack {
+                        index,
+                        ..Default::default()
+                    }
+                    .into()
+                } else {
                     AddTrack {
                         kind,
                         index,
                         ..Default::default()
                     }
-                    .into(),
-                )
+                    .into()
+                })
             }
             ["track_menu", "duplicate"] => {
                 self.view.track_menu = None;

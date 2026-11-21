@@ -2696,6 +2696,7 @@ mod tests {
                 AddDrumTrack {
                     name: None,
                     kit: Some(DrumKit::Trap),
+                    index: None,
                 }
                 .into(),
             )
@@ -2974,6 +2975,7 @@ mod tests {
                 AddDrumTrack {
                     name: None,
                     kit: None,
+                    index: None,
                 }
                 .into(),
             )
@@ -3116,6 +3118,7 @@ mod tests {
                 AddDrumTrack {
                     name: None,
                     kit: None,
+                    index: None,
                 }
                 .into(),
             )
@@ -3689,6 +3692,7 @@ mod tests {
                 AddDrumTrack {
                     name: Some("Drums".into()),
                     kit: None,
+                    index: None,
                 }
                 .into(),
             )
@@ -3825,6 +3829,7 @@ mod tests {
                 AddDrumTrack {
                     name: Some("Drums".into()),
                     kit: None,
+                    index: None,
                 }
                 .into(),
             )
@@ -3940,6 +3945,7 @@ mod tests {
                 AddDrumTrack {
                     name: Some("Drums".into()),
                     kit: None,
+                    index: None,
                 }
                 .into(),
             )
