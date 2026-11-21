@@ -25,6 +25,7 @@ pub enum RackEffect {
     Chorus,
     Delay,
     Reverb,
+    AutoWah,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -830,6 +831,100 @@ const REVERB_PARAMS: &[BuiltinParam] = &[
     },
 ];
 
+const AUTOWAH_DIRECTION_CHOICES: &[BuiltinChoice] = &[
+    BuiltinChoice {
+        value: 0.0,
+        label: "Up",
+    },
+    BuiltinChoice {
+        value: 1.0,
+        label: "Down",
+    },
+];
+
+const AUTOWAH_PARAMS: &[BuiltinParam] = &[
+    BuiltinParam {
+        id: "sensitivity",
+        name: "Sensitivity",
+        min: 0.0,
+        max: 100.0,
+        default: 60.0,
+        stepped: false,
+        unit: Some("%"),
+        choices: &[],
+    },
+    BuiltinParam {
+        id: "freq_low",
+        name: "Freq Low",
+        min: 80.0,
+        max: 1500.0,
+        default: 300.0,
+        stepped: false,
+        unit: Some("Hz"),
+        choices: &[],
+    },
+    BuiltinParam {
+        id: "freq_high",
+        name: "Freq High",
+        min: 400.0,
+        max: 6000.0,
+        default: 2200.0,
+        stepped: false,
+        unit: Some("Hz"),
+        choices: &[],
+    },
+    BuiltinParam {
+        id: "q",
+        name: "Resonance",
+        min: 0.3,
+        max: 10.0,
+        default: 2.0,
+        stepped: false,
+        unit: None,
+        choices: &[],
+    },
+    BuiltinParam {
+        id: "attack",
+        name: "Attack",
+        min: 0.5,
+        max: 50.0,
+        default: 4.0,
+        stepped: false,
+        unit: Some("ms"),
+        choices: &[],
+    },
+    BuiltinParam {
+        id: "release",
+        name: "Release",
+        min: 10.0,
+        max: 500.0,
+        default: 120.0,
+        stepped: false,
+        unit: Some("ms"),
+        choices: &[],
+    },
+    BuiltinParam {
+        id: "direction",
+        name: "Direction",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        stepped: true,
+        unit: None,
+        choices: AUTOWAH_DIRECTION_CHOICES,
+    },
+    BuiltinParam {
+        id: "mix",
+        name: "Mix",
+        min: 0.0,
+        max: 100.0,
+        default: 100.0,
+        stepped: false,
+        unit: Some("%"),
+        choices: &[],
+    },
+];
+
 static SPECS: &[BuiltinSpec] = &[
     BuiltinSpec {
         effect: RackEffect::Gate,
@@ -902,6 +997,14 @@ static SPECS: &[BuiltinSpec] = &[
         vendor: "Dawkey Studio",
         sidechain: false,
         params: REVERB_PARAMS,
+    },
+    BuiltinSpec {
+        effect: RackEffect::AutoWah,
+        id: "builtin:autowah",
+        name: "AW-909 Envelope Filter",
+        vendor: "Dawkey Studio",
+        sidechain: false,
+        params: AUTOWAH_PARAMS,
     },
 ];
 
@@ -1099,6 +1202,16 @@ impl StereoBiquad {
         let cos = w.cos();
         let alpha = w.sin() / (2.0 * q.max(0.1));
         self.set_coeffs(1.0, -2.0 * cos, 1.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha);
+    }
+
+    /// Constant skirt gain, 0 dB peak bandpass: the resonant sweep an
+    /// envelope filter rides its detected level across.
+    fn set_bandpass(&mut self, freq_hz: f32, q: f32, sr: f32) {
+        let f = freq_hz.clamp(MIN_FILTER_HZ, sr * 0.45);
+        let w = TAU * f / sr;
+        let cos = w.cos();
+        let alpha = w.sin() / (2.0 * q.max(0.1));
+        self.set_coeffs(alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cos, 1.0 - alpha);
     }
 
     #[inline]
@@ -2040,6 +2153,60 @@ impl ReverbState {
     }
 }
 
+/// An envelope follower driving a resonant bandpass filter's center
+/// frequency: a touch-wah pedal (louder input sweeps the filter up or down
+/// instead of a pedal's rocker).
+#[derive(Debug)]
+struct AutoWahState {
+    env: f32,
+    filter: StereoBiquad,
+}
+
+impl AutoWahState {
+    fn new(sr: f32) -> Self {
+        let mut filter = StereoBiquad::bypass();
+        filter.set_bandpass(500.0, 2.0, sr);
+        Self { env: 0.0, filter }
+    }
+
+    fn process(&mut self, params: &[f64], left: &mut [f32], right: &mut [f32], sr: f32) {
+        let sensitivity = (params[0] as f32 * 0.01).clamp(0.0, 1.0);
+        let freq_low = (params[1] as f32).max(MIN_FILTER_HZ);
+        let freq_high = (params[2] as f32).max(freq_low + 1.0);
+        let q = (params[3] as f32).max(0.1);
+        let attack_ms = params[4] as f32;
+        let release_ms = params[5] as f32;
+        let down = params[6] >= 0.5;
+        let mix = (params[7] as f32 * 0.01).clamp(0.0, 1.0);
+
+        let att_c = one_pole_coeff(attack_ms, sr);
+        let rel_c = one_pole_coeff(release_ms, sr);
+        let log_lo = freq_low.ln();
+        let log_hi = freq_high.ln();
+        // Higher sensitivity reaches the top of the sweep from a quieter
+        // input, like opening a wah pedal further for the same pick attack.
+        let gain = 1.0 + sensitivity * 9.0;
+
+        for i in 0..left.len() {
+            let level = left[i].abs().max(right[i].abs());
+            let c = if level > self.env { att_c } else { rel_c };
+            self.env = c * self.env + (1.0 - c) * level + ANTI_DENORMAL;
+
+            let drive = (self.env * gain).clamp(0.0, 1.0);
+            let t = if down { 1.0 - drive } else { drive };
+            let freq = (log_lo + (log_hi - log_lo) * t).exp();
+            self.filter.set_bandpass(freq, q, sr);
+
+            let dl = left[i];
+            let dr = right[i];
+            let wl = self.filter.process_channel(0, dl);
+            let wr = self.filter.process_channel(1, dr);
+            left[i] = dl * (1.0 - mix) + wl * mix;
+            right[i] = dr * (1.0 - mix) + wr * mix;
+        }
+    }
+}
+
 #[derive(Debug)]
 enum ProcessorKind {
     Gate(GateState),
@@ -2051,6 +2218,7 @@ enum ProcessorKind {
     Chorus(ChorusState),
     Delay(DelayState),
     Reverb(Box<ReverbState>),
+    AutoWah(AutoWahState),
 }
 
 #[derive(Debug)]
@@ -2079,6 +2247,7 @@ impl RackProcessor {
             RackEffect::Chorus => ProcessorKind::Chorus(ChorusState::new(sr)),
             RackEffect::Delay => ProcessorKind::Delay(DelayState::new(sr)),
             RackEffect::Reverb => ProcessorKind::Reverb(Box::new(ReverbState::new(sr))),
+            RackEffect::AutoWah => ProcessorKind::AutoWah(AutoWahState::new(sr)),
         };
         Self {
             effect,
@@ -2121,6 +2290,7 @@ impl RackProcessor {
             ProcessorKind::Chorus(s) => s.process(p, left, right, sr),
             ProcessorKind::Delay(s) => s.process(p, left, right, sr, bpm),
             ProcessorKind::Reverb(s) => s.process(p, left, right, sr),
+            ProcessorKind::AutoWah(s) => s.process(p, left, right, sr),
         }
     }
 }
@@ -2285,6 +2455,52 @@ mod tests {
             l[4800].abs() > 0.3,
             "expected echo at 4800, got {}",
             l[4800]
+        );
+    }
+
+    #[test]
+    fn autowah_sweeps_filter_frequency_with_envelope() {
+        let sr = 48_000.0_f32;
+        let tone_hz = 300.0_f32;
+        let make_tone = |len: usize, amp: f32| -> (Vec<f32>, Vec<f32>) {
+            let mut l = Vec::with_capacity(len);
+            let mut r = Vec::with_capacity(len);
+            for i in 0..len {
+                let s = amp * (TAU * tone_hz * i as f32 / sr).sin();
+                l.push(s);
+                r.push(s);
+            }
+            (l, r)
+        };
+        let gain_at = |amp: f32, direction: f64| -> f32 {
+            let mut proc = RackProcessor::new(RackEffect::AutoWah, 48_000);
+            proc.set_param(1, f64::from(tone_hz)); // freq_low == the test tone
+            proc.set_param(2, 2200.0); // freq_high, far from the test tone
+            proc.set_param(4, 1.0); // fast attack
+            proc.set_param(5, 5.0); // fast release, settles within the block
+            proc.set_param(6, direction);
+            let (mut l, mut r) = make_tone(4096, amp);
+            assert_no_alloc::assert_no_alloc(|| proc.process(&mut l, &mut r, None, 120.0));
+            l[3000..].iter().map(|s| s.abs()).fold(0.0_f32, f32::max) / amp
+        };
+
+        // Up (default): a quiet input keeps the filter near freq_low, right
+        // on the test tone, so it passes through; a loud one sweeps the
+        // filter up toward freq_high, away from the tone, attenuating it.
+        let quiet_gain = gain_at(0.02, 0.0);
+        let loud_gain = gain_at(0.9, 0.0);
+        assert!(
+            quiet_gain > loud_gain * 1.5,
+            "quiet (filter near tone freq) should pass more than loud (swept away): quiet={quiet_gain} loud={loud_gain}"
+        );
+
+        // Down reverses it: a loud input now settles the filter near
+        // freq_low too, so it should pass about as well as the quiet
+        // Up case, not like loud Up's attenuated case.
+        let down_gain = gain_at(0.9, 1.0);
+        assert!(
+            down_gain > loud_gain * 1.5,
+            "loud Down should settle near freq_low like quiet Up, not attenuate like loud Up: down={down_gain} loud={loud_gain}"
         );
     }
 

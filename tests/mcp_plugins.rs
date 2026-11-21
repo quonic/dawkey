@@ -2022,6 +2022,56 @@ async fn builtin_guitar_rack_presets_and_processing() {
         .unwrap();
     assert!((gain["value"].as_f64().unwrap() - 8.5).abs() < 1e-6);
 
+    // The envelope-filter (auto-wah) unit mounts and edits like the others.
+    let autowah = add_plugin(&dawkey, &track, "builtin:autowah").await;
+    dawkey
+        .call(
+            "set_plugin_param",
+            json!({ "plugin": autowah, "param": "sensitivity", "value": 80.0 }),
+        )
+        .await
+        .unwrap();
+    let autowah_details = dawkey
+        .call("get_plugin", json!({ "plugin": autowah }))
+        .await
+        .unwrap();
+    assert_eq!(autowah_details["id"], "builtin:autowah");
+    let sensitivity = autowah_details["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "sensitivity")
+        .unwrap();
+    assert!((sensitivity["value"].as_f64().unwrap() - 80.0).abs() < 1e-6);
+
+    // A curated preset built around it mounts its full chain in order.
+    let funk_loaded = dawkey
+        .call(
+            "load_rack_preset",
+            json!({ "track": track, "preset": "funk_drive" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(funk_loaded["track"], track);
+    let funk_state = dawkey.call("get_state", json!({})).await.unwrap();
+    let funk_plugins = funk_state["project"]["tracks"][0]["plugins"]
+        .as_array()
+        .unwrap();
+    let funk_ids: Vec<&str> = funk_plugins
+        .iter()
+        .map(|p| p["plugin"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        funk_ids,
+        [
+            "builtin:gate",
+            "builtin:autowah",
+            "builtin:drive",
+            "builtin:amp",
+            "builtin:cab",
+        ]
+    );
+
     // Unknown builtin IDs yield a clear tool error rather than a protocol error.
     let err = dawkey
         .call_err(
