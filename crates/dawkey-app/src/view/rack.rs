@@ -296,6 +296,13 @@ fn sidebar(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
                 .gap(4.0)
                 .child(add_btn("reverb", "+ VERB-480"))
                 .child(add_btn("autowah", "+ AW-909")),
+        )
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .gap(4.0)
+                .child(add_btn("phaser", "+ PH-90"))
+                .child(Node::spacer()),
         );
 
     Node::column()
@@ -621,6 +628,13 @@ fn unit_theme(unit: &PluginDetails) -> UnitTheme {
             badge: "AW-909",
             subtitle: "ENVELOPE FILTER",
         },
+        "builtin:phaser" => UnitTheme {
+            faceplate: pal().rack_phaser,
+            accent: Color::hex(0x4fd1c5),
+            led: Color::hex(0x4fd1c5),
+            badge: "PH-90",
+            subtitle: "ANALOG PHASER",
+        },
         "builtin:drums" => UnitTheme {
             faceplate: pal().rack_drums,
             accent: pal().record_on,
@@ -944,6 +958,39 @@ fn unit_header_widget(
                 row = row.child(
                     button(
                         &format!("plugin/{id}/choice/direction/{val}"),
+                        label,
+                        ui,
+                        on.then_some(theme.accent),
+                    )
+                    .text(label)
+                    .height(Sizing::Fixed(18.0))
+                    .padding(Insets::xy(6.0, 0.0))
+                    .style(move |s| {
+                        s.font_size = 9.0;
+                        if !on {
+                            s.color = pal().rack_screen_fg;
+                            s.border = None;
+                        }
+                    }),
+                );
+            }
+            Some(row)
+        }
+        "builtin:phaser" => {
+            let current = unit.params.get(3).map_or(0, |p| p.value.round() as usize);
+            let mut row = Node::row()
+                .padding(Insets::xy(4.0, 2.0))
+                .gap(3.0)
+                .style(|s| {
+                    s.background = Some(pal().rack_screen_bg);
+                    s.border = Some((1.0, pal().border));
+                    s.radius = [3.0; 4];
+                });
+            for (val, label) in [(0, "4"), (1, "6"), (2, "8")] {
+                let on = current == val;
+                row = row.child(
+                    button(
+                        &format!("plugin/{id}/choice/stages/{val}"),
                         label,
                         ui,
                         on.then_some(theme.accent),

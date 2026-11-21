@@ -26,6 +26,7 @@ pub enum RackEffect {
     Delay,
     Reverb,
     AutoWah,
+    Phaser,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -925,6 +926,94 @@ const AUTOWAH_PARAMS: &[BuiltinParam] = &[
     },
 ];
 
+const PHASER_STAGE_CHOICES: &[BuiltinChoice] = &[
+    BuiltinChoice {
+        value: 0.0,
+        label: "4",
+    },
+    BuiltinChoice {
+        value: 1.0,
+        label: "6",
+    },
+    BuiltinChoice {
+        value: 2.0,
+        label: "8",
+    },
+];
+
+const PHASER_PARAMS: &[BuiltinParam] = &[
+    BuiltinParam {
+        id: "rate",
+        name: "Rate",
+        min: 0.02,
+        max: 8.0,
+        default: 0.5,
+        stepped: false,
+        unit: Some("Hz"),
+        choices: &[],
+    },
+    BuiltinParam {
+        id: "depth",
+        name: "Depth",
+        min: 0.0,
+        max: 100.0,
+        default: 80.0,
+        stepped: false,
+        unit: Some("%"),
+        choices: &[],
+    },
+    BuiltinParam {
+        id: "feedback",
+        name: "Feedback",
+        min: 0.0,
+        max: 95.0,
+        default: 40.0,
+        stepped: false,
+        unit: Some("%"),
+        choices: &[],
+    },
+    BuiltinParam {
+        id: "stages",
+        name: "Stages",
+        min: 0.0,
+        max: 2.0,
+        default: 0.0,
+        stepped: true,
+        unit: None,
+        choices: PHASER_STAGE_CHOICES,
+    },
+    BuiltinParam {
+        id: "center",
+        name: "Center",
+        min: 200.0,
+        max: 4000.0,
+        default: 800.0,
+        stepped: false,
+        unit: Some("Hz"),
+        choices: &[],
+    },
+    BuiltinParam {
+        id: "width",
+        name: "Width",
+        min: 0.0,
+        max: 100.0,
+        default: 70.0,
+        stepped: false,
+        unit: Some("%"),
+        choices: &[],
+    },
+    BuiltinParam {
+        id: "mix",
+        name: "Mix",
+        min: 0.0,
+        max: 100.0,
+        default: 50.0,
+        stepped: false,
+        unit: Some("%"),
+        choices: &[],
+    },
+];
+
 static SPECS: &[BuiltinSpec] = &[
     BuiltinSpec {
         effect: RackEffect::Gate,
@@ -1005,6 +1094,14 @@ static SPECS: &[BuiltinSpec] = &[
         vendor: "Dawkey Studio",
         sidechain: false,
         params: AUTOWAH_PARAMS,
+    },
+    BuiltinSpec {
+        effect: RackEffect::Phaser,
+        id: "builtin:phaser",
+        name: "PH-90 Analog Phaser",
+        vendor: "Dawkey Studio",
+        sidechain: false,
+        params: PHASER_PARAMS,
     },
 ];
 
@@ -1236,6 +1333,14 @@ impl StereoBiquad {
             (num_re * num_re + num_im * num_im) / (den_re * den_re + den_im * den_im).max(1e-12);
         10.0 * mag_sq.max(1e-12).log10()
     }
+}
+
+/// The coefficient of a first-order allpass with break frequency `freq_hz`:
+/// a phaser stage, swept by its LFO.
+#[inline]
+fn allpass_coeff(freq_hz: f32, sr: f32) -> f32 {
+    let t = (PI * freq_hz.clamp(MIN_FILTER_HZ, sr * 0.45) / sr).tan();
+    (t - 1.0) / (t + 1.0)
 }
 
 #[inline]
@@ -2207,6 +2312,106 @@ impl AutoWahState {
     }
 }
 
+/// One stage of a phaser's swept allpass chain, direct form I: `prev_x`/
+/// `prev_y` hold the last input/output per channel.
+#[derive(Debug, Clone, Copy)]
+struct PhaserAllpass {
+    a: f32,
+    prev_x: [f32; 2],
+    prev_y: [f32; 2],
+}
+
+impl PhaserAllpass {
+    fn new() -> Self {
+        Self {
+            a: 0.0,
+            prev_x: [0.0; 2],
+            prev_y: [0.0; 2],
+        }
+    }
+
+    #[inline]
+    fn process_channel(&mut self, ch: usize, x: f32) -> f32 {
+        let y = -self.a * x + self.prev_x[ch] + self.a * self.prev_y[ch];
+        self.prev_x[ch] = x;
+        self.prev_y[ch] = y + ANTI_DENORMAL;
+        y
+    }
+}
+
+const PHASER_MAX_STAGES: usize = 8;
+
+/// A chain of LFO-swept allpass stages (a classic analog phaser): each
+/// stage's break frequency sweeps together, carving moving notches into
+/// the spectrum. Feedback around the chain deepens and narrows them.
+#[derive(Debug)]
+struct PhaserState {
+    stages: [PhaserAllpass; PHASER_MAX_STAGES],
+    phase: f32,
+    fb_l: f32,
+    fb_r: f32,
+}
+
+impl PhaserState {
+    fn new() -> Self {
+        Self {
+            stages: [PhaserAllpass::new(); PHASER_MAX_STAGES],
+            phase: 0.0,
+            fb_l: 0.0,
+            fb_r: 0.0,
+        }
+    }
+
+    fn process(&mut self, params: &[f64], left: &mut [f32], right: &mut [f32], sr: f32) {
+        let rate = params[0] as f32;
+        let depth = (params[1] as f32 * 0.01).clamp(0.0, 1.0);
+        let feedback = (params[2] as f32 * 0.01).clamp(0.0, 0.95);
+        let stage_count = (4 + params[3].round() as usize * 2).min(PHASER_MAX_STAGES);
+        let center = (params[4] as f32).max(MIN_FILTER_HZ);
+        let width = (params[5] as f32 * 0.01).clamp(0.0, 1.0);
+        let mix = (params[6] as f32 * 0.01).clamp(0.0, 1.0);
+
+        let inc = TAU * rate / sr;
+        let log_c = center.ln();
+        // No depth means no sweep: a static phaser, notching at `center`.
+        let half_range = (1.0 + depth * 3.0).ln();
+        let r_offset = width * PI;
+
+        for i in 0..left.len() {
+            let dl = left[i];
+            let dr = right[i];
+
+            let lfo_l = self.phase.sin();
+            let lfo_r = (self.phase + r_offset).sin();
+            self.phase += inc;
+            if self.phase >= TAU {
+                self.phase -= TAU;
+            }
+
+            let freq_l = (log_c + lfo_l * half_range).exp();
+            let freq_r = (log_c + lfo_r * half_range).exp();
+            let a_l = allpass_coeff(freq_l, sr);
+            let a_r = allpass_coeff(freq_r, sr);
+
+            let mut yl = dl + self.fb_l * feedback;
+            for stage in self.stages.iter_mut().take(stage_count) {
+                stage.a = a_l;
+                yl = stage.process_channel(0, yl);
+            }
+            let mut yr = dr + self.fb_r * feedback;
+            for stage in self.stages.iter_mut().take(stage_count) {
+                stage.a = a_r;
+                yr = stage.process_channel(1, yr);
+            }
+            self.fb_l = yl;
+            self.fb_r = yr;
+
+            left[i] = dl * (1.0 - mix) + yl * mix;
+            right[i] = dr * (1.0 - mix) + yr * mix;
+        }
+    }
+}
+
 #[derive(Debug)]
 enum ProcessorKind {
     Gate(GateState),
@@ -2219,6 +2424,7 @@ enum ProcessorKind {
     Delay(DelayState),
     Reverb(Box<ReverbState>),
     AutoWah(AutoWahState),
+    Phaser(PhaserState),
 }
 
 #[derive(Debug)]
@@ -2248,6 +2454,7 @@ impl RackProcessor {
             RackEffect::Delay => ProcessorKind::Delay(DelayState::new(sr)),
             RackEffect::Reverb => ProcessorKind::Reverb(Box::new(ReverbState::new(sr))),
             RackEffect::AutoWah => ProcessorKind::AutoWah(AutoWahState::new(sr)),
+            RackEffect::Phaser => ProcessorKind::Phaser(PhaserState::new()),
         };
         Self {
             effect,
@@ -2291,6 +2498,7 @@ impl RackProcessor {
             ProcessorKind::Delay(s) => s.process(p, left, right, sr, bpm),
             ProcessorKind::Reverb(s) => s.process(p, left, right, sr),
             ProcessorKind::AutoWah(s) => s.process(p, left, right, sr),
+            ProcessorKind::Phaser(s) => s.process(p, left, right, sr),
         }
     }
 }
@@ -2501,6 +2709,33 @@ mod tests {
         assert!(
             down_gain > loud_gain * 1.5,
             "loud Down should settle near freq_low like quiet Up, not attenuate like loud Up: down={down_gain} loud={loud_gain}"
+        );
+    }
+
+    #[test]
+    fn phaser_mix_zero_is_bypass() {
+        let mut proc = RackProcessor::new(RackEffect::Phaser, 48_000);
+        proc.set_param(6, 0.0); // mix: 0% = pure dry
+        let (mut l, mut r) = test_tone(2048, 0.4);
+        let dry = l.clone();
+        assert_no_alloc::assert_no_alloc(|| proc.process(&mut l, &mut r, None, 120.0));
+        for (wet, dry) in l.iter().zip(dry.iter()) {
+            assert!((wet - dry).abs() < 1e-5, "wet={wet} dry={dry}");
+        }
+    }
+
+    #[test]
+    fn phaser_sweeps_without_blowing_up() {
+        let mut proc = RackProcessor::new(RackEffect::Phaser, 48_000);
+        proc.set_param(2, 90.0); // high feedback
+        proc.set_param(6, 60.0); // mix
+        let (mut l, mut r) = test_tone(48_000, 0.4);
+        assert_no_alloc::assert_no_alloc(|| proc.process(&mut l, &mut r, None, 120.0));
+        // Resonant feedback peaks can exceed unity gain at some frequencies;
+        // this only guards against genuine blow-up (NaN/inf or runaway gain).
+        assert!(
+            l.iter().all(|s| s.is_finite() && s.abs() < 10.0),
+            "phaser output should stay bounded with high feedback"
         );
     }
 
