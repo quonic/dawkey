@@ -68,6 +68,27 @@ impl App {
         self.extra_windows.iter().map(|w| w.role).collect()
     }
 
+    /// This window's fixed role in the multi-monitor layout, if any (see
+    /// [`Self::set_window_roles`]).
+    pub fn primary_role(&self) -> Option<ViewRole> {
+        self.primary_role
+    }
+
+    /// Leaves multi-monitor mode by setting the `layout` preference back to
+    /// `Standard`, the same way changing it in the preferences panel would
+    /// (applied and saved the same way). For when the platform can no
+    /// longer show the layout it asked for — a monitor's window was closed,
+    /// say.
+    pub fn set_layout_standard(&mut self) {
+        self.change_preferences(|p| p.layout = crate::prefs::LayoutChoice::Standard);
+    }
+
+    /// The pointer shape one of the other windows asks for, like
+    /// [`Self::cursor`] for the primary one.
+    pub fn extra_cursor(&self, index: usize) -> Option<dawkey_ui::Cursor> {
+        self.extra_windows.get(index)?.ui.cursor()
+    }
+
     /// Resizes one of the other windows (by index into
     /// [`Self::extra_window_roles`]).
     pub fn resize_extra_window(&mut self, index: usize, window: WindowInfo) {

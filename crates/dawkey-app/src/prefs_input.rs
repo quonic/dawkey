@@ -62,7 +62,7 @@ impl App {
     }
 
     /// Changes the preferences with `change`, applies and saves them.
-    fn change_preferences(&mut self, change: impl FnOnce(&mut Preferences)) {
+    pub(crate) fn change_preferences(&mut self, change: impl FnOnce(&mut Preferences)) {
         let before = self.prefs.clone();
         change(&mut self.prefs);
         if self.prefs == before {
