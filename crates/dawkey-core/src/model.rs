@@ -919,6 +919,46 @@ impl Default for TimeSignature {
     }
 }
 
+/// A track removed by a non-destructive mixdown, with the position it occupied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ArchivedTrack {
+    pub index: usize,
+    pub track: Track,
+}
+
+/// Routing on a remaining track that pointed to an archived track or bus
+/// before the mixdown, kept so restoring the mixdown can re-attach it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DetachedTrackRoutes {
+    pub track: TrackId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<TrackId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sends: Vec<Send>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub send_automation: Vec<AutomationLane>,
+    /// `(plugin_id, sidechain, outputs)` detached from plugins on `track`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_routes: Vec<(PluginId, Option<TrackId>, BTreeMap<u32, TrackId>)>,
+}
+
+/// Original tracks archived when creating `mix_track`, restorable later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MixdownArchive {
+    pub mix_track: TrackId,
+    pub tracks: Vec<ArchivedTrack>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detached_routes: Vec<DetachedTrackRoutes>,
+}
+
+/// Tracks archived by a non-destructive delete, restorable later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DeletedTrackArchive {
+    pub tracks: Vec<ArchivedTrack>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detached_routes: Vec<DetachedTrackRoutes>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Project {
     pub name: String,
@@ -959,6 +999,14 @@ pub struct Project {
     /// The user's own saved drum step patterns (save_drum_pattern), by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drum_patterns: Vec<SavedDrumPattern>,
+    /// Original tracks archived by non-destructive mixdowns, keyed by the
+    /// combined mixdown track's ID so they can be restored later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mixdown_archives: Vec<MixdownArchive>,
+    /// Tracks archived by non-destructive deletion (most recent last),
+    /// restorable later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_track_archives: Vec<DeletedTrackArchive>,
     /// Next IDs to hand out. Saved so IDs stay unique across sessions.
     next_track_id: u64,
     #[serde(default)]
@@ -1006,6 +1054,8 @@ impl Project {
             plugin_states: BTreeMap::new(),
             rack_presets: Vec::new(),
             drum_patterns: Vec::new(),
+            mixdown_archives: Vec::new(),
+            deleted_track_archives: Vec::new(),
             next_track_id: 1,
             next_source_id: 1,
             next_clip_id: 1,
@@ -1020,6 +1070,22 @@ impl Project {
             return Some(&self.master);
         }
         self.tracks.iter().find(|t| t.id == id)
+    }
+
+    /// Archived source tracks associated with mixdown track `mix_track`.
+    pub fn mixdown_archive(&self, mix_track: TrackId) -> Option<&MixdownArchive> {
+        self.mixdown_archives
+            .iter()
+            .find(|a| a.mix_track == mix_track)
+    }
+
+    /// Every track stored inside non-destructive mixdown or deleted-track archives.
+    pub fn archived_tracks(&self) -> impl Iterator<Item = &Track> {
+        self.mixdown_archives
+            .iter()
+            .flat_map(|a| &a.tracks)
+            .chain(self.deleted_track_archives.iter().flat_map(|a| &a.tracks))
+            .map(|at| &at.track)
     }
 
     pub(crate) fn track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
@@ -1207,7 +1273,14 @@ impl Project {
 
     /// Repairs invariants a hand-edited or corrupted file could break.
     pub(crate) fn sanitize(&mut self) {
-        let max_track = self.tracks.iter().map(|t| t.id.0).max().unwrap_or(0);
+        let archived_max_track = self.archived_tracks().map(|t| t.id.0).max().unwrap_or(0);
+        let max_track = self
+            .tracks
+            .iter()
+            .map(|t| t.id.0)
+            .max()
+            .unwrap_or(0)
+            .max(archived_max_track);
         self.next_track_id = self.next_track_id.max(max_track + 1);
         // Track 0 is the master's.
         for i in 0..self.tracks.len() {
@@ -1223,14 +1296,28 @@ impl Project {
         master.output = None;
         let max_source = self.sources.iter().map(|s| s.id.0).max().unwrap_or(0);
         self.next_source_id = self.next_source_id.max(max_source + 1);
+        let archived_max_clip = self
+            .archived_tracks()
+            .flat_map(|t| &t.clips)
+            .map(|c| c.id.0)
+            .max()
+            .unwrap_or(0);
         let max_clip = self
             .tracks
             .iter()
             .flat_map(|t| &t.clips)
             .map(|c| c.id.0)
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(archived_max_clip);
         self.next_clip_id = self.next_clip_id.max(max_clip + 1);
+        let archived_max_note = self
+            .archived_tracks()
+            .flat_map(|t| &t.clips)
+            .flat_map(|c| c.notes())
+            .map(|n| n.id.0)
+            .max()
+            .unwrap_or(0);
         let max_note = self
             .tracks
             .iter()
@@ -1238,14 +1325,22 @@ impl Project {
             .flat_map(|c| c.notes())
             .map(|n| n.id.0)
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(archived_max_note);
         self.next_note_id = self.next_note_id.max(max_note + 1);
+        let archived_max_plugin = self
+            .archived_tracks()
+            .flat_map(|t| &t.plugins)
+            .map(|p| p.id.0)
+            .max()
+            .unwrap_or(0);
         let max_plugin = self
             .all_tracks()
             .flat_map(|t| &t.plugins)
             .map(|p| p.id.0)
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(archived_max_plugin);
         self.next_plugin_id = self.next_plugin_id.max(max_plugin + 1);
         if !(TEMPO_BPM_MIN..=TEMPO_BPM_MAX).contains(&self.tempo_bpm) {
             self.tempo_bpm = 120.0;

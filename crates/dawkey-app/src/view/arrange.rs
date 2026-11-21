@@ -63,6 +63,13 @@ fn headers(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
         .height(Sizing::Fixed(RULER_H))
         .padding(Insets::xy(10.0, 0.0))
         .style(|s| s.background = Some(pal().toolbar))
+        .children(model.deleted_archive_summary.as_deref().map(|summary| {
+            button("arrange/restore_deleted", summary, ui, None)
+                .text("Restore")
+                .padding(Insets::xy(6.0, 0.0))
+                .height(Sizing::Fixed(20.0))
+                .style(|s| s.font_size = 11.0)
+        }))
         .child(Node::spacer())
         .child(
             button(
@@ -279,6 +286,7 @@ pub(crate) fn lane_value(points: &[(f64, f64)], t: f64) -> Option<f64> {
 
 fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> Node {
     let id = track.id;
+    let selected = view.selected_tracks.contains(&id);
     let kind = match track.kind {
         TrackKind::Audio => "Audio",
         TrackKind::Midi => "MIDI",
@@ -288,6 +296,7 @@ fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> No
         .id(format!("track/{id}"))
         .role(Role::ListItem)
         .accessible_label(track.name.clone())
+        .clickable()
         .padding(Insets {
             left: 14.0,
             right: 10.0,
@@ -296,7 +305,16 @@ fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> No
         })
         .gap(6.0)
         .align(Align::Start)
-        .style(|s| s.background = Some(pal().track))
+        .style(|s| {
+            s.background = Some(if selected {
+                pal().track.mix(pal().accent, 0.18)
+            } else {
+                pal().track
+            });
+            if selected {
+                s.border = Some((1.0, pal().accent));
+            }
+        })
         // A color tab matching the track's clips.
         .child(
             Node::row()
@@ -358,6 +376,13 @@ fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> No
                         pal().monitor_on,
                         ui,
                     )
+                }))
+                .children((track.has_mixdown_archive).then(|| {
+                    Node::label("Mix").style(|s| {
+                        s.color = pal().accent;
+                        s.font_size = 10.0;
+                        s.weight = FontWeight::SemiBold;
+                    })
                 }))
                 .child(Node::label(kind).style(|s| {
                     s.color = pal().text_dim;

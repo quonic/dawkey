@@ -4,15 +4,17 @@
 
 use dawkey_core::{
     AddDrumTrack, AddGuitarTrack, AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project,
-    RemoveClip, RemoveTrackSend, SetLoop, SetPunch, SetTrackArm, SetTrackGain, SetTrackInput,
-    SetTrackMute, SetTrackOutput, SetTrackPan, SetTrackSend, SetTrackSolo, TrackId, TrackKind,
+    RemoveClip, RemoveTrackSend, RestoreDeletedTracks, RestoreMixdownTracks, SetLoop, SetPunch,
+    SetTrackArm, SetTrackGain, SetTrackInput, SetTrackMute, SetTrackOutput, SetTrackPan,
+    SetTrackSend, SetTrackSolo, TrackId, TrackKind,
 };
 use dawkey_ui::{ChromeAction, DragPhase, Modifiers, MouseButton, Point, Rect, UiAction};
 
 use crate::App;
 use crate::state::{
-    ClipEdge, FADER_H, Gesture, ImportRequest, MAX_ZOOM, MIN_ZOOM, PAN_W, Page, PendingAction,
-    PlatformRequest, RangeKind, SEND_W, TextField, takes_shown, track_tops,
+    ClipEdge, DeleteConfirm, FADER_H, Gesture, ImportRequest, MAX_ZOOM, MIN_ZOOM, MixdownConfirm,
+    PAN_W, Page, PendingAction, PlatformRequest, RangeKind, SEND_W, TextField, TrackMenu,
+    takes_shown, track_tops,
 };
 use crate::view::{db_from_position, position_from_db};
 
@@ -77,15 +79,43 @@ impl App {
         count: u8,
         modifiers: Modifiers,
     ) -> Result<(), String> {
+        self.leave_text_edit(id)?;
+        let parts: Vec<&str> = id.split('/').collect();
+        if button == MouseButton::Right {
+            if self.view.page == Page::Arrange
+                && self.view.confirm.is_none()
+                && self.view.mixdown_confirm.is_none()
+                && self.view.delete_confirm.is_none()
+                && let ["track", track, ..] = parts[..]
+                && let Ok(track) = parse_track(track)
+                && track != dawkey_core::MASTER
+                && self.studio.session().project().track(track).is_some()
+            {
+                if !self.view.selected_tracks.contains(&track) {
+                    self.select_track(track, Modifiers::default())?;
+                }
+                self.view.track_menu = Some(TrackMenu { track, pos });
+                return Ok(());
+            }
+            self.view.track_menu = None;
+            return Ok(());
+        }
         if button != MouseButton::Left {
             return Ok(());
         }
-        self.leave_text_edit(id)?;
-        let parts: Vec<&str> = id.split('/').collect();
         if let Some(result) = self.on_recovery_click(&parts) {
             return result;
         }
         if let Some(result) = self.on_confirm_click(&parts) {
+            return result;
+        }
+        if let Some(result) = self.on_mixdown_confirm_click(&parts) {
+            return result;
+        }
+        if let Some(result) = self.on_delete_confirm_click(&parts) {
+            return result;
+        }
+        if let Some(result) = self.on_track_menu_click(&parts) {
             return result;
         }
         if let Some(result) = self.on_prefs_click(&parts) {
@@ -173,6 +203,7 @@ impl App {
                 }
                 .into(),
             ),
+            ["arrange", "restore_deleted"] => self.restore_deleted_tracks(),
             ["track", track, "output"] => {
                 let track = parse_track(track)?;
                 self.cycle_output(track)
@@ -228,7 +259,22 @@ impl App {
                 };
                 self.execute(command)
             }
-            // Double-clicking a track's name types a new one.
+            // Clicking a track's header selects it (Ctrl toggles, Shift extends range).
+            ["track", track] => {
+                let track = parse_track(track)?;
+                if track != dawkey_core::MASTER {
+                    self.select_track(track, modifiers)?;
+                }
+                Ok(())
+            }
+            // Clicking a track's name once selects it; double-clicking types a new one.
+            ["track", track, "name"] if count == 1 => {
+                let track = parse_track(track)?;
+                if track != dawkey_core::MASTER {
+                    self.select_track(track, modifiers)?;
+                }
+                Ok(())
+            }
             ["track", track, "name"] if count == 2 => {
                 let field = TextField::TrackName(parse_track(track)?);
                 match self.editing(&field) {
@@ -782,6 +828,9 @@ impl App {
         if let Some(result) = self.on_confirm_key(key) {
             return result;
         }
+        if let Some(result) = self.on_mixdown_key(key) {
+            return result;
+        }
         if let Some(result) = self.on_text_key(key, m) {
             return result;
         }
@@ -896,6 +945,8 @@ impl App {
             }
             ("escape", ..) => {
                 self.view.selected_clip = None;
+                self.view.selected_tracks.clear();
+                self.view.track_anchor = None;
                 Ok(())
             }
             _ => Ok(()),
@@ -1027,6 +1078,224 @@ impl App {
             .project()
             .clip(clip)
             .map(|(_, c)| c.kind())
+    }
+
+    /// Selects track `track` in the arrange view (`Ctrl` toggles, `Shift`
+    /// selects a range from the anchor track).
+    pub(crate) fn select_track(
+        &mut self,
+        track: TrackId,
+        modifiers: Modifiers,
+    ) -> Result<(), String> {
+        let project = self.studio.session().project();
+        if track == dawkey_core::MASTER || project.track(track).is_none() {
+            return Err(format!("track {track} does not exist"));
+        }
+        if modifiers.shift {
+            let anchor = self
+                .view
+                .track_anchor
+                .or_else(|| self.view.selected_tracks.first().copied())
+                .filter(|&id| project.track(id).is_some())
+                .unwrap_or(track);
+            let Some(a) = project.track_index(anchor) else {
+                return Ok(());
+            };
+            let Some(b) = project.track_index(track) else {
+                return Ok(());
+            };
+            let (lo, hi) = (a.min(b), a.max(b));
+            let range: Vec<TrackId> = project.tracks[lo..=hi].iter().map(|t| t.id).collect();
+            if modifiers.ctrl {
+                for id in range {
+                    if !self.view.selected_tracks.contains(&id) {
+                        self.view.selected_tracks.push(id);
+                    }
+                }
+            } else {
+                self.view.selected_tracks = range;
+            }
+            if self.view.track_anchor.is_none() {
+                self.view.track_anchor = Some(anchor);
+            }
+        } else if modifiers.ctrl {
+            if let Some(pos) = self.view.selected_tracks.iter().position(|&id| id == track) {
+                self.view.selected_tracks.remove(pos);
+            } else {
+                self.view.selected_tracks.push(track);
+            }
+            self.view.track_anchor = Some(track);
+        } else {
+            self.view.selected_tracks = vec![track];
+            self.view.track_anchor = Some(track);
+        }
+        self.view.rack_track = Some(track);
+        Ok(())
+    }
+
+    fn menu_tracks(&self, fallback: TrackId) -> Vec<TrackId> {
+        let project = self.studio.session().project();
+        let mut tracks: Vec<TrackId> = project
+            .tracks
+            .iter()
+            .map(|t| t.id)
+            .filter(|id| self.view.selected_tracks.contains(id))
+            .collect();
+        if tracks.is_empty() {
+            tracks.push(fallback);
+        }
+        tracks
+    }
+
+    fn on_track_menu_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
+        let menu = self.view.track_menu?;
+        Some(match parts {
+            ["track_menu"] => Ok(()),
+            ["track_menu", "backdrop"] => {
+                self.view.track_menu = None;
+                Ok(())
+            }
+            ["track_menu", "mixdown"] => {
+                let tracks = self.menu_tracks(menu.track);
+                self.view.track_menu = None;
+                self.view.mixdown_confirm = Some(MixdownConfirm {
+                    tracks,
+                    remove_originals: true,
+                });
+                Ok(())
+            }
+            ["track_menu", "restore_mixdown"] => {
+                self.view.track_menu = None;
+                self.execute(
+                    RestoreMixdownTracks {
+                        mix_track: menu.track,
+                        remove_mix_track: true,
+                    }
+                    .into(),
+                )
+            }
+            ["track_menu", "delete"] => {
+                let tracks = self.menu_tracks(menu.track);
+                self.view.track_menu = None;
+                self.view.delete_confirm = Some(DeleteConfirm {
+                    tracks,
+                    permanent: false,
+                });
+                Ok(())
+            }
+            ["track_menu", "restore_deleted"] => {
+                self.view.track_menu = None;
+                self.restore_deleted_tracks()
+            }
+            _ => return None,
+        })
+    }
+
+    fn on_mixdown_confirm_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
+        self.view.mixdown_confirm.as_ref()?;
+        Some(match parts {
+            ["mixdown_confirm"] => Ok(()),
+            ["mixdown_confirm", "cancel"] | ["mixdown_confirm", "backdrop"] => {
+                self.view.mixdown_confirm = None;
+                Ok(())
+            }
+            ["mixdown_confirm", "remove_originals"] => {
+                if let Some(confirm) = &mut self.view.mixdown_confirm {
+                    confirm.remove_originals = !confirm.remove_originals;
+                }
+                Ok(())
+            }
+            ["mixdown_confirm", "confirm"] => self.confirm_mixdown(),
+            _ => return None,
+        })
+    }
+
+    fn on_delete_confirm_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
+        self.view.delete_confirm.as_ref()?;
+        Some(match parts {
+            ["delete_confirm"] => Ok(()),
+            ["delete_confirm", "cancel"] | ["delete_confirm", "backdrop"] => {
+                self.view.delete_confirm = None;
+                Ok(())
+            }
+            ["delete_confirm", "permanent"] => {
+                if let Some(confirm) = &mut self.view.delete_confirm {
+                    confirm.permanent = !confirm.permanent;
+                }
+                Ok(())
+            }
+            ["delete_confirm", "confirm"] => self.confirm_delete_tracks(),
+            _ => return None,
+        })
+    }
+
+    fn on_mixdown_key(&mut self, key: &str) -> Option<Result<(), String>> {
+        if self.view.mixdown_confirm.is_some() {
+            return Some(match key {
+                "escape" => {
+                    self.view.mixdown_confirm = None;
+                    Ok(())
+                }
+                "return" => self.confirm_mixdown(),
+                _ => Ok(()),
+            });
+        }
+        if self.view.delete_confirm.is_some() {
+            return Some(match key {
+                "escape" => {
+                    self.view.delete_confirm = None;
+                    Ok(())
+                }
+                "return" => self.confirm_delete_tracks(),
+                _ => Ok(()),
+            });
+        }
+        if self.view.track_menu.is_some() && key == "escape" {
+            self.view.track_menu = None;
+            return Some(Ok(()));
+        }
+        None
+    }
+
+    fn confirm_mixdown(&mut self) -> Result<(), String> {
+        let Some(confirm) = self.view.mixdown_confirm.take() else {
+            return Ok(());
+        };
+        let outcome = self
+            .studio
+            .mixdown_tracks(&confirm.tracks, None, confirm.remove_originals)
+            .map_err(|e| e.to_string())?;
+        if let Some(new_track) = outcome.track {
+            self.view.selected_tracks = vec![new_track];
+            self.view.track_anchor = Some(new_track);
+            self.view.rack_track = Some(new_track);
+        }
+        Ok(())
+    }
+
+    fn confirm_delete_tracks(&mut self) -> Result<(), String> {
+        let Some(confirm) = self.view.delete_confirm.take() else {
+            return Ok(());
+        };
+        self.studio
+            .delete_tracks(&confirm.tracks, confirm.permanent)
+            .map_err(|e| e.to_string())?;
+        self.view.selected_tracks.clear();
+        self.view.track_anchor = None;
+        Ok(())
+    }
+
+    fn restore_deleted_tracks(&mut self) -> Result<(), String> {
+        let outcome = self
+            .studio
+            .execute(RestoreDeletedTracks { index: None }.into())
+            .map_err(|e| e.to_string())?;
+        if let Some(restored) = outcome.track {
+            self.view.selected_tracks = vec![restored];
+            self.view.track_anchor = Some(restored);
+            self.view.rack_track = Some(restored);
+        }
+        Ok(())
     }
 
     /// The clip the piano roll would open: the one being edited, else the
