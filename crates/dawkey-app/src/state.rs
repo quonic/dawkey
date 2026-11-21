@@ -538,6 +538,30 @@ pub(crate) enum RangeKind {
     Punch,
 }
 
+/// Which tracks are shown/targeted by the right-click track context menu in
+/// the arrange view.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct TrackMenu {
+    pub track: TrackId,
+    pub pos: dawkey_ui::Point,
+}
+
+/// The confirmation dialog for mixing selected tracks down into one audio
+/// track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MixdownConfirm {
+    pub tracks: Vec<TrackId>,
+    pub remove_originals: bool,
+}
+
+/// The confirmation dialog for deleting selected tracks (non-destructive
+/// archive by default, or permanent deletion when `permanent` is true).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeleteConfirm {
+    pub tracks: Vec<TrackId>,
+    pub permanent: bool,
+}
+
 /// View settings and selection.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ViewState {
@@ -548,6 +572,17 @@ pub struct ViewState {
     pub scroll_s: f64,
     /// Vertical scroll of the track lanes, in logical px.
     pub scroll_y: f32,
+    /// Tracks selected in the arrange view (including buses).
+    pub selected_tracks: Vec<TrackId>,
+    /// Anchor track for Shift+click range selection in the arrange view.
+    #[serde(skip)]
+    pub(crate) track_anchor: Option<TrackId>,
+    /// Open right-click context menu on a track header in the arrange view.
+    pub track_menu: Option<TrackMenu>,
+    /// Open confirmation dialog for mixing down selected tracks.
+    pub mixdown_confirm: Option<MixdownConfirm>,
+    /// Open confirmation dialog for deleting selected tracks.
+    pub delete_confirm: Option<DeleteConfirm>,
     pub selected_clip: Option<ClipId>,
     /// The clip Ctrl+C copied, which Ctrl+V pastes.
     pub clipboard: Option<ClipId>,
@@ -730,6 +765,11 @@ impl Default for ViewState {
             px_per_s: 80.0,
             scroll_s: 0.0,
             scroll_y: 0.0,
+            selected_tracks: Vec::new(),
+            track_anchor: None,
+            track_menu: None,
+            mixdown_confirm: None,
+            delete_confirm: None,
             selected_clip: None,
             clipboard: None,
             snap: true,

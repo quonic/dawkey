@@ -3437,3 +3437,264 @@ fn sends_in_the_mixer() {
             .is_some()
     );
 }
+
+#[test]
+fn multi_select_tracks_and_mixdown_from_context_menu() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app();
+    app.studio.set_recording_dir(dir.path().to_owned());
+
+    let (t1, _) = add_clip(&mut app, 0.0);
+    let t2 = app
+        .studio
+        .execute(
+            AddTrack {
+                name: Some("Lead Synth".into()),
+                kind: TrackKind::Midi,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+    app.studio
+        .execute(
+            AddMidiClip {
+                track: Some(TrackId(t2)),
+                position_s: 0.0,
+                notes: vec![NoteSpec {
+                    pitch: 64,
+                    start_beats: 0.0,
+                    length_beats: 1.0,
+                    velocity: 100,
+                }],
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap();
+    let bus = app
+        .studio
+        .execute(
+            AddTrack {
+                name: Some("FX Bus".into()),
+                kind: TrackKind::Bus,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+    app.rebuild();
+
+    // Plain click selects one track; Ctrl+click adds the bus; Shift+click selects the range.
+    click(&mut app, &format!("track/{t1}")).unwrap();
+    assert_eq!(app.view.selected_tracks, vec![TrackId(t1)]);
+
+    app.click(&format!("track/{bus}"), MouseButton::Left, CTRL)
+        .unwrap();
+    assert_eq!(app.view.selected_tracks, vec![TrackId(t1), TrackId(bus)]);
+
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Left,
+        Modifiers::default(),
+    )
+    .unwrap();
+    app.click(&format!("track/{bus}"), MouseButton::Left, shift)
+        .unwrap();
+    assert_eq!(
+        app.view.selected_tracks,
+        vec![TrackId(t1), TrackId(t2), TrackId(bus)]
+    );
+
+    // Right-clicking any selected track opens the context menu keeping multi-selection.
+    app.click(
+        &format!("track/{t2}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert!(app.ui.find("track_menu").is_some());
+    assert!(app.ui.find("track_menu/mixdown").is_some());
+
+    // Open the Mix Down confirmation dialog and toggle its checkbox off and back on.
+    click(&mut app, "track_menu/mixdown").unwrap();
+    assert!(app.ui.find("mixdown_confirm").is_some());
+    assert_eq!(
+        app.access_tree()
+            .find("mixdown_confirm/remove_originals")
+            .unwrap()
+            .checked,
+        Some(true)
+    );
+    click(&mut app, "mixdown_confirm/remove_originals").unwrap();
+    assert_eq!(
+        app.access_tree()
+            .find("mixdown_confirm/remove_originals")
+            .unwrap()
+            .checked,
+        Some(false)
+    );
+    click(&mut app, "mixdown_confirm/remove_originals").unwrap();
+    click(&mut app, "mixdown_confirm/confirm").unwrap();
+
+    // Original tracks (and unused bus) were archived into the new Mixdown 1 audio track.
+    assert!(app.ui.find("mixdown_confirm").is_none());
+    let project = app.studio.session().project();
+    assert_eq!(project.tracks.len(), 1);
+    let mix_track = project.tracks[0].id;
+    assert_eq!(project.tracks[0].name, "Mixdown 1");
+    assert!(project.mixdown_archive(mix_track).is_some());
+
+    // Right-clicking the mixdown track offers Restore Mixed-Down Tracks, which brings them back.
+    app.click(
+        &format!("track/{mix_track}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert!(app.ui.find("track_menu/restore_mixdown").is_some());
+    click(&mut app, "track_menu/restore_mixdown").unwrap();
+
+    let project = app.studio.session().project();
+    assert_eq!(project.tracks.len(), 3);
+    assert!(project.track(TrackId(t1)).is_some());
+    assert!(project.track(TrackId(t2)).is_some());
+    assert!(project.track(TrackId(bus)).is_some());
+    assert!(project.track(mix_track).is_none());
+}
+
+#[test]
+fn delete_track_context_menu_archives_by_default_and_can_permanently_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let rec_dir = dir.path().join("recordings");
+    std::fs::create_dir_all(&rec_dir).unwrap();
+    let mut app = app();
+    app.studio.set_recording_dir(rec_dir.clone());
+
+    let (t1, _) = add_clip(&mut app, 0.0);
+    let t2 = app
+        .studio
+        .execute(
+            AddTrack {
+                name: Some("Audio 2".into()),
+                kind: TrackKind::Audio,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+    let wav = rec_dir.join("delete_me.wav");
+    dawkey_media::write_wav(&wav, &[vec![0.2; 1024]], 48_000).unwrap();
+    let src2 = app.studio.add_source(
+        &wav,
+        DecodedFile {
+            audio: AudioData::new(vec![vec![0.2; 1024]]),
+            source_rate: 48_000,
+        },
+    );
+    app.studio
+        .execute(AddClip::new(src2, Some(TrackId(t2)), 0.0).into())
+        .unwrap();
+    app.rebuild();
+
+    // Right-click track 2 -> Delete Track… (checkbox unchecked by default -> non-destructive).
+    app.click(
+        &format!("track/{t2}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert!(app.ui.find("track_menu/delete").is_some());
+    click(&mut app, "track_menu/delete").unwrap();
+    assert!(app.ui.find("delete_confirm").is_some());
+    assert_eq!(
+        app.access_tree()
+            .find("delete_confirm/permanent")
+            .unwrap()
+            .checked,
+        Some(false)
+    );
+    click(&mut app, "delete_confirm/confirm").unwrap();
+
+    assert!(app.ui.find("delete_confirm").is_none());
+    let project = app.studio.session().project();
+    assert!(project.track(TrackId(t2)).is_none());
+    assert_eq!(project.deleted_track_archives.len(), 1);
+    assert!(project.source(src2).is_some());
+    assert!(wav.exists());
+    assert!(app.ui.find("arrange/restore_deleted").is_some());
+
+    // Restore from track 1's context menu.
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert!(app.ui.find("track_menu/restore_deleted").is_some());
+    click(&mut app, "track_menu/restore_deleted").unwrap();
+
+    assert!(app.studio.session().project().track(TrackId(t2)).is_some());
+    assert!(
+        app.studio
+            .session()
+            .project()
+            .deleted_track_archives
+            .is_empty()
+    );
+    assert!(app.ui.find("arrange/restore_deleted").is_none());
+
+    // Delete both tracks non-destructively -> Restore button in arrange header restores even when empty.
+    click(&mut app, &format!("track/{t1}")).unwrap();
+    app.click(&format!("track/{t2}"), MouseButton::Left, CTRL)
+        .unwrap();
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/delete").unwrap();
+    click(&mut app, "delete_confirm/confirm").unwrap();
+    assert!(app.studio.session().project().tracks.is_empty());
+    assert!(app.ui.find("arrange/restore_deleted").is_some());
+    click(&mut app, "arrange/restore_deleted").unwrap();
+    assert_eq!(app.studio.session().project().tracks.len(), 2);
+
+    // Check "Permanently delete" -> permanently removes track 2, its source, and its WAV file.
+    app.click(
+        &format!("track/{t2}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/delete").unwrap();
+    click(&mut app, "delete_confirm/permanent").unwrap();
+    assert_eq!(
+        app.access_tree()
+            .find("delete_confirm/permanent")
+            .unwrap()
+            .checked,
+        Some(true)
+    );
+    click(&mut app, "delete_confirm/confirm").unwrap();
+
+    let project = app.studio.session().project();
+    assert!(project.track(TrackId(t2)).is_none());
+    assert!(project.deleted_track_archives.is_empty());
+    assert!(project.source(src2).is_none());
+    assert!(!wav.exists());
+}

@@ -24,10 +24,10 @@ use dawkey_backend_pipewire::{
     BackendStatus, MidiCaptureRoute, MidiRoutes, PipeWireError, PipeWireOutput,
 };
 use dawkey_core::{
-    AddClip, AddMidiClip, AutomationTarget, Command, ControlSpec, Controller, CoreError,
-    MeterChange, MeterMap, NoteSpec, Outcome, PluginId, Project, RemoveClip, Session, SetTempoMap,
-    SetTimeSignatureMap, SourceId, TempoChange, TempoMap, TimeRange, TimeSignature, TrackId,
-    TrackKind,
+    AddClip, AddMidiClip, AddTrack, ArchiveTracksForMixdown, AutomationTarget, Command,
+    ControlSpec, Controller, CoreError, DeleteTracks, MeterChange, MeterMap, NoteSpec, Outcome,
+    PluginId, Project, RemoveClip, Session, SetTempoMap, SetTimeSignatureMap, SourceId,
+    TempoChange, TempoMap, TimeRange, TimeSignature, Track, TrackId, TrackKind,
 };
 use dawkey_engine::{
     EngineBusy, EngineController, EngineProcessor, Graph, InputFilter, MediaPool, MeterReading,
@@ -1818,6 +1818,304 @@ impl Studio {
             .finish_offline(leftovers.job, leftovers.processors);
     }
 
+    /// Renders `tracks` (audio tracks, MIDI/synth tracks, and/or buses — before
+    /// the master bus's fader and plugins) to a new stereo audio file, places it
+    /// on a new audio track, and when `remove_originals` is true, non-destructively
+    /// archives and removes the original tracks in one undo step.
+    pub fn mixdown_tracks(
+        &mut self,
+        tracks: &[TrackId],
+        name: Option<String>,
+        remove_originals: bool,
+    ) -> Result<Outcome, StudioError> {
+        let project = self.session.project();
+        if tracks.is_empty() {
+            return Err(StudioError::Invalid(
+                "select at least one track to mix down".into(),
+            ));
+        }
+        let mut selected_ids = Vec::with_capacity(tracks.len());
+        for &id in tracks {
+            if id == dawkey_core::MASTER {
+                return Err(StudioError::Invalid(
+                    "the master bus cannot be mixed down as a source track".into(),
+                ));
+            }
+            if project.track(id).is_none() {
+                return Err(CoreError::TrackNotFound(id).into());
+            }
+            if !selected_ids.contains(&id) {
+                selected_ids.push(id);
+            }
+        }
+        let selected_buses: Vec<TrackId> = selected_ids
+            .iter()
+            .copied()
+            .filter(|&id| project.track(id).is_some_and(|t| t.kind == TrackKind::Bus))
+            .collect();
+        let mut source_ids = Vec::new();
+        for track in &project.tracks {
+            if track.kind == TrackKind::Bus || track.mute {
+                continue;
+            }
+            let direct = selected_ids.contains(&track.id);
+            let via_bus = selected_buses
+                .iter()
+                .any(|&bus| project.feeds(track.id, bus));
+            if direct || via_bus {
+                source_ids.push(track.id);
+            }
+        }
+        if source_ids.is_empty() {
+            return Err(StudioError::Invalid(
+                "select at least one unmuted audio or MIDI track (or a bus receiving tracks) to mix down"
+                    .into(),
+            ));
+        }
+        let mut start_frame: Option<u64> = None;
+        let mut end_frame: u64 = 0;
+        for &id in &source_ids {
+            if let Some(t) = project.track(id) {
+                for clip in t.clips.iter().filter(|c| !c.muted && c.length > 0) {
+                    start_frame = Some(start_frame.map_or(clip.start, |s| s.min(clip.start)));
+                    end_frame = end_frame.max(clip.end());
+                }
+            }
+        }
+        let Some(start) = start_frame.filter(|&s| end_frame > s) else {
+            return Err(StudioError::Invalid(
+                "the selected tracks have no active clips to mix down".into(),
+            ));
+        };
+        let frames_u64 = end_frame - start;
+        let frames = usize::try_from(frames_u64)
+            .map_err(|_| StudioError::Invalid("the mixdown range is too long".into()))?;
+        let start_s = project.frames_to_seconds(start);
+        let end_s = project.frames_to_seconds(end_frame);
+        if end_s - start_s > MAX_RENDER_S {
+            return Err(StudioError::Invalid(format!(
+                "mixdown length must be at most {MAX_RENDER_S} s"
+            )));
+        }
+
+        let mix_name = match name {
+            Some(n) => {
+                let trimmed = n.trim();
+                if trimmed.is_empty() {
+                    return Err(StudioError::Invalid("name must not be empty".into()));
+                }
+                trimmed.to_owned()
+            }
+            None => (1..)
+                .map(|n| format!("Mixdown {n}"))
+                .find(|candidate| project.tracks.iter().all(|t| &t.name != candidate))
+                .expect("unbounded range always yields a free name"),
+        };
+
+        self.capture_plugin_states(false);
+        let project = self.session.project();
+        let sample_rate = project.sample_rate;
+        let job = self.next_render_job;
+        self.next_render_job += 1;
+        let mut provider = self.plugins.offline_provider(job, &project.plugin_states);
+        let mut soloed = project.clone();
+        for track in &mut soloed.tracks {
+            track.solo = source_ids.contains(&track.id);
+        }
+        // Bypass master plugins and fader so playback through master isn't doubled.
+        soloed.master = Track::master();
+        let graph =
+            Graph::compile_with_devices(&soloed, &self.media, &mut provider, &self.device_latency);
+        let (audio, mut out_graph) = render_offline_keeping(graph, sample_rate, start, frames);
+        let leftovers = RenderLeftovers {
+            job,
+            processors: out_graph.take_plugins(),
+        };
+        self.finish_render(leftovers);
+
+        let wav_path = unique_mixdown_path(&self.recording_dir(), &mix_name);
+        dawkey_media::write_wav(&wav_path, &audio, sample_rate)
+            .map_err(|e| StudioError::Invalid(e.to_string()))?;
+        if self.session.path().is_none() {
+            self.cached_takes.push(wav_path.clone());
+        }
+        let decoded = DecodedFile {
+            audio: AudioData::new(audio),
+            source_rate: sample_rate,
+        };
+        let source = self.add_source(&wav_path, decoded);
+
+        let project = self.session.project();
+        let insert_index = project
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| selected_ids.contains(&t.id))
+            .map(|(i, _)| i + 1)
+            .max()
+            .unwrap_or(project.tracks.len());
+
+        let mut to_archive = Vec::new();
+        if remove_originals {
+            for &id in &selected_ids {
+                if project.track(id).is_some_and(|t| t.kind != TrackKind::Bus)
+                    && !to_archive.contains(&id)
+                {
+                    to_archive.push(id);
+                }
+            }
+            for &id in &source_ids {
+                if !to_archive.contains(&id) {
+                    to_archive.push(id);
+                }
+            }
+            // Also archive selected buses if no track outside `to_archive`
+            // (and outside selected buses) still feeds them.
+            for &bus_id in &selected_buses {
+                let fed_by_remaining = project.tracks.iter().any(|t| {
+                    !to_archive.contains(&t.id)
+                        && !selected_buses.contains(&t.id)
+                        && project.feeds(t.id, bus_id)
+                });
+                if !fed_by_remaining && !to_archive.contains(&bus_id) {
+                    to_archive.push(bus_id);
+                }
+            }
+        }
+
+        let mut step = 0usize;
+        let outcomes = self.execute_batch_with("mixdown_tracks", |_, outcomes| {
+            let cmd = match step {
+                0 => Command::from(AddTrack {
+                    name: Some(mix_name.clone()),
+                    kind: TrackKind::Audio,
+                    index: Some(insert_index),
+                }),
+                1 => {
+                    let mix_track = outcomes[0].track.expect("AddTrack produces a track");
+                    Command::from(AddClip::new(source, Some(mix_track), start_s))
+                }
+                2 if remove_originals && !to_archive.is_empty() => {
+                    let mix_track = outcomes[0].track.expect("AddTrack produces a track");
+                    Command::from(ArchiveTracksForMixdown {
+                        mix_track,
+                        tracks: to_archive.clone(),
+                    })
+                }
+                _ => return Ok(None),
+            };
+            step += 1;
+            Ok(Some(cmd))
+        })?;
+        let mix_track = outcomes.first().and_then(|o| o.track);
+        let mix_clip = outcomes.get(1).and_then(|o| o.clip);
+        Ok(Outcome {
+            track: mix_track,
+            clip: mix_clip,
+            ..Outcome::default()
+        })
+    }
+
+    /// Deletes `tracks` (and/or buses). By default (`permanent` is false),
+    /// captures live plugin states and archives the tracks, clips, plugins, and
+    /// incoming routes non-destructively so they can be restored later. When
+    /// `permanent` is true, also deletes any exclusive audio files inside the
+    /// bundle/recordings folder, plugin states/files, and attached mixdown
+    /// archives.
+    pub fn delete_tracks(
+        &mut self,
+        tracks: &[TrackId],
+        permanent: bool,
+    ) -> Result<Outcome, StudioError> {
+        if !permanent {
+            self.capture_plugin_states(false);
+            return self
+                .execute(Command::from(DeleteTracks {
+                    tracks: tracks.to_vec(),
+                    permanent: false,
+                }))
+                .map_err(Into::into);
+        }
+
+        let before_sources: Vec<(SourceId, Option<PathBuf>)> = self
+            .session
+            .project()
+            .sources
+            .iter()
+            .map(|s| (s.id, self.session.source_path(s.id)))
+            .collect();
+        let deleted_plugins: Vec<PluginId> = {
+            let project = self.session.project();
+            tracks
+                .iter()
+                .filter_map(|&id| project.track(id))
+                .flat_map(|t| &t.plugins)
+                .chain(
+                    project
+                        .mixdown_archives
+                        .iter()
+                        .filter(|a| tracks.contains(&a.mix_track))
+                        .flat_map(|a| &a.tracks)
+                        .flat_map(|at| &at.track.plugins),
+                )
+                .map(|p| p.id)
+                .collect()
+        };
+
+        let outcome = self.execute(Command::from(DeleteTracks {
+            tracks: tracks.to_vec(),
+            permanent: true,
+        }))?;
+
+        for pid in deleted_plugins {
+            let still_used = {
+                let project = self.session.project();
+                project
+                    .all_tracks()
+                    .chain(project.archived_tracks())
+                    .any(|t| t.plugins.iter().any(|p| p.id == pid))
+            };
+            if !still_used {
+                self.session.set_plugin_state(pid, None);
+                let cache_dir = self.plugin_files_dir().join(pid.to_string());
+                if cache_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&cache_dir);
+                }
+                if let Some(bundle) = self.session.path() {
+                    let bundle_dir = bundle
+                        .join(dawkey_core::project_file::PLUGIN_DIR)
+                        .join(pid.to_string());
+                    if bundle_dir.exists() {
+                        let _ = std::fs::remove_dir_all(&bundle_dir);
+                    }
+                }
+            }
+        }
+
+        let rec_dir = self.recording_dir();
+        let bundle_audio = self
+            .session
+            .path()
+            .map(|b| b.join(dawkey_core::project_file::AUDIO_DIR));
+        for (sid, path) in before_sources {
+            if self.session.project().source(sid).is_none() {
+                self.peaks.remove(&sid);
+                if let Some(path) = path {
+                    self.cached_takes.retain(|p| p != &path);
+                    if path.starts_with(&rec_dir)
+                        || bundle_audio
+                            .as_ref()
+                            .is_some_and(|dir| path.starts_with(dir))
+                    {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+
+        Ok(outcome)
+    }
+
     /// The installed plugins (scanned on first use; cached). Waits for a
     /// scan that is running.
     pub fn plugin_catalog(&mut self) -> &Catalog {
@@ -2658,6 +2956,30 @@ fn start_backend(
         }
     };
     Ok((engine, backend))
+}
+
+/// `<dir>/<name>.wav` (or `<name> <n>.wav` if it already exists).
+fn unique_mixdown_path(dir: &Path, name: &str) -> PathBuf {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || " -_".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = safe.trim();
+    let safe = if safe.is_empty() { "Mixdown" } else { safe };
+    let first = dir.join(format!("{safe}.wav"));
+    if !first.exists() {
+        return first;
+    }
+    (2..)
+        .map(|n| dir.join(format!("{safe} {n}.wav")))
+        .find(|p| !p.exists())
+        .expect("unbounded range")
 }
 
 /// Copies the files in `from` (recursively) into `to`, replacing what's

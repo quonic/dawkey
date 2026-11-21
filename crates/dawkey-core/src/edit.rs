@@ -4,8 +4,9 @@
 
 use crate::error::CoreError;
 use crate::model::{
-    AutomationLane, Clip, ClipContent, ClipId, ControlPoint, InputChannels, MidiOutput, Note,
-    PluginSlot, Project, Region, Send, SynthParams, TimeSignature, Track, TrackId,
+    AutomationLane, Clip, ClipContent, ClipId, ControlPoint, DeletedTrackArchive, InputChannels,
+    MidiOutput, MixdownArchive, Note, PluginSlot, Project, Region, Send, Source, SynthParams,
+    TimeSignature, Track, TrackId,
 };
 use crate::tempo::{MeterChange, TempoChange};
 
@@ -47,6 +48,9 @@ pub(crate) enum Edit {
     },
     SetLoop(Region),
     SetPunch(Region),
+    SetMixdownArchives(Vec<MixdownArchive>),
+    SetDeletedTrackArchives(Vec<DeletedTrackArchive>),
+    SetSources(Vec<Source>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,6 +224,14 @@ impl Edit {
             },
             Edit::SetLoop(v) => Edit::SetLoop(std::mem::replace(&mut project.loop_region, v)),
             Edit::SetPunch(v) => Edit::SetPunch(std::mem::replace(&mut project.punch, v)),
+            Edit::SetMixdownArchives(v) => {
+                Edit::SetMixdownArchives(std::mem::replace(&mut project.mixdown_archives, v))
+            }
+            Edit::SetDeletedTrackArchives(v) => Edit::SetDeletedTrackArchives(std::mem::replace(
+                &mut project.deleted_track_archives,
+                v,
+            )),
+            Edit::SetSources(v) => Edit::SetSources(std::mem::replace(&mut project.sources, v)),
         })
     }
 }
