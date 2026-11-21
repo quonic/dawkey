@@ -1450,7 +1450,13 @@ impl CompState {
             sc_hpf_r: 0.0,
             sc_prev_l: 0.0,
             sc_prev_r: 0.0,
-            env_db: -96.0,
+            // A reduction amount (dB), never negative (see `process`): 0.0
+            // is "no reduction yet", its only sane resting value. Starting
+            // this at a large negative number (as if it were an audio-level
+            // envelope) made `wet_gain`'s `db_to_lin(-env_db)` spike to a
+            // huge boost for the first several attack time constants,
+            // whatever hit the compressor first.
+            env_db: 0.0,
         }
     }
 
@@ -2616,6 +2622,18 @@ mod tests {
             let energy: f32 = l.iter().map(|s| s * s).sum();
             assert!(energy > 1e-4, "{} produced silence", spec.id);
         }
+    }
+
+    #[test]
+    fn comp_does_not_spike_on_a_cold_start_hit() {
+        let mut comp = RackProcessor::new(RackEffect::Comp, 48_000);
+        let (mut l, mut r) = test_tone(512, 0.8); // a loud hit right from sample 0
+        assert_no_alloc::assert_no_alloc(|| comp.process(&mut l, &mut r, None, 120.0));
+        let peak = l.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
+        assert!(
+            peak < 2.0,
+            "a fresh compressor shouldn't boost its first input: peak={peak}"
+        );
     }
 
     #[test]
