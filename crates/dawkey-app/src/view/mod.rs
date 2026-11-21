@@ -1034,6 +1034,30 @@ fn statusbar(model: &ViewModel, ui: &UiState, radius: [f32; 4]) -> Node {
                 .id("status/engine")
                 .style(small),
         )
+        .child(status_button(
+            "status/new_project",
+            "New project",
+            "New",
+            ui,
+        ))
+        .child(status_button(
+            "status/open_project",
+            "Open a project",
+            "Open…",
+            ui,
+        ))
+        .child(status_button(
+            "status/save_project",
+            "Save the project",
+            "Save",
+            ui,
+        ))
+        .child(status_button(
+            "status/close_project",
+            "Close the project",
+            "Close",
+            ui,
+        ))
         .child(Node::spacer());
     if let Some((name, done)) = &model.exporting {
         bar = bar
@@ -1063,16 +1087,24 @@ fn statusbar(model: &ViewModel, ui: &UiState, radius: [f32; 4]) -> Node {
         );
     }
     bar.child(Node::label(project).id("status/project").style(small))
-        .child(
-            button("status/preferences", "Preferences", ui, None)
-                .text("Preferences")
-                .padding(Insets::xy(8.0, 0.0))
-                .height(Sizing::Fixed(20.0))
-                .style(|s| {
-                    s.font_size = 11.0;
-                    s.color = pal().text_dim;
-                }),
-        )
+        .child(status_button(
+            "status/preferences",
+            "Preferences",
+            "Preferences",
+            ui,
+        ))
+}
+
+/// A small text button for the status bar, like `status/preferences`.
+fn status_button(id: &'static str, description: &'static str, text: &str, ui: &UiState) -> Node {
+    button(id, description, ui, None)
+        .text(text)
+        .padding(Insets::xy(8.0, 0.0))
+        .height(Sizing::Fixed(20.0))
+        .style(|s| {
+            s.font_size = 11.0;
+            s.color = pal().text_dim;
+        })
 }
 
 /// "92.5" for 92.5, "100" for 100.

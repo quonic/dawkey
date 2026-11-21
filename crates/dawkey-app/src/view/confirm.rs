@@ -22,6 +22,7 @@ pub(super) fn dialog(
 ) -> Option<Node> {
     let action = view.confirm?;
     let consequence = match action {
+        PendingAction::NewProject => "Starting a new project discards them.",
         PendingAction::OpenProject => "Opening another project discards them.",
         PendingAction::Close => "Closing Dawkey discards them.",
     };

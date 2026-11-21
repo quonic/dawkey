@@ -294,6 +294,8 @@ pub(crate) enum ClipEdge {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingAction {
+    /// Starting a new, empty project.
+    NewProject,
     /// Opening another project.
     OpenProject,
     /// Closing the window (quitting).

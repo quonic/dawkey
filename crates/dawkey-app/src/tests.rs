@@ -69,6 +69,11 @@ fn tree_has_stable_ids() {
         "master/meter",
         "tracks/empty",
         "status/engine",
+        "status/new_project",
+        "status/open_project",
+        "status/save_project",
+        "status/close_project",
+        "status/preferences",
     ] {
         assert!(tree.find(id).is_some(), "missing {id}");
     }
@@ -523,6 +528,61 @@ fn opening_over_unsaved_changes_asks_first() {
         app.take_platform_requests(),
         [PlatformRequest::ChooseProjectToOpen]
     );
+}
+
+#[test]
+fn project_buttons_in_the_status_bar() {
+    let mut app = app();
+
+    // New, on a clean project, starts right away.
+    click(&mut app, "status/new_project").unwrap();
+    assert_eq!(app.view_state().confirm, None);
+    assert!(app.studio.session().project().tracks.is_empty());
+
+    // New, with unsaved changes, asks first.
+    add_track(&mut app, "Keys");
+    click(&mut app, "status/new_project").unwrap();
+    assert_eq!(app.view_state().confirm, Some(PendingAction::NewProject));
+    click(&mut app, "confirm/cancel").unwrap();
+    assert_eq!(app.studio.session().project().tracks.len(), 1);
+    click(&mut app, "status/new_project").unwrap();
+    click(&mut app, "confirm/discard").unwrap();
+    assert_eq!(app.view_state().confirm, None);
+    assert!(app.studio.session().project().tracks.is_empty());
+    assert!(!app.studio.session().is_dirty());
+
+    // Open, with unsaved changes, asks first (like Ctrl+O).
+    add_track(&mut app, "Keys");
+    click(&mut app, "status/open_project").unwrap();
+    assert_eq!(app.view_state().confirm, Some(PendingAction::OpenProject));
+    click(&mut app, "confirm/discard").unwrap();
+    assert_eq!(
+        app.take_platform_requests(),
+        [PlatformRequest::ChooseProjectToOpen]
+    );
+
+    // Save, without a file yet, asks where (like Ctrl+Shift+S).
+    click(&mut app, "status/save_project").unwrap();
+    assert_eq!(
+        app.take_platform_requests(),
+        [PlatformRequest::ChooseSaveLocation { then: None }]
+    );
+    let dir = tempfile::tempdir().unwrap();
+    app.save_as(&dir.path().join("Song.dawkey")).unwrap();
+    assert!(!app.studio.session().is_dirty());
+
+    // Save, with a file, saves over it in place.
+    add_track(&mut app, "More");
+    click(&mut app, "status/save_project").unwrap();
+    assert!(app.take_platform_requests().is_empty());
+    assert!(!app.studio.session().is_dirty());
+
+    // Close asks first too, like the window's own close button.
+    add_track(&mut app, "Even more");
+    click(&mut app, "status/close_project").unwrap();
+    assert_eq!(app.view_state().confirm, Some(PendingAction::Close));
+    click(&mut app, "confirm/cancel").unwrap();
+    assert_eq!(app.view_state().confirm, None);
 }
 
 #[test]

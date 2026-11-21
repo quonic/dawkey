@@ -301,6 +301,19 @@ impl App {
                 }
                 Ok(())
             }
+            ["status", "new_project"] => {
+                self.request_action(PendingAction::NewProject);
+                Ok(())
+            }
+            ["status", "open_project"] => {
+                self.request_action(PendingAction::OpenProject);
+                Ok(())
+            }
+            ["status", "save_project"] => self.save_project(),
+            ["status", "close_project"] => {
+                self.request_action(PendingAction::Close);
+                Ok(())
+            }
             ["timeline", "ruler"] => self.locate_at(pos.x),
             ["timeline", "lanes"] => {
                 self.view.selected_clip = None;
@@ -874,21 +887,14 @@ impl App {
             ("z", true, true) | ("y", true, _) => {
                 self.studio.redo().map(|_| ()).map_err(|e| e.to_string())
             }
-            ("s", true, false) => {
-                if self.studio.session().path().is_some() {
-                    self.studio
-                        .save(None)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                } else {
-                    self.platform_requests
-                        .push(PlatformRequest::ChooseSaveLocation { then: None });
-                    Ok(())
-                }
-            }
+            ("s", true, false) => self.save_project(),
             ("s", true, true) => {
                 self.platform_requests
                     .push(PlatformRequest::ChooseSaveLocation { then: None });
+                Ok(())
+            }
+            ("n", true, _) => {
+                self.request_action(PendingAction::NewProject);
                 Ok(())
             }
             ("o", true, _) => {
@@ -1005,6 +1011,21 @@ impl App {
             .execute_merging(command, key)
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+
+    /// Saves over the project's own file, or asks where if it doesn't have
+    /// one yet.
+    pub(crate) fn save_project(&mut self) -> Result<(), String> {
+        if self.studio.session().path().is_some() {
+            self.studio
+                .save(None)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        } else {
+            self.platform_requests
+                .push(PlatformRequest::ChooseSaveLocation { then: None });
+            Ok(())
+        }
     }
 
     fn locate_at(&mut self, x: f32) -> Result<(), String> {
