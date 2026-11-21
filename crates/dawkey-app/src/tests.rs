@@ -1045,6 +1045,49 @@ fn zoom_scroll_ruler_and_drops() {
 }
 
 #[test]
+fn playback_scrolls_the_arrange_view_to_follow_the_playhead() {
+    let mut app = app();
+    add_track(&mut app, "Drums");
+    app.access_tree();
+    let visible_s = f64::from(app.lanes_rect().w) / f64::from(app.view_state().px_per_s);
+
+    app.studio.play().unwrap();
+    app.tick();
+    assert_eq!(app.view_state().scroll_s, 0.0);
+
+    // Still inside the first page: no scroll yet.
+    app.studio.advance(visible_s * 0.5).unwrap();
+    app.tick();
+    assert_eq!(app.view_state().scroll_s, 0.0);
+
+    // Past it (less the margin kept before the right edge): catches up so
+    // the playhead stays visible.
+    app.studio.advance(visible_s * 0.6).unwrap();
+    app.tick();
+    let scroll = app.view_state().scroll_s;
+    assert!(scroll > 0.0, "{scroll}");
+    let position = app.studio.transport().position_s;
+    assert!(
+        position >= scroll && position <= scroll + visible_s,
+        "{position} not in [{scroll}, {}]",
+        scroll + visible_s
+    );
+
+    // Stopping leaves the scroll position where playback left it.
+    app.studio.stop().unwrap();
+    app.tick();
+    assert_eq!(app.view_state().scroll_s, scroll);
+
+    // It doesn't follow in the mixer.
+    click(&mut app, "view/mixer").unwrap();
+    app.studio.locate(0.0).unwrap();
+    app.studio.play().unwrap();
+    app.studio.advance(visible_s * 2.0).unwrap();
+    app.tick();
+    assert_eq!(app.view_state().scroll_s, scroll);
+}
+
+#[test]
 fn drops_from_the_desktop_follow_the_ui_scale() {
     let mut app = app();
     let (track, _) = add_clip(&mut app, 4.0);
