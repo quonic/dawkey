@@ -2072,6 +2072,28 @@ async fn builtin_guitar_rack_presets_and_processing() {
         ]
     );
 
+    // The analog phaser unit mounts and edits like the others.
+    let phaser = add_plugin(&dawkey, &track, "builtin:phaser").await;
+    dawkey
+        .call(
+            "set_plugin_param",
+            json!({ "plugin": phaser, "param": "stages", "value": 2.0 }),
+        )
+        .await
+        .unwrap();
+    let phaser_details = dawkey
+        .call("get_plugin", json!({ "plugin": phaser }))
+        .await
+        .unwrap();
+    assert_eq!(phaser_details["id"], "builtin:phaser");
+    let stages = phaser_details["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "stages")
+        .unwrap();
+    assert!((stages["value"].as_f64().unwrap() - 2.0).abs() < 1e-6);
+
     // Unknown builtin IDs yield a clear tool error rather than a protocol error.
     let err = dawkey
         .call_err(
