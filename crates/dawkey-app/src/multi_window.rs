@@ -7,12 +7,15 @@
 use crate::App;
 
 impl App {
-    /// Applies a `layout` preference change. Only `Standard` (today's single
-    /// window with a page switcher) is implemented; `MultiMonitor` and
-    /// `Widescreen` are stored but not yet applied — opening windows per
-    /// monitor and building the side-by-side pane layout is follow-up work
-    /// on top of this preference.
-    pub(crate) fn apply_layout(&mut self) {}
+    /// Applies a `layout` preference change. `Standard` (today's single
+    /// window with a page switcher) and `Widescreen` (Arrange, Rack and
+    /// Mixer side by side in that one window) take effect immediately.
+    /// `MultiMonitor` is stored but not yet applied — opening a window per
+    /// monitor is follow-up work on top of this preference.
+    pub(crate) fn apply_layout(&mut self) {
+        self.redraw = true;
+        self.rebuild();
+    }
 }
 
 /// Which view (or combination of views) a window or pane shows.
