@@ -471,3 +471,199 @@ fn reimport_onto_several_targets_replaces_each_clip() {
         assert_eq!(clips, [clip]);
     }
 }
+
+#[test]
+fn mixdown_tracks_bounces_audio_synth_and_bus_tracks_and_restores() {
+    use dawkey_core::{AddClip, AddMidiClip, NoteSpec, RestoreMixdownTracks, TrackKind};
+    use dawkey_media::DecodedFile;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut studio = Studio::new(
+        LoadedProject::new(Project::default()),
+        AudioBackend::Virtual,
+    )
+    .unwrap();
+    studio.set_recording_dir(dir.path().to_owned());
+
+    let audio_track = studio
+        .execute(
+            AddTrack {
+                name: Some("Guitar".into()),
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap();
+    let samples: Vec<f32> = (0..48_000)
+        .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.25)
+        .collect();
+    let src = studio.add_source(
+        Path::new("/tmp/guitar.wav"),
+        DecodedFile {
+            audio: AudioData::new(vec![samples]),
+            source_rate: 48_000,
+        },
+    );
+    studio
+        .execute(AddClip::new(src, Some(audio_track), 0.0).into())
+        .unwrap();
+
+    let synth_track = studio
+        .execute(
+            AddTrack {
+                name: Some("Synth".into()),
+                kind: TrackKind::Midi,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap();
+    studio
+        .execute(
+            AddMidiClip {
+                track: Some(synth_track),
+                position_s: 0.0,
+                notes: vec![NoteSpec {
+                    pitch: 60,
+                    start_beats: 0.0,
+                    length_beats: 1.0,
+                    velocity: 100,
+                }],
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap();
+
+    let outcome = studio
+        .mixdown_tracks(&[audio_track, synth_track], None, true)
+        .unwrap();
+    let mix_track = outcome.track.unwrap();
+    let project = studio.session().project();
+    assert_eq!(project.tracks.len(), 1);
+    assert_eq!(project.tracks[0].id, mix_track);
+    assert_eq!(project.tracks[0].name, "Mixdown 1");
+    assert_eq!(project.tracks[0].clips.len(), 1);
+    assert!(project.mixdown_archive(mix_track).is_some());
+
+    // Confirm rendered audio is audible when playing back the mixdown track.
+    let job = studio.render_job(0.0, 1.0).unwrap();
+    let (rendered, leftovers) = job.run();
+    studio.finish_render(leftovers);
+    let analysis = dawkey_media::analyze(&rendered, 48_000);
+    assert!(!analysis.silent);
+
+    // Single undo restores both original tracks and removes the mixdown track.
+    studio.undo().unwrap();
+    assert_eq!(studio.session().project().tracks.len(), 2);
+    assert!(studio.session().project().track(audio_track).is_some());
+    assert!(studio.session().project().track(synth_track).is_some());
+
+    // Redo re-applies mixdown; RestoreMixdownTracks restores permanently as one undo step.
+    studio.redo().unwrap();
+    assert_eq!(studio.session().project().tracks.len(), 1);
+    studio
+        .execute(
+            RestoreMixdownTracks {
+                mix_track,
+                remove_mix_track: true,
+            }
+            .into(),
+        )
+        .unwrap();
+    assert_eq!(studio.session().project().tracks.len(), 2);
+    assert!(studio.session().project().track(mix_track).is_none());
+}
+
+#[test]
+fn delete_tracks_non_destructive_and_permanent_cleanup() {
+    use dawkey_core::{AddClip, AddPlugin, AddTrack, PluginState, RestoreDeletedTracks, TrackKind};
+    use dawkey_media::DecodedFile;
+
+    let dir = tempfile::tempdir().unwrap();
+    let rec_dir = dir.path().join("recordings");
+    std::fs::create_dir_all(&rec_dir).unwrap();
+    let mut studio = Studio::new(
+        LoadedProject::new(Project::default()),
+        AudioBackend::Virtual,
+    )
+    .unwrap();
+    studio.set_recording_dir(rec_dir.clone());
+
+    let t1 = studio
+        .execute(
+            AddTrack {
+                name: Some("Audio 1".into()),
+                kind: TrackKind::Audio,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap();
+    let wav_in_rec = rec_dir.join("take1.wav");
+    dawkey_media::write_wav(&wav_in_rec, &[vec![0.1; 1024]], 48_000).unwrap();
+    let src1 = studio.add_source(
+        &wav_in_rec,
+        DecodedFile {
+            audio: AudioData::new(vec![vec![0.1; 1024]]),
+            source_rate: 48_000,
+        },
+    );
+    studio
+        .execute(AddClip::new(src1, Some(t1), 0.0).into())
+        .unwrap();
+    let plug1 = studio
+        .session
+        .execute(
+            AddPlugin {
+                track: t1,
+                plugin: "clap:com.example.eq".into(),
+                index: None,
+            }
+            .into(),
+        )
+        .unwrap()
+        .plugin
+        .unwrap();
+    studio
+        .session
+        .set_plugin_state(plug1, Some(PluginState::new(vec![42])));
+
+    // Non-destructive delete preserves source file, pool entry, and plugin state.
+    studio.delete_tracks(&[t1], false).unwrap();
+    assert!(studio.session().project().track(t1).is_none());
+    assert!(wav_in_rec.exists());
+    assert!(studio.session().project().source(src1).is_some());
+    assert!(
+        studio
+            .session()
+            .project()
+            .plugin_states
+            .contains_key(&plug1)
+    );
+
+    // Restoring brings t1 back cleanly.
+    studio
+        .execute(RestoreDeletedTracks { index: None }.into())
+        .unwrap();
+    assert!(studio.session().project().track(t1).is_some());
+
+    // Permanent delete removes the exclusive source, file inside recording_dir, and plugin state.
+    studio.delete_tracks(&[t1], true).unwrap();
+    assert!(studio.session().project().track(t1).is_none());
+    assert!(!wav_in_rec.exists());
+    assert!(studio.session().project().source(src1).is_none());
+    assert!(
+        !studio
+            .session()
+            .project()
+            .plugin_states
+            .contains_key(&plug1)
+    );
+}

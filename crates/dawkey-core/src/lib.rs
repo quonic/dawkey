@@ -22,12 +22,13 @@ mod tempo;
 
 pub use changes::{Change, ChangeKind, ChangesSince};
 pub use command::{
-    AddAutomationPoint, AddClip, AddMidiClip, AddMidiNotes, AddPlugin, AddTrack, COMMAND_SPECS,
-    Command, CommandSpec, CompTake, ControlSpec, ControlValue, DuplicateClip, EditMidiNotes,
-    Effect, MoveClip, MovePlugin, NoteChange, NoteSpec, PointSpec, QuantizeMidiNotes,
-    RemoveAutomationPoints, RemoveClip, RemoveMidiNotes, RemovePlugin, RemoveTempoChange,
-    RemoveTimeSignatureChange, RemoveTrack, RemoveTrackSend, RenameClip, RenameProject,
-    RenameTrack, RepeatClip, SetAutomation, SetClipGain, SetClipLength, SetClipMute, SetLoop,
+    AddAutomationPoint, AddClip, AddMidiClip, AddMidiNotes, AddPlugin, AddTrack,
+    ArchiveTracksForMixdown, COMMAND_SPECS, Command, CommandSpec, CompTake, ControlSpec,
+    ControlValue, DeleteTracks, DuplicateClip, EditMidiNotes, Effect, MoveClip, MovePlugin,
+    NoteChange, NoteSpec, PointSpec, QuantizeMidiNotes, RemoveAutomationPoints, RemoveClip,
+    RemoveMidiNotes, RemovePlugin, RemoveTempoChange, RemoveTimeSignatureChange, RemoveTrack,
+    RemoveTrackSend, RenameClip, RenameProject, RenameTrack, RepeatClip, RestoreDeletedTracks,
+    RestoreMixdownTracks, SetAutomation, SetClipGain, SetClipLength, SetClipMute, SetLoop,
     SetMidiControls, SetPluginBypass, SetPluginOutput, SetPluginParam, SetPluginSidechain,
     SetPunch, SetSynth, SetTempo, SetTempoMap, SetTimeSignature, SetTimeSignatureMap, SetTrackArm,
     SetTrackGain, SetTrackInput, SetTrackMidiInput, SetTrackMidiOutput, SetTrackMonitor,
@@ -37,13 +38,13 @@ pub use command::{
 pub use error::CoreError;
 pub use host::Handle;
 pub use model::{
-    AutomationLane, AutomationPoint, AutomationTarget, CC_MAX, Clip, ClipContent, ClipId,
-    ControlPoint, Controller, DEVICE_LATENCY_MS_MAX, GAIN_DB_MAX, GAIN_DB_MIN, InputChannels,
-    MASTER, MIDI_MAX, MidiOutput, Note, NoteId, PER_NOTE_ASSIGNABLE, PER_NOTE_BEND,
-    PER_NOTE_DETACH, PER_NOTE_MANAGEMENT, PER_NOTE_REGISTERED, PER_NOTE_RESET, PluginId,
-    PluginSlot, PluginState, Project, Region, Send, Source, SourceId, SynthParams, TEMPO_BPM_MAX,
-    TEMPO_BPM_MIN, TimeRange, TimeSignature, Track, TrackId, TrackKind, Waveform, downscale_32,
-    is_per_note, upscale_16,
+    ArchivedTrack, AutomationLane, AutomationPoint, AutomationTarget, CC_MAX, Clip, ClipContent,
+    ClipId, ControlPoint, Controller, DEVICE_LATENCY_MS_MAX, DeletedTrackArchive,
+    DetachedTrackRoutes, GAIN_DB_MAX, GAIN_DB_MIN, InputChannels, MASTER, MIDI_MAX, MidiOutput,
+    MixdownArchive, Note, NoteId, PER_NOTE_ASSIGNABLE, PER_NOTE_BEND, PER_NOTE_DETACH,
+    PER_NOTE_MANAGEMENT, PER_NOTE_REGISTERED, PER_NOTE_RESET, PluginId, PluginSlot, PluginState,
+    Project, Region, Send, Source, SourceId, SynthParams, TEMPO_BPM_MAX, TEMPO_BPM_MIN, TimeRange,
+    TimeSignature, Track, TrackId, TrackKind, Waveform, downscale_32, is_per_note, upscale_16,
 };
 pub use session::{Outcome, Session, SessionState};
 pub use tempo::{MeterChange, MeterMap, TempoChange, TempoMap};

@@ -21,6 +21,7 @@ pub(crate) mod plugins;
 mod prefs;
 mod recovery;
 pub(crate) mod tempo;
+mod track_menu;
 
 use std::sync::Arc;
 
@@ -89,6 +90,8 @@ pub(crate) struct ViewModel {
     /// The HTTP MCP server's state, and where its token is kept.
     pub(crate) mcp_http: crate::McpHttpState,
     pub(crate) mcp_token_path: Option<String>,
+    /// Label for restoring the most recently non-destructively deleted track(s).
+    pub(crate) deleted_archive_summary: Option<String>,
 }
 
 /// A plugin the picker offers.
@@ -139,6 +142,8 @@ pub(crate) struct TrackView {
     pub(crate) automation: Vec<LaneView>,
     /// Linear peak levels.
     pub(crate) level: [f32; 2],
+    /// Non-destructive mixdown archive attached to this track.
+    pub(crate) has_mixdown_archive: bool,
     pub(crate) clips: Vec<ClipView>,
 }
 
@@ -405,6 +410,11 @@ pub(crate) fn build(
         .children(export::dialog(model, view, ui, area, radius))
         .children(prefs::panel(model, view, ui, area, radius))
         .children(recovery::dialog(view, ui, area, radius))
+        .children(track_menu::menu(model, view, ui, area))
+        .children(track_menu::confirm_dialog(model, view, ui, area, radius))
+        .children(track_menu::delete_confirm_dialog(
+            model, view, ui, area, radius,
+        ))
         .children(confirm::dialog(model, view, ui, area, radius));
     Node::column()
         .fill()

@@ -377,6 +377,39 @@ impl App {
         {
             self.view.plugin_picker = None;
         }
+        self.view
+            .selected_tracks
+            .retain(|&id| project.tracks.iter().any(|t| t.id == id));
+        if self
+            .view
+            .track_anchor
+            .is_some_and(|id| project.tracks.iter().all(|t| t.id != id))
+        {
+            self.view.track_anchor = self.view.selected_tracks.first().copied();
+        }
+        if self
+            .view
+            .track_menu
+            .is_some_and(|m| project.tracks.iter().all(|t| t.id != m.track))
+        {
+            self.view.track_menu = None;
+        }
+        if let Some(confirm) = &mut self.view.mixdown_confirm {
+            confirm
+                .tracks
+                .retain(|&id| project.tracks.iter().any(|t| t.id == id));
+            if confirm.tracks.is_empty() {
+                self.view.mixdown_confirm = None;
+            }
+        }
+        if let Some(confirm) = &mut self.view.delete_confirm {
+            confirm
+                .tracks
+                .retain(|&id| project.tracks.iter().any(|t| t.id == id));
+            if confirm.tracks.is_empty() {
+                self.view.delete_confirm = None;
+            }
+        }
         if let Some((track, lane, index)) = self.view.selected_point
             && project
                 .track(track)
@@ -833,6 +866,7 @@ impl App {
             } else {
                 meters.tracks.get(&t.id).copied().unwrap_or_default()
             },
+            has_mixdown_archive: project.mixdown_archive(t.id).is_some(),
             clips: t
                 .clips
                 .iter()
@@ -865,6 +899,15 @@ impl App {
         };
         let tracks = project.tracks.iter().map(track_view).collect();
         let master_track = track_view(&project.master);
+        let deleted_archive_summary =
+            project
+                .deleted_track_archives
+                .last()
+                .and_then(|a| match a.tracks.as_slice() {
+                    [] => None,
+                    [one] => Some(format!("Restore Deleted Track ({})", one.track.name)),
+                    many => Some(format!("Restore {} Deleted Tracks", many.len())),
+                });
         let meter = project.meter_map();
         ViewModel {
             title: project.name.clone(),
@@ -909,6 +952,7 @@ impl App {
             prefs: self.prefs.clone(),
             mcp_http: self.mcp_http_state.clone(),
             mcp_token_path: self.mcp_token_path().map(mcp_http::tilde),
+            deleted_archive_summary,
             exporting: self.export.as_ref().map(|e| {
                 let name = e
                     .path
