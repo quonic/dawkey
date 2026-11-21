@@ -47,7 +47,7 @@ pub use mcp_http::{
     DEFAULT_MCP_PORT, McpEndpoint, McpHttpServer, McpHttpState, default_token_path,
     load_or_create_token, mcp_url, new_token, tokens_match,
 };
-pub use multi_window::{MonitorInfo, ViewRole, WIDESCREEN_ROLES, plan_windows};
+pub use multi_window::{ExtraWindow, MonitorInfo, ViewRole, WIDESCREEN_ROLES, plan_windows};
 pub use prefs::{AudioChoice, LayoutChoice, PluginKind, Preferences, ThemeChoice};
 pub use state::{
     ExportRange, ExportSettings, ImportRequest, Marker, Page, PendingAction, PlatformRequest,
@@ -210,6 +210,13 @@ pub struct App {
     /// it was last checked.
     pub(crate) autosave_every: Option<Duration>,
     pub(crate) last_autosave: Instant,
+    /// This window's fixed role in the multi-monitor layout (`None`:
+    /// `self.view.page`/the Widescreen preference decide instead, as in
+    /// `Standard` and `Widescreen` layout).
+    pub(crate) primary_role: Option<multi_window::ViewRole>,
+    /// The other windows in the multi-monitor layout, each with its own
+    /// retained UI state and size. See [`multi_window`].
+    pub(crate) extra_windows: Vec<multi_window::ExtraWindow>,
 }
 
 impl std::fmt::Debug for App {
@@ -256,6 +263,8 @@ impl App {
             imports: Vec::new(),
             close_requested: false,
             seen_revision: 0,
+            primary_role: None,
+            extra_windows: Vec::new(),
         };
         app.rebuild();
         app
@@ -463,15 +472,25 @@ impl App {
                 self.view.page = Page::Arrange;
             }
         }
-        let widescreen = self.prefs.layout == crate::prefs::LayoutChoice::Widescreen;
-        let root = view::build(
-            &model,
-            &self.view,
-            self.ui.state(),
-            &self.zoomed,
-            widescreen,
-        );
+        let content = match self.primary_role {
+            Some(role) => view::WindowContent::Window(role),
+            None if self.prefs.layout == crate::prefs::LayoutChoice::Widescreen => {
+                view::WindowContent::Widescreen
+            }
+            None => view::WindowContent::PageSwitcher,
+        };
+        let root = view::build(&model, &self.view, self.ui.state(), &self.zoomed, content);
         self.ui.set_root(root, self.zoomed.size, &mut self.text);
+        for extra in &mut self.extra_windows {
+            let root = view::build(
+                &model,
+                &self.view,
+                extra.ui.state(),
+                &extra.window,
+                view::WindowContent::Window(extra.role),
+            );
+            extra.ui.set_root(root, extra.window.size, &mut self.text);
+        }
         // A drag that will never end (its widget went away, or its release
         // was lost) drops its gesture, or a preview, an undo merge or touch
         // automation would hang on.
@@ -484,42 +503,24 @@ impl App {
     /// Routes one input event from a device. Window-chrome requests are
     /// returned for the platform.
     pub fn handle_input(&mut self, event: InputEvent) -> Vec<ChromeAction> {
-        // From the platform's logical pixels into the app's units.
         let z = self.ui_scale;
-        let unzoom = |p: Point| Point::new(p.x / z, p.y / z);
-        let event = match event {
-            InputEvent::PointerMove(pos) => InputEvent::PointerMove(unzoom(pos)),
-            InputEvent::PointerDown {
-                pos,
-                button,
-                time_ms,
-            } => InputEvent::PointerDown {
-                pos: unzoom(pos),
-                button,
-                time_ms,
-            },
-            InputEvent::PointerUp { pos, button } => InputEvent::PointerUp {
-                pos: unzoom(pos),
-                button,
-            },
-            InputEvent::Scroll { pos, delta } => InputEvent::Scroll {
-                pos: unzoom(pos),
-                delta: unzoom(delta),
-            },
-            event => event,
-        };
-        let actions = self.ui.handle(event);
+        let actions = self.ui.handle(unzoom_event(z, event));
         let chrome = self.apply(actions);
         self.rebuild();
-        chrome
-            .into_iter()
-            .map(|action| match action {
-                ChromeAction::WindowMenu(p) => {
-                    ChromeAction::WindowMenu(Point::new(p.x * z, p.y * z))
-                }
-                action => action,
-            })
-            .collect()
+        zoom_chrome(z, chrome)
+    }
+
+    /// Like [`Self::handle_input`], for one of the other windows in the
+    /// multi-monitor layout (by index into `self.extra_windows`).
+    pub fn handle_extra_input(&mut self, index: usize, event: InputEvent) -> Vec<ChromeAction> {
+        let Some(extra) = self.extra_windows.get_mut(index) else {
+            return Vec::new();
+        };
+        let z = self.ui_scale;
+        let actions = extra.ui.handle(unzoom_event(z, event));
+        let chrome = self.apply(actions);
+        self.rebuild();
+        zoom_chrome(z, chrome)
     }
 
     /// Runs synthetic input with `modifiers` held, queueing any window
@@ -1089,6 +1090,43 @@ impl App {
             }),
         }
     }
+}
+
+/// From the platform's logical pixels into the app's units.
+fn unzoom_event(z: f32, event: InputEvent) -> InputEvent {
+    let unzoom = |p: Point| Point::new(p.x / z, p.y / z);
+    match event {
+        InputEvent::PointerMove(pos) => InputEvent::PointerMove(unzoom(pos)),
+        InputEvent::PointerDown {
+            pos,
+            button,
+            time_ms,
+        } => InputEvent::PointerDown {
+            pos: unzoom(pos),
+            button,
+            time_ms,
+        },
+        InputEvent::PointerUp { pos, button } => InputEvent::PointerUp {
+            pos: unzoom(pos),
+            button,
+        },
+        InputEvent::Scroll { pos, delta } => InputEvent::Scroll {
+            pos: unzoom(pos),
+            delta: unzoom(delta),
+        },
+        event => event,
+    }
+}
+
+/// Back from the app's units into the platform's logical pixels.
+fn zoom_chrome(z: f32, chrome: Vec<ChromeAction>) -> Vec<ChromeAction> {
+    chrome
+        .into_iter()
+        .map(|action| match action {
+            ChromeAction::WindowMenu(p) => ChromeAction::WindowMenu(Point::new(p.x * z, p.y * z)),
+            action => action,
+        })
+        .collect()
 }
 
 #[cfg(test)]

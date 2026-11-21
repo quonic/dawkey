@@ -4,17 +4,119 @@
 //! window). Kept free of any Wayland or rendering types so it can be unit
 //! tested without a compositor.
 
-use crate::App;
+use dawkey_ui::{AccessNode, Color, Scene, Ui};
+
+use crate::{App, WindowInfo};
+
+/// One of the other windows in the multi-monitor layout: its own retained
+/// UI state (hover/press/drag/scroll — everything [`Ui`] tracks) and
+/// current size, so its scene is independent of the primary window's.
+/// Project state (`Studio`, the shared `ViewState`) is still the one on
+/// [`App`]; only the UI-interaction/rendering state is per window.
+#[derive(Debug)]
+pub struct ExtraWindow {
+    pub role: ViewRole,
+    pub(crate) ui: Ui,
+    pub(crate) window: WindowInfo,
+}
 
 impl App {
     /// Applies a `layout` preference change. `Standard` (today's single
     /// window with a page switcher) and `Widescreen` (Arrange, Rack and
     /// Mixer side by side in that one window) take effect immediately.
-    /// `MultiMonitor` is stored but not yet applied — opening a window per
-    /// monitor is follow-up work on top of this preference.
+    /// `MultiMonitor` needs the platform to call [`Self::set_window_roles`]
+    /// once it has placed a window per monitor, since only it knows the
+    /// monitors; this just redraws in case `layout` moved away from it.
     pub(crate) fn apply_layout(&mut self) {
         self.redraw = true;
         self.rebuild();
+    }
+
+    /// Sets this (primary) window's fixed role (`None`: the page switcher,
+    /// or the Widescreen layout if that preference is set) and the roles
+    /// of the other windows in the multi-monitor layout. Called by the
+    /// platform once it has worked out which monitor shows what (typically
+    /// from [`plan_windows`]); an empty `extra_roles` and `primary` of
+    /// `None` leaves multi-monitor mode. Extra windows beyond
+    /// `extra_roles.len()` are dropped; new ones start sized as
+    /// `initial_window` until the platform reports their real size.
+    pub fn set_window_roles(
+        &mut self,
+        primary: Option<ViewRole>,
+        extra_roles: &[ViewRole],
+        initial_window: WindowInfo,
+    ) {
+        self.primary_role = primary;
+        self.extra_windows.truncate(extra_roles.len());
+        for (i, &role) in extra_roles.iter().enumerate() {
+            match self.extra_windows.get_mut(i) {
+                Some(w) => w.role = role,
+                None => self.extra_windows.push(ExtraWindow {
+                    role,
+                    ui: Ui::new(),
+                    window: initial_window,
+                }),
+            }
+        }
+        self.redraw = true;
+        self.rebuild();
+    }
+
+    /// The other windows' roles, in the order [`Self::resize_extra_window`]
+    /// and [`Self::handle_extra_input`] index them.
+    pub fn extra_window_roles(&self) -> Vec<ViewRole> {
+        self.extra_windows.iter().map(|w| w.role).collect()
+    }
+
+    /// Resizes one of the other windows (by index into
+    /// [`Self::extra_window_roles`]).
+    pub fn resize_extra_window(&mut self, index: usize, window: WindowInfo) {
+        if let Some(w) = self.extra_windows.get_mut(index) {
+            w.window = window;
+            self.redraw = true;
+        }
+    }
+
+    pub fn extra_scene(&mut self, index: usize) -> Option<Scene> {
+        self.rebuild();
+        self.extra_windows.get(index).map(|w| w.ui.scene())
+    }
+
+    pub fn extra_access_tree(&mut self, index: usize) -> Option<AccessNode> {
+        self.rebuild();
+        self.extra_windows.get(index).map(|w| w.ui.access_tree())
+    }
+
+    /// Draws one of the other windows into a surface texture, the same way
+    /// [`Self::draw`] does the primary one, sharing its GPU and renderer.
+    pub fn draw_extra(
+        &mut self,
+        index: usize,
+        target: &dawkey_render::wgpu::TextureView,
+        format: dawkey_render::wgpu::TextureFormat,
+        size: (u32, u32),
+    ) {
+        let Some(scene) = self.extra_scene(index) else {
+            return;
+        };
+        let scale = self
+            .extra_windows
+            .get(index)
+            .map_or(1.0, |w| w.window.scale);
+        let Some((gpu, renderer)) = &mut self.graphics else {
+            tracing::warn!("draw_extra called before set_gpu");
+            return;
+        };
+        renderer.render(
+            gpu,
+            &mut self.text,
+            &scene,
+            scale,
+            target,
+            format,
+            size,
+            Color::TRANSPARENT,
+        );
     }
 }
 
