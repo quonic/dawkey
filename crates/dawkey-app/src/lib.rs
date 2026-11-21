@@ -331,6 +331,27 @@ impl App {
         if self.studio.session().revision() != self.seen_revision {
             self.redraw = true;
         }
+        self.follow_playhead();
+    }
+
+    /// While playing in the arrange view, scrolls the timeline forward once
+    /// the playhead reaches the right edge (or jumps back into view, after
+    /// a loop or a locate elsewhere), so it never runs off screen.
+    fn follow_playhead(&mut self) {
+        if self.view.page != Page::Arrange || !self.studio.transport().playing {
+            return;
+        }
+        let visible_s = f64::from(self.lanes_rect().w) / f64::from(self.view.px_per_s);
+        if visible_s <= 0.0 {
+            return;
+        }
+        let position_s = self.studio.transport().position_s;
+        let margin_s = visible_s * 0.1;
+        if position_s < self.view.scroll_s || position_s > self.view.scroll_s + visible_s - margin_s
+        {
+            self.view.scroll_s = (position_s - margin_s).max(0.0);
+            self.redraw = true;
+        }
     }
 
     /// True while something on screen changes by itself (playback, meters,
