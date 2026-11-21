@@ -148,7 +148,7 @@ impl App {
             TextField::RackPresetName(_) | TextField::DrumPatternName(_) => String::new(),
             TextField::ProjectName => self.studio.session().project().name.clone(),
         };
-        self.view.text_edit = Some(TextEdit {
+        self.view.shared.text_edit = Some(TextEdit {
             field,
             text,
             selected: true,
@@ -159,6 +159,7 @@ impl App {
     /// Whether `field` is being typed in.
     pub(crate) fn editing(&self, field: &TextField) -> bool {
         self.view
+            .shared
             .text_edit
             .as_ref()
             .is_some_and(|e| e.field == *field)
@@ -166,7 +167,7 @@ impl App {
 
     /// A key for the field being typed in; `None` if no field is.
     pub(crate) fn on_text_key(&mut self, key: &str, m: Modifiers) -> Option<Result<(), String>> {
-        let edit = self.view.text_edit.as_mut()?;
+        let edit = self.view.shared.text_edit.as_mut()?;
         match key {
             "tab" => {
                 let field = edit.field.clone();
@@ -178,7 +179,7 @@ impl App {
                 return Some(result);
             }
             "return" => return Some(self.commit_text_edit()),
-            "escape" => self.view.text_edit = None,
+            "escape" => self.view.shared.text_edit = None,
             "backspace" | "delete" => {
                 if std::mem::take(&mut edit.selected) {
                     edit.text.clear();
@@ -239,7 +240,7 @@ impl App {
     /// Before a click or drag on widget `id`: anywhere but the field being
     /// typed in sets it.
     pub(crate) fn leave_text_edit(&mut self, id: &str) -> Result<(), String> {
-        match &self.view.text_edit {
+        match &self.view.shared.text_edit {
             Some(edit) if field_id(&edit.field) != id => self.commit_text_edit(),
             _ => Ok(()),
         }
@@ -252,7 +253,7 @@ impl App {
             field,
             text,
             selected,
-        }) = self.view.text_edit.take()
+        }) = self.view.shared.text_edit.take()
         else {
             return Ok(());
         };

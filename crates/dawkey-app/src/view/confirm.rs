@@ -20,7 +20,7 @@ pub(super) fn dialog(
     area: Rect,
     radius: f32,
 ) -> Option<Node> {
-    let action = view.confirm?;
+    let action = view.shared.confirm?;
     let consequence = match action {
         PendingAction::NewProject => "Starting a new project discards them.",
         PendingAction::OpenProject => "Opening another project discards them.",

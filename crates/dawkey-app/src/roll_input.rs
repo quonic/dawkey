@@ -72,7 +72,7 @@ impl App {
         };
         self.view.page = Page::PianoRoll;
         self.view.editing_clip = Some(clip);
-        self.view.selected_clip = Some(clip);
+        self.view.shared.selected_clip = Some(clip);
         self.view.selected_notes.clear();
         self.view.selected_control = None;
         Ok(())
@@ -101,7 +101,7 @@ impl App {
                 .into(),
             )
             .map_err(|e| e.to_string())?;
-        self.view.selected_clip = outcome.clip;
+        self.view.shared.selected_clip = outcome.clip;
         Ok(())
     }
 

@@ -664,7 +664,11 @@ pub(crate) fn name_editor(
     view: &ViewState,
     ui: &UiState,
 ) -> Option<Node> {
-    let edit = view.text_edit.as_ref().filter(|e| e.field == *field)?;
+    let edit = view
+        .shared
+        .text_edit
+        .as_ref()
+        .filter(|e| e.field == *field)?;
     let id = crate::text_input::field_id(field);
     Some(text_field(
         &id,
@@ -740,7 +744,7 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
     let can_edit = edited(model, view).is_some()
         || model.tracks.iter().any(|t| {
             t.clips.iter().any(|c| {
-                Some(c.id) == view.selected_clip
+                Some(c.id) == view.shared.selected_clip
                     && matches!(c.content, ClipViewContent::Midi { .. })
             })
         });
@@ -760,7 +764,7 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
     let show_tempo = !(can_edit || show_mode) || window_w >= 1040.0;
     // Splitting the selected clip, when there's room for its button.
     let show_split = view.page == Page::Arrange
-        && view.selected_clip.is_some()
+        && view.shared.selected_clip.is_some()
         && window_w
             >= if can_edit {
                 SPLIT_MIN_W_EDIT
@@ -896,7 +900,7 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
         }))
         // How it writes, while it's on: each click picks the next mode.
         .children(show_mode.then(|| {
-            let mode = view.automation_mode.label();
+            let mode = view.shared.automation_mode.label();
             button("transport/automation_mode", "Automation mode", ui, None)
                 .value(mode.to_lowercase())
                 .text(mode)

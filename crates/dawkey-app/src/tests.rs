@@ -237,7 +237,7 @@ fn dragging_a_clip_moves_it_in_one_undo_step() {
     assert_eq!(clip_start_s(&app, clip), 3.0);
     assert_eq!(app.studio.session().undo_label(), Some("move_clip"));
     assert_eq!(
-        app.view_state().selected_clip,
+        app.view_state().shared.selected_clip,
         Some(dawkey_core::ClipId(clip))
     );
 
@@ -306,7 +306,7 @@ fn renaming_tracks_and_clips() {
         project.clip(ClipId(clip)).unwrap().1.name.clone()
     };
     app.double_click(&clip_name, Modifiers::default()).unwrap();
-    assert_eq!(app.view_state().selected_clip, Some(ClipId(clip)));
+    assert_eq!(app.view_state().shared.selected_clip, Some(ClipId(clip)));
     let field = app.access_tree().find(&clip_name).unwrap().clone();
     assert_eq!(
         (field.role, field.value.as_deref()),
@@ -405,14 +405,14 @@ fn dragging_a_rectangle_over_empty_timeline_selects_the_clips_it_touches() {
         Modifiers::default(),
     )
     .unwrap();
-    let mut selected = app.view_state().selected_clips.clone();
+    let mut selected = app.view_state().shared.selected_clips.clone();
     selected.sort();
     assert_eq!(selected, [ClipId(clip_a), ClipId(clip_b)]);
 
     // Clicking empty space again clears the selection.
     click(&mut app, "timeline/lanes").unwrap();
-    assert!(app.view_state().selected_clips.is_empty());
-    assert_eq!(app.view_state().selected_clip, None);
+    assert!(app.view_state().shared.selected_clips.is_empty());
+    assert_eq!(app.view_state().shared.selected_clip, None);
 }
 
 #[test]
@@ -421,20 +421,20 @@ fn shift_click_toggles_a_clip_in_the_multi_selection() {
     let (_, clip_a) = add_clip(&mut app, 0.0);
     let (_, clip_b) = add_clip(&mut app, 4.0);
     click(&mut app, &format!("clip/{clip_a}")).unwrap();
-    assert_eq!(app.view_state().selected_clips, [ClipId(clip_a)]);
+    assert_eq!(app.view_state().shared.selected_clips, [ClipId(clip_a)]);
     let shift = Modifiers {
         shift: true,
         ..Modifiers::default()
     };
     app.click(&format!("clip/{clip_b}"), MouseButton::Left, shift)
         .unwrap();
-    let mut selected = app.view_state().selected_clips.clone();
+    let mut selected = app.view_state().shared.selected_clips.clone();
     selected.sort();
     assert_eq!(selected, [ClipId(clip_a), ClipId(clip_b)]);
     // Shift-clicking an already-selected clip removes it.
     app.click(&format!("clip/{clip_a}"), MouseButton::Left, shift)
         .unwrap();
-    assert_eq!(app.view_state().selected_clips, [ClipId(clip_b)]);
+    assert_eq!(app.view_state().shared.selected_clips, [ClipId(clip_b)]);
 }
 
 #[test]
@@ -453,7 +453,7 @@ fn delete_removes_every_selected_clip() {
     let project = app.studio.session().project();
     assert!(project.clip(ClipId(clip_a)).is_none());
     assert!(project.clip(ClipId(clip_b)).is_none());
-    assert!(app.view_state().selected_clips.is_empty());
+    assert!(app.view_state().shared.selected_clips.is_empty());
 }
 
 #[test]
@@ -601,7 +601,10 @@ fn opening_over_unsaved_changes_asks_first() {
     add_track(&mut app, "Keys");
     app.key("o", CTRL).unwrap();
     assert!(app.take_platform_requests().is_empty());
-    assert_eq!(app.view_state().confirm, Some(PendingAction::OpenProject));
+    assert_eq!(
+        app.view_state().shared.confirm,
+        Some(PendingAction::OpenProject)
+    );
     let tree = app.access_tree();
     for id in ["confirm/save", "confirm/discard", "confirm/cancel"] {
         assert!(tree.find(id).is_some(), "missing {id}");
@@ -614,11 +617,11 @@ fn opening_over_unsaved_changes_asks_first() {
 
     // Cancel (or Escape) leaves everything as it was.
     click(&mut app, "confirm/cancel").unwrap();
-    assert_eq!(app.view_state().confirm, None);
+    assert_eq!(app.view_state().shared.confirm, None);
     assert!(app.studio.session().is_dirty());
     app.key("o", CTRL).unwrap();
     app.key("escape", Modifiers::default()).unwrap();
-    assert_eq!(app.view_state().confirm, None);
+    assert_eq!(app.view_state().shared.confirm, None);
     assert!(app.take_platform_requests().is_empty());
 
     // Don't save: on to the open dialog.
@@ -665,25 +668,31 @@ fn project_buttons_in_the_status_bar() {
 
     // New, on a clean project, starts right away.
     click(&mut app, "status/new_project").unwrap();
-    assert_eq!(app.view_state().confirm, None);
+    assert_eq!(app.view_state().shared.confirm, None);
     assert!(app.studio.session().project().tracks.is_empty());
 
     // New, with unsaved changes, asks first.
     add_track(&mut app, "Keys");
     click(&mut app, "status/new_project").unwrap();
-    assert_eq!(app.view_state().confirm, Some(PendingAction::NewProject));
+    assert_eq!(
+        app.view_state().shared.confirm,
+        Some(PendingAction::NewProject)
+    );
     click(&mut app, "confirm/cancel").unwrap();
     assert_eq!(app.studio.session().project().tracks.len(), 1);
     click(&mut app, "status/new_project").unwrap();
     click(&mut app, "confirm/discard").unwrap();
-    assert_eq!(app.view_state().confirm, None);
+    assert_eq!(app.view_state().shared.confirm, None);
     assert!(app.studio.session().project().tracks.is_empty());
     assert!(!app.studio.session().is_dirty());
 
     // Open, with unsaved changes, asks first (like Ctrl+O).
     add_track(&mut app, "Keys");
     click(&mut app, "status/open_project").unwrap();
-    assert_eq!(app.view_state().confirm, Some(PendingAction::OpenProject));
+    assert_eq!(
+        app.view_state().shared.confirm,
+        Some(PendingAction::OpenProject)
+    );
     click(&mut app, "confirm/discard").unwrap();
     assert_eq!(
         app.take_platform_requests(),
@@ -709,9 +718,9 @@ fn project_buttons_in_the_status_bar() {
     // Close asks first too, like the window's own close button.
     add_track(&mut app, "Even more");
     click(&mut app, "status/close_project").unwrap();
-    assert_eq!(app.view_state().confirm, Some(PendingAction::Close));
+    assert_eq!(app.view_state().shared.confirm, Some(PendingAction::Close));
     click(&mut app, "confirm/cancel").unwrap();
-    assert_eq!(app.view_state().confirm, None);
+    assert_eq!(app.view_state().shared.confirm, None);
 }
 
 #[test]
@@ -758,10 +767,10 @@ fn closing_over_unsaved_changes_asks_first() {
     add_track(&mut app, "Keys");
     // The close button and the compositor both ask.
     assert!(click(&mut app, "window/close").unwrap().is_empty());
-    assert_eq!(app.view_state().confirm, Some(PendingAction::Close));
+    assert_eq!(app.view_state().shared.confirm, Some(PendingAction::Close));
     click(&mut app, "confirm/cancel").unwrap();
     assert!(!app.request_close());
-    assert_eq!(app.view_state().confirm, Some(PendingAction::Close));
+    assert_eq!(app.view_state().shared.confirm, Some(PendingAction::Close));
 
     // Don't save closes.
     assert_eq!(
@@ -814,7 +823,7 @@ fn trim_clips_by_dragging_their_edges() {
     .unwrap();
     assert_eq!(edges(&app), (48_000, 72_000, 0));
     assert_eq!(app.studio.session().undo_label(), Some("trim_clip"));
-    assert_eq!(app.view_state().selected_clip, Some(ClipId(clip)));
+    assert_eq!(app.view_state().shared.selected_clip, Some(ClipId(clip)));
 
     // The start half a second later: the audio stays where it was.
     app.drag(
@@ -887,14 +896,14 @@ fn copy_and_paste_clips_at_the_pointer() {
     assert_eq!(clips_on(&app, track_a), vec![(1.0, 2.0)]);
     click(&mut app, &format!("clip/{clip}")).unwrap();
     app.key("c", CTRL).unwrap();
-    assert_eq!(app.view_state().clipboard, Some(ClipId(clip)));
+    assert_eq!(app.view_state().shared.clipboard, Some(ClipId(clip)));
 
     // Over track B at 2 s: pasted there, and selected.
     app.hover(Point::new(x_at(&app, 2.0), lane_y(&app, 1)));
     app.key("v", CTRL).unwrap();
     assert_eq!(clips_on(&app, track_b), vec![(2.0, 2.0), (6.0, 2.0)]);
     assert_eq!(app.studio.session().undo_label(), Some("duplicate_clip"));
-    let copy = app.view_state().selected_clip.unwrap();
+    let copy = app.view_state().shared.selected_clip.unwrap();
     assert_ne!(copy, ClipId(clip));
     assert_eq!(
         app.studio.session().project().clip(copy).unwrap().0.id.0,
@@ -1003,7 +1012,7 @@ fn dragged_clips_land_clear_of_others_and_ctrl_copies() {
         vec![(3.0, 2.0), (5.0, 2.0), (7.0, 2.0)]
     );
     assert_eq!(app.studio.session().undo_label(), Some("duplicate_clip"));
-    let copy = app.view_state().selected_clip.unwrap();
+    let copy = app.view_state().shared.selected_clip.unwrap();
     assert_ne!(copy, second);
     app.studio.undo().unwrap();
     assert_eq!(clips_on(&app, track), vec![(3.0, 2.0), (5.0, 2.0)]);
@@ -1120,7 +1129,7 @@ fn split_clips_at_the_playhead() {
     assert_eq!(parts(&app), [(48_000, 24_000), (72_000, 72_000)]);
     // The part after the playhead is selected, so splitting further on
     // splits it again.
-    let second = app.view_state().selected_clip.unwrap();
+    let second = app.view_state().shared.selected_clip.unwrap();
     assert_ne!(second, ClipId(clip));
     app.studio.locate(2.5).unwrap();
     click(&mut app, "toolbar/split").unwrap();
@@ -1353,11 +1362,14 @@ fn opening_or_closing_while_recording_asks_first() {
         assert!(!app.studio.session().is_dirty());
         if request == "open" {
             app.key("o", CTRL).unwrap();
-            assert_eq!(app.view_state().confirm, Some(PendingAction::OpenProject));
+            assert_eq!(
+                app.view_state().shared.confirm,
+                Some(PendingAction::OpenProject)
+            );
             assert!(app.take_platform_requests().is_empty());
         } else {
             assert!(!app.request_close());
-            assert_eq!(app.view_state().confirm, Some(PendingAction::Close));
+            assert_eq!(app.view_state().shared.confirm, Some(PendingAction::Close));
         }
         assert!(!app.studio.is_recording());
         assert!(app.studio.session().is_dirty());
@@ -1494,7 +1506,7 @@ fn midi_tracks_and_clips_in_the_arrange_view() {
     let project = app.studio.session().project();
     let clip = &project.track(id).unwrap().clips[0];
     assert_eq!((clip.start, clip.length), (48_000, 96_000));
-    assert_eq!(app.view_state().selected_clip, Some(clip.id));
+    assert_eq!(app.view_state().shared.selected_clip, Some(clip.id));
     let clip = clip.id;
 
     // Notes show in the clip.
@@ -2054,7 +2066,7 @@ fn plugins_from_the_mixer() {
         &["-", "1", "2", ".", "5", "space", "d", "b", "return"],
     );
     assert_eq!(slot_param(&app, slot), Some(-12.5));
-    assert_eq!(app.view_state().text_edit, None);
+    assert_eq!(app.view_state().shared.text_edit, None);
     // Text it can't read is an error, and changes nothing.
     app.double_click(&param, Modifiers::default()).unwrap();
     type_keys(&mut app, &["l", "o", "u", "d", "return"]);
@@ -2653,7 +2665,7 @@ fn typing_a_tempo() {
     assert_eq!(tempo(&app), 120.0);
     type_keys(&mut app, &["return"]);
     assert_eq!(tempo(&app), 97.5);
-    assert!(app.view_state().text_edit.is_none());
+    assert!(app.view_state().shared.text_edit.is_none());
     assert_eq!(app.studio.session().undo_label(), Some("set_tempo"));
     // The MIDI note kept its beat.
     let note = app
@@ -2717,7 +2729,7 @@ fn typing_a_time_signature() {
     click(&mut app, "meter/numerator/value").unwrap();
     type_keys(&mut app, &["7", ".", "tab"]);
     assert_eq!(meter(&app), (7, 4));
-    let editing = app.view_state().text_edit.clone().unwrap();
+    let editing = app.view_state().shared.text_edit.clone().unwrap();
     assert_eq!(editing.field, crate::state::TextField::MeterDenominator(0));
     type_keys(&mut app, &["8", "return"]);
     assert_eq!(meter(&app), (7, 8));
@@ -2966,7 +2978,7 @@ fn moving_a_fader_while_playing_writes_automation() {
     let (track, _) = add_clip(&mut app, 0.0);
     click(&mut app, "view/mixer").unwrap();
     click(&mut app, "transport/automation").unwrap();
-    assert!(app.view_state().automation_write);
+    assert!(app.view_state().shared.automation_write);
     app.studio.play().unwrap();
     app.studio.advance(0.25).unwrap();
     // Grab the fader at 0.25 s, pull it down at 0.5 s, hold it there until
@@ -3201,7 +3213,7 @@ fn latch_and_write_automation_modes() {
     assert!((points[1].0 - 0.5).abs() < 1e-3, "{points:?}");
     assert_eq!(points[2], (1.0, -20.0));
     assert_eq!(
-        app.view_state().automation_mode,
+        app.view_state().shared.automation_mode,
         crate::state::AutomationMode::Touch
     );
     app.studio.undo().unwrap();
@@ -3215,7 +3227,7 @@ fn exporting_the_mix() {
     let mut app = app();
     // Nothing plays yet: nothing to export.
     app.key("e", CTRL).unwrap();
-    assert!(app.view_state().export_dialog);
+    assert!(app.view_state().shared.export_dialog);
     click(&mut app, "export/start").unwrap();
     assert!(
         app.message
@@ -3232,7 +3244,7 @@ fn exporting_the_mix() {
         Modifiers::default(),
     )
     .unwrap();
-    assert!(app.view_state().export_dialog);
+    assert!(app.view_state().shared.export_dialog);
     let value = |app: &mut App, id: &str| app.access_tree().find(id).unwrap().value.clone();
     assert_eq!(
         value(&mut app, "export/range").as_deref(),
@@ -3242,7 +3254,7 @@ fn exporting_the_mix() {
     assert_eq!(value(&mut app, "export/format").as_deref(), Some("FLAC"));
     click(&mut app, "export/bits").unwrap();
     // FLAC has no float samples: 24 goes round to 16.
-    assert_eq!(app.view_state().export.sample, SampleFormat::Int16);
+    assert_eq!(app.view_state().shared.export.sample, SampleFormat::Int16);
     // The lossy formats: the samples row is their quality.
     click(&mut app, "export/format").unwrap();
     assert_eq!(
@@ -3251,7 +3263,7 @@ fn exporting_the_mix() {
     );
     assert_eq!(value(&mut app, "export/bits").as_deref(), Some("q 5"));
     click(&mut app, "export/bits").unwrap();
-    assert_eq!(app.view_state().export.quality, 6.0);
+    assert_eq!(app.view_state().shared.export.quality, 6.0);
     click(&mut app, "export/format").unwrap();
     assert_eq!(value(&mut app, "export/format").as_deref(), Some("Opus"));
     assert_eq!(
@@ -3259,7 +3271,7 @@ fn exporting_the_mix() {
         Some("128 kbit/s")
     );
     click(&mut app, "export/bits").unwrap();
-    assert_eq!(app.view_state().export.bitrate_kbps, 160);
+    assert_eq!(app.view_state().shared.export.bitrate_kbps, 160);
     assert_eq!(
         value(&mut app, "export/rate").as_deref(),
         Some("48 kHz (Opus)")
@@ -3269,15 +3281,15 @@ fn exporting_the_mix() {
     click(&mut app, "export/format").unwrap();
     assert_eq!(value(&mut app, "export/format").as_deref(), Some("FLAC"));
     click(&mut app, "export/rate").unwrap();
-    assert_eq!(app.view_state().export.sample_rate, Some(44_100));
+    assert_eq!(app.view_state().shared.export.sample_rate, Some(44_100));
     // No loop range: the range stays the song.
     click(&mut app, "export/range").unwrap();
-    assert_eq!(app.view_state().export.range, ExportRange::Song);
+    assert_eq!(app.view_state().shared.export.range, ExportRange::Song);
     click(&mut app, "export/tail").unwrap();
-    assert_eq!(app.view_state().export.tail_s, 1.0);
+    assert_eq!(app.view_state().shared.export.tail_s, 1.0);
     app.take_platform_requests();
     click(&mut app, "export/start").unwrap();
-    assert!(!app.view_state().export_dialog);
+    assert!(!app.view_state().shared.export_dialog);
     assert_eq!(
         app.take_platform_requests(),
         [PlatformRequest::ChooseExportLocation {
@@ -3323,7 +3335,7 @@ fn exporting_flac_past_96k_is_refused_before_asking_where() {
     app.key("e", CTRL).unwrap();
     click(&mut app, "export/format").unwrap();
     assert_eq!(
-        app.view_state().export.format,
+        app.view_state().shared.export.format,
         dawkey_media::FileFormat::Flac
     );
     // At the project's rate: refused, with the dialog still open.
@@ -3334,13 +3346,13 @@ fn exporting_flac_past_96k_is_refused_before_asking_where() {
         "{:?}",
         app.message
     );
-    assert!(app.view_state().export_dialog);
+    assert!(app.view_state().shared.export_dialog);
     assert!(app.take_platform_requests().is_empty());
     // At 96 kHz it's fine.
     for _ in 0..4 {
         click(&mut app, "export/rate").unwrap();
     }
-    assert_eq!(app.view_state().export.sample_rate, Some(96_000));
+    assert_eq!(app.view_state().shared.export.sample_rate, Some(96_000));
     click(&mut app, "export/start").unwrap();
     assert_eq!(app.take_platform_requests().len(), 1);
 }
@@ -3386,7 +3398,7 @@ fn autosaving_and_recovering() {
     app.key("tab", Modifiers::default()).unwrap();
     assert_eq!(app.view_state().page, Page::Arrange);
     click(&mut app, "recover/recover").unwrap();
-    assert_eq!(app.view_state().recovery, None);
+    assert_eq!(app.view_state().shared.recovery, None);
     assert_eq!(app.studio.session().project().tracks[0].name, "Lead");
     assert!(app.studio.session().is_dirty());
     drop(app);
@@ -3411,7 +3423,7 @@ fn preferences_apply_at_once_and_are_saved() {
     let mut app = app();
     app.set_preferences(Preferences::default(), Some(path.clone()));
     click(&mut app, "status/preferences").unwrap();
-    assert!(app.view_state().prefs_open);
+    assert!(app.view_state().shared.prefs_open);
     let value = |app: &mut App, id: &str| app.access_tree().find(id).unwrap().value.clone();
 
     click(&mut app, "prefs/audio").unwrap();
@@ -3496,9 +3508,9 @@ fn preferences_apply_at_once_and_are_saved() {
     assert!(Preferences::load(&path).vst3_folders.is_empty());
 
     app.key("escape", Modifiers::default()).unwrap();
-    assert!(!app.view_state().prefs_open);
+    assert!(!app.view_state().shared.prefs_open);
     app.key(",", CTRL).unwrap();
-    assert!(app.view_state().prefs_open);
+    assert!(app.view_state().shared.prefs_open);
 }
 
 /// The preferences panel is modal: keys don't reach the window behind it
@@ -3509,18 +3521,18 @@ fn keys_stay_in_the_preferences() {
     let (_, clip) = add_clip(&mut app, 0.0);
     click(&mut app, &format!("clip/{clip}")).unwrap();
     app.key(",", CTRL).unwrap();
-    assert!(app.view_state().prefs_open);
+    assert!(app.view_state().shared.prefs_open);
     type_keys(&mut app, &["delete", "space", "r"]);
     app.key("z", CTRL).unwrap();
     assert!(app.studio.session().project().clip(ClipId(clip)).is_some());
     assert!(!app.studio.transport().playing);
     assert!(!app.studio.transport().recording);
-    assert!(app.view_state().prefs_open);
+    assert!(app.view_state().shared.prefs_open);
     // Typing in its fields still works, and Escape closes it.
     click(&mut app, "prefs/record_offset").unwrap();
     type_keys(&mut app, &["5", "return", "escape"]);
     assert_eq!(app.preferences().record_offset_ms, 5.0);
-    assert!(!app.view_state().prefs_open);
+    assert!(!app.view_state().shared.prefs_open);
 }
 
 #[test]
@@ -3970,7 +3982,7 @@ fn guitar_effects_rack() {
     );
     type_keys(&mut app, &["3", ".", "5", "return"]);
     assert!((app.studio.plugin_param(amp, "gain").unwrap().value - 3.5).abs() < 0.05);
-    assert_eq!(app.view_state().text_edit, None);
+    assert_eq!(app.view_state().shared.text_edit, None);
 
     // Ctrl-click resets knob to its default (6.0).
     app.click(&gain_id, MouseButton::Left, CTRL).unwrap();
@@ -4640,11 +4652,14 @@ fn multi_select_tracks_and_mixdown_from_context_menu() {
 
     // Plain click selects one track; Ctrl+click adds the bus; Shift+click selects the range.
     click(&mut app, &format!("track/{t1}")).unwrap();
-    assert_eq!(app.view.selected_tracks, vec![TrackId(t1)]);
+    assert_eq!(app.view.shared.selected_tracks, vec![TrackId(t1)]);
 
     app.click(&format!("track/{bus}"), MouseButton::Left, CTRL)
         .unwrap();
-    assert_eq!(app.view.selected_tracks, vec![TrackId(t1), TrackId(bus)]);
+    assert_eq!(
+        app.view.shared.selected_tracks,
+        vec![TrackId(t1), TrackId(bus)]
+    );
 
     let shift = Modifiers {
         shift: true,
@@ -4659,7 +4674,7 @@ fn multi_select_tracks_and_mixdown_from_context_menu() {
     app.click(&format!("track/{bus}"), MouseButton::Left, shift)
         .unwrap();
     assert_eq!(
-        app.view.selected_tracks,
+        app.view.shared.selected_tracks,
         vec![TrackId(t1), TrackId(t2), TrackId(bus)]
     );
 
@@ -4755,7 +4770,7 @@ fn select_all_clips_from_the_context_menu() {
     .unwrap();
     click(&mut app, "track_menu/select_all_clips").unwrap();
 
-    let mut selected = app.view_state().selected_clips.clone();
+    let mut selected = app.view_state().shared.selected_clips.clone();
     selected.sort();
     assert_eq!(selected, [ClipId(clip_a), ClipId(clip_b)]);
     assert!(app.view_state().track_menu.is_none());
@@ -4802,7 +4817,7 @@ fn duplicate_track_from_the_context_menu() {
     assert_eq!(project.tracks[1].clips.len(), 1);
     assert_ne!(project.tracks[1].clips[0].id, ClipId(clip));
     // The new track is selected, in place of the one right-clicked.
-    assert_eq!(app.view_state().selected_tracks, vec![copy]);
+    assert_eq!(app.view_state().shared.selected_tracks, vec![copy]);
     assert_eq!(app.studio.session().undo_label(), Some("duplicate_track"));
 }
 

@@ -62,7 +62,7 @@ impl App {
             ClipEdge::Start => start_s,
             ClipEdge::End => end_s,
         };
-        self.view.selected_clip = Some(clip);
+        self.view.shared.selected_clip = Some(clip);
         self.view.selected_marker = None;
         Ok(Gesture::TrimClip {
             clip,
@@ -146,7 +146,11 @@ impl App {
     /// Splits the selected clip at the playhead and selects the part after
     /// it, so splitting again further on splits that part.
     pub(crate) fn split_selected(&mut self) -> Result<(), String> {
-        let clip = self.view.selected_clip.ok_or("select a clip to split")?;
+        let clip = self
+            .view
+            .shared
+            .selected_clip
+            .ok_or("select a clip to split")?;
         let at_s = self.studio.transport().position_s;
         let project = self.studio.session().project();
         let (_, c) = project
@@ -160,7 +164,7 @@ impl App {
             .studio
             .execute(SplitClip { clip, at_s }.into())
             .map_err(|e| e.to_string())?;
-        self.view.selected_clip = outcome.clip;
+        self.view.shared.selected_clip = outcome.clip;
         Ok(())
     }
 
@@ -205,7 +209,7 @@ impl App {
                 .into(),
             )
             .map_err(|e| e.to_string())?;
-        self.view.selected_clip = outcome.clip;
+        self.view.shared.selected_clip = outcome.clip;
         self.view.selected_marker = None;
         Ok(())
     }
@@ -214,7 +218,11 @@ impl App {
     /// it if that's a track of the clip's kind, else onto the clip's own
     /// track; at the playhead when the pointer isn't over the timeline.
     pub(crate) fn paste_clip(&mut self) -> Result<(), String> {
-        let clip = self.view.clipboard.ok_or("copy a clip first (Ctrl+C)")?;
+        let clip = self
+            .view
+            .shared
+            .clipboard
+            .ok_or("copy a clip first (Ctrl+C)")?;
         let project = self.studio.session().project();
         let (from, c) = project
             .clip(clip)
@@ -249,7 +257,7 @@ impl App {
             .ok_or_else(|| format!("clip {clip} does not exist"))?;
         let end_s = project.frames_to_seconds(c.end());
         let max_s = clip_after(track, c).map_or(f64::INFINITY, |f| project.frames_to_seconds(f));
-        self.view.selected_clip = Some(clip);
+        self.view.shared.selected_clip = Some(clip);
         self.view.selected_marker = None;
         Ok(Gesture::Repeat {
             clip,

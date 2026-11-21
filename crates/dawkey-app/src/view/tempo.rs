@@ -120,6 +120,7 @@ fn small_button(id: &str, label: &str, text: &str, ui: &UiState) -> Node {
 /// The tempo point's BPM, to click and type a new one.
 fn tempo_field(view: &ViewState, n: usize, bpm: f64, ui: &UiState) -> Node {
     let editing = view
+        .shared
         .text_edit
         .as_ref()
         .filter(|e| e.field == TextField::Tempo(n));
@@ -187,7 +188,7 @@ pub(super) fn headers(model: &ViewModel, view: &ViewState, ui: &UiState) -> [Nod
     let (bar, sig) = changes[m];
     // The numerator and denominator, to click and type.
     let field = |id: &str, label: &str, field: TextField, value: u8| {
-        let editing = view.text_edit.as_ref().filter(|e| e.field == field);
+        let editing = view.shared.text_edit.as_ref().filter(|e| e.field == field);
         let text = editing.map_or_else(|| value.to_string(), |e| e.text.clone());
         Node::row()
             .width(Sizing::Fixed(20.0))

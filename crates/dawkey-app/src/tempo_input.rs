@@ -109,7 +109,7 @@ impl App {
             ["tempo", n] => {
                 let n: usize = n.parse().ok()?;
                 self.select_marker(Marker::Tempo(n));
-                self.view.selected_clip = None;
+                self.view.shared.selected_clip = None;
                 Ok(())
             }
             [
@@ -137,7 +137,7 @@ impl App {
             ["meter", n] => {
                 let n: usize = n.parse().ok()?;
                 self.select_marker(Marker::Meter(n));
-                self.view.selected_clip = None;
+                self.view.shared.selected_clip = None;
                 Ok(())
             }
             _ => return None,

@@ -475,6 +475,7 @@ fn devices(track: &TrackView, view: &ViewState, ui: &UiState) -> Vec<Node> {
         text
     };
     let typing = view
+        .shared
         .text_edit
         .as_ref()
         .filter(|e| e.field == TextField::DeviceLatency(id));

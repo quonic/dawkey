@@ -1353,7 +1353,7 @@ fn knob_pod(
     } else {
         pal().knob_rim
     };
-    let typing = view.text_edit.as_ref().filter(|e| {
+    let typing = view.shared.text_edit.as_ref().filter(|e| {
         matches!(&e.field, TextField::PluginParam { plugin: pl, param }
             if *pl == plugin && param == &p.id)
     });

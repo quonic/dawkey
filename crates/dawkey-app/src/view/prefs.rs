@@ -27,7 +27,7 @@ pub(super) fn panel(
     area: Rect,
     radius: f32,
 ) -> Option<Node> {
-    if !view.prefs_open {
+    if !view.shared.prefs_open {
         return None;
     }
     let prefs = &model.prefs;
@@ -118,6 +118,7 @@ pub(super) fn panel(
         AudioChoice::Virtual => "None (virtual clock)",
     };
     let offset = view
+        .shared
         .text_edit
         .as_ref()
         .filter(|e| e.field == TextField::RecordOffset);
@@ -139,6 +140,7 @@ pub(super) fn panel(
     }
     .width(Sizing::Fixed(90.0));
     let port = view
+        .shared
         .text_edit
         .as_ref()
         .filter(|e| e.field == TextField::McpPort);
@@ -189,7 +191,7 @@ pub(super) fn panel(
         .style(|s| {
             s.background = Some(pal().panel);
         });
-    let selected = view.prefs_page;
+    let selected = view.shared.prefs_page;
     match selected {
         PrefsPage::AudioMidi => {
             content = content

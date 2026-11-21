@@ -21,7 +21,7 @@ pub(super) fn menu(model: &ViewModel, view: &ViewState, ui: &UiState, area: Rect
     let selected_count = model
         .tracks
         .iter()
-        .filter(|t| view.selected_tracks.contains(&t.id))
+        .filter(|t| view.shared.selected_tracks.contains(&t.id))
         .count()
         .max(1);
     let mixdown_text = if selected_count > 1 {
@@ -257,7 +257,7 @@ pub(super) fn confirm_dialog(
     area: Rect,
     radius: f32,
 ) -> Option<Node> {
-    let confirm = view.mixdown_confirm.as_ref()?;
+    let confirm = view.shared.mixdown_confirm.as_ref()?;
     let names = selected_names(model, &confirm.tracks);
     if names.is_empty() {
         return None;
@@ -304,7 +304,7 @@ pub(super) fn delete_confirm_dialog(
     area: Rect,
     radius: f32,
 ) -> Option<Node> {
-    let confirm = view.delete_confirm.as_ref()?;
+    let confirm = view.shared.delete_confirm.as_ref()?;
     let names = selected_names(model, &confirm.tracks);
     if names.is_empty() {
         return None;
