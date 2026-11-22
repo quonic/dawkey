@@ -3416,6 +3416,32 @@ fn autosaving_and_recovering() {
 }
 
 #[test]
+fn widescreen_layout_shows_arrange_rack_and_mixer_at_once() {
+    use crate::prefs::LayoutChoice;
+    let mut app = app();
+    let (track, _clip) = add_clip(&mut app, 1.0);
+    assert_eq!(app.view_state().page, Page::Arrange);
+    // Standard layout: only Arrange is on screen.
+    let tree = app.access_tree();
+    assert!(tree.find("timeline/ruler").is_some());
+    assert!(tree.find("rack/bay").is_none());
+    assert!(tree.find("master/strip").is_none());
+
+    let mut prefs = app.preferences().clone();
+    prefs.layout = LayoutChoice::Widescreen;
+    app.set_preferences(prefs, None);
+
+    // Widescreen: all three panes render at once, from the one ViewState
+    // (the arrange page selector didn't need to change).
+    assert_eq!(app.view_state().page, Page::Arrange);
+    let tree = app.access_tree();
+    assert!(tree.find("timeline/ruler").is_some());
+    assert!(tree.find("rack/bay").is_some());
+    assert!(tree.find("master/strip").is_some());
+    assert!(tree.find(&format!("track/{track}/lane")).is_some());
+}
+
+#[test]
 fn preferences_apply_at_once_and_are_saved() {
     use crate::prefs::{AudioChoice, PluginKind, Preferences};
     let dir = tempfile::tempdir().unwrap();

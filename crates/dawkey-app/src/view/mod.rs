@@ -391,6 +391,7 @@ pub(crate) fn build(
     view: &ViewState,
     ui: &UiState,
     window: &WindowInfo,
+    widescreen: bool,
 ) -> Node {
     let margin = window.shadow_margin();
     let radius = window.corner_radius();
@@ -419,6 +420,9 @@ pub(crate) fn build(
         window.size.h - 2.0 * margin - top,
     );
     let page = match view.page {
+        Page::Arrange | Page::Mixer | Page::Rack if widescreen => {
+            build_widescreen(model, view, ui, area.w)
+        }
         Page::Arrange => arrange::build(model, view, ui),
         Page::Mixer => mixer::build(model, view, ui),
         Page::Rack => rack::build(model, view, ui, area.w),
@@ -450,6 +454,24 @@ pub(crate) fn build(
         .fill()
         .padding(Insets::all(margin))
         .child(frame)
+}
+
+/// Arrange, Rack and Mixer side by side in one window (the widescreen
+/// layout preference). All three read the same [`ViewState`] — they don't
+/// touch each other's fields (arrange's scroll/zoom, rack's `rack_track`/
+/// `rack_scroll`, …), so showing them at once needs no per-pane state.
+pub(crate) fn build_widescreen(
+    model: &ViewModel,
+    view: &ViewState,
+    ui: &UiState,
+    total_w: f32,
+) -> Node {
+    let pane_w = total_w / 3.0;
+    Node::row()
+        .fill()
+        .child(arrange::build(model, view, ui).width(Sizing::Fixed(pane_w)))
+        .child(rack::build(model, view, ui, pane_w).width(Sizing::Fixed(pane_w)))
+        .child(mixer::build(model, view, ui).width(Sizing::Fixed(pane_w)))
 }
 
 pub(crate) fn window_title(name: &str, dirty: bool) -> String {
