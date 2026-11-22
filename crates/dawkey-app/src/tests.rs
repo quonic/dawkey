@@ -3416,6 +3416,36 @@ fn autosaving_and_recovering() {
 }
 
 #[test]
+fn multi_monitor_windows_render_their_own_role_from_the_shared_project() {
+    use crate::{ViewRole, WindowInfo};
+    let mut app = app();
+    let (track, _clip) = add_clip(&mut app, 1.0);
+    // Two monitors: this window shows Arrange, the other a combined
+    // Mixer+Rack, exactly what `plan_windows` would assign them.
+    app.set_window_roles(
+        Some(ViewRole::Arrange),
+        &[ViewRole::MixerAndRack],
+        WindowInfo::headless(),
+    );
+    assert_eq!(app.extra_window_roles(), vec![ViewRole::MixerAndRack]);
+
+    let primary = app.access_tree();
+    assert!(primary.find("timeline/ruler").is_some());
+    assert!(primary.find("master/strip").is_none());
+
+    let extra = app.extra_access_tree(0).unwrap();
+    assert!(extra.find("timeline/ruler").is_none());
+    assert!(extra.find("master/strip").is_some());
+    assert!(extra.find("rack/bay").is_some());
+    assert!(extra.find(&format!("track/{track}/lane")).is_none());
+
+    // Back to one window: the extra window is gone.
+    app.set_window_roles(None, &[], WindowInfo::headless());
+    assert!(app.extra_window_roles().is_empty());
+    assert!(app.access_tree().find("timeline/ruler").is_some());
+}
+
+#[test]
 fn widescreen_layout_shows_arrange_rack_and_mixer_at_once() {
     use crate::prefs::LayoutChoice;
     let mut app = app();

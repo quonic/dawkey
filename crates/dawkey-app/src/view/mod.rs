@@ -386,12 +386,25 @@ pub(crate) struct NoteView {
     pub(crate) length_s: f64,
 }
 
+/// What a window shows, for [`build`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowContent {
+    /// Today's single window: `view.page` switches what's shown.
+    PageSwitcher,
+    /// The widescreen layout: Arrange, Rack and Mixer side by side.
+    Widescreen,
+    /// One monitor's window in the multi-monitor layout: always this role,
+    /// regardless of `view.page` (Piano Roll and Step Sequencer still take
+    /// over the Arrange monitor's window, as they do the single window).
+    Window(crate::multi_window::ViewRole),
+}
+
 pub(crate) fn build(
     model: &ViewModel,
     view: &ViewState,
     ui: &UiState,
     window: &WindowInfo,
-    widescreen: bool,
+    content: WindowContent,
 ) -> Node {
     let margin = window.shadow_margin();
     let radius = window.corner_radius();
@@ -419,15 +432,18 @@ pub(crate) fn build(
         window.size.w - 2.0 * margin,
         window.size.h - 2.0 * margin - top,
     );
-    let page = match view.page {
-        Page::Arrange | Page::Mixer | Page::Rack if widescreen => {
+    let page = match (content, view.page) {
+        (WindowContent::Widescreen, Page::Arrange | Page::Mixer | Page::Rack) => {
             build_widescreen(model, view, ui, area.w)
         }
-        Page::Arrange => arrange::build(model, view, ui),
-        Page::Mixer => mixer::build(model, view, ui),
-        Page::Rack => rack::build(model, view, ui, area.w),
-        Page::PianoRoll => piano_roll::build(model, view, ui),
-        Page::StepSequencer => step_sequencer::build(model, view, ui, area.w),
+        (WindowContent::Window(role), Page::Arrange | Page::Mixer | Page::Rack) => {
+            build_for_role(model, view, ui, role, area.w)
+        }
+        (_, Page::Arrange) => arrange::build(model, view, ui),
+        (_, Page::Mixer) => mixer::build(model, view, ui),
+        (_, Page::Rack) => rack::build(model, view, ui, area.w),
+        (_, Page::PianoRoll) => piano_roll::build(model, view, ui),
+        (_, Page::StepSequencer) => step_sequencer::build(model, view, ui, area.w),
     };
     // The plugin picker and editor float over the page.
     let page =
@@ -472,6 +488,27 @@ pub(crate) fn build_widescreen(
         .child(arrange::build(model, view, ui).width(Sizing::Fixed(pane_w)))
         .child(rack::build(model, view, ui, pane_w).width(Sizing::Fixed(pane_w)))
         .child(mixer::build(model, view, ui).width(Sizing::Fixed(pane_w)))
+}
+
+/// What one monitor's window shows in the multi-monitor layout: always
+/// `role`, from the same shared [`ViewState`] every window reads.
+fn build_for_role(
+    model: &ViewModel,
+    view: &ViewState,
+    ui: &UiState,
+    role: crate::multi_window::ViewRole,
+    content_w: f32,
+) -> Node {
+    use crate::multi_window::ViewRole;
+    match role {
+        ViewRole::Arrange => arrange::build(model, view, ui),
+        ViewRole::Mixer => mixer::build(model, view, ui),
+        ViewRole::Rack => rack::build(model, view, ui, content_w),
+        ViewRole::MixerAndRack => Node::column()
+            .fill()
+            .child(mixer::build(model, view, ui))
+            .child(rack::build(model, view, ui, content_w)),
+    }
 }
 
 pub(crate) fn window_title(name: &str, dirty: bool) -> String {
