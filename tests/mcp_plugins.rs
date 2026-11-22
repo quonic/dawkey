@@ -1911,3 +1911,176 @@ async fn plugin_properties() {
     }
     dawkey.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn builtin_guitar_rack_presets_and_processing() {
+    let setup = setup();
+    let guitar_wav = setup._dir.path().join("guitar_di.wav");
+    let di: Vec<f32> = (0..48_000)
+        .map(|i| {
+            let t = i as f32 / 48_000.0;
+            0.35 * (2.0 * std::f32::consts::PI * 110.0 * t).sin()
+        })
+        .collect();
+    dawkey_media::write_wav(&guitar_wav, &[di], 48_000).unwrap();
+
+    let dawkey = start(&setup).await;
+    // Built-in rack effects do not pollute external plugin scan totals.
+    let listed = dawkey.call("list_plugins", json!({})).await.unwrap();
+    assert_eq!(listed["total"], 24);
+
+    let track = signal_track(&dawkey, &guitar_wav).await;
+    let dry = dawkey
+        .call("render_range", json!({ "start_s": 0.0, "end_s": 1.0 }))
+        .await
+        .unwrap();
+
+    // Load a complete guitar rig preset in one undo step.
+    let loaded = dawkey
+        .call(
+            "load_rack_preset",
+            json!({ "track": track, "preset": "lead" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded["track"], track);
+
+    let state = dawkey.call("get_state", json!({})).await.unwrap();
+    let plugins = state["project"]["tracks"][0]["plugins"].as_array().unwrap();
+    let ids: Vec<&str> = plugins
+        .iter()
+        .map(|p| p["plugin"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "builtin:gate",
+            "builtin:drive",
+            "builtin:amp",
+            "builtin:eq",
+            "builtin:cab",
+            "builtin:delay",
+            "builtin:reverb",
+        ]
+    );
+
+    let amp_id = plugins[2]["id"].clone();
+    let amp = dawkey
+        .call("get_plugin", json!({ "plugin": amp_id }))
+        .await
+        .unwrap();
+    assert_eq!(amp["format"], "builtin");
+    assert_eq!(amp["id"], "builtin:amp");
+
+    let wet_1 = dawkey
+        .call("render_range", json!({ "start_s": 0.0, "end_s": 1.0 }))
+        .await
+        .unwrap();
+    let wet_2 = dawkey
+        .call("render_range", json!({ "start_s": 0.0, "end_s": 1.0 }))
+        .await
+        .unwrap();
+    let wet_peak = wet_1["analysis"]["peak_dbfs"][0].as_f64().unwrap();
+    assert!(wet_peak > -40.0 && wet_peak.is_finite(), "{wet_peak}");
+    assert!(wet_1["analysis"]["hash"].is_string());
+    assert_ne!(
+        wet_1["analysis"]["hash"], dry["analysis"]["hash"],
+        "rack chain must transform the DI signal"
+    );
+    assert_eq!(
+        wet_1["analysis"]["hash"], wet_2["analysis"]["hash"],
+        "rack DSP render must be deterministic"
+    );
+
+    // One undo removes the whole preset cleanly.
+    dawkey.call("undo", json!({})).await.unwrap();
+    let after_undo = dawkey.call("get_state", json!({})).await.unwrap();
+    assert!(
+        after_undo["project"]["tracks"][0]["plugins"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    );
+
+    // Individual built-in mounting & parameter editing work over MCP.
+    let single_amp = add_plugin(&dawkey, &track, "builtin:amp").await;
+    dawkey
+        .call(
+            "set_plugin_param",
+            json!({ "plugin": single_amp, "param": "gain", "value": 8.5 }),
+        )
+        .await
+        .unwrap();
+    let details = dawkey
+        .call("get_plugin", json!({ "plugin": single_amp }))
+        .await
+        .unwrap();
+    let gain = details["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "gain")
+        .unwrap();
+    assert!((gain["value"].as_f64().unwrap() - 8.5).abs() < 1e-6);
+
+    // The envelope-filter (auto-wah) unit mounts and edits like the others.
+    let autowah = add_plugin(&dawkey, &track, "builtin:autowah").await;
+    dawkey
+        .call(
+            "set_plugin_param",
+            json!({ "plugin": autowah, "param": "sensitivity", "value": 80.0 }),
+        )
+        .await
+        .unwrap();
+    let autowah_details = dawkey
+        .call("get_plugin", json!({ "plugin": autowah }))
+        .await
+        .unwrap();
+    assert_eq!(autowah_details["id"], "builtin:autowah");
+    let sensitivity = autowah_details["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "sensitivity")
+        .unwrap();
+    assert!((sensitivity["value"].as_f64().unwrap() - 80.0).abs() < 1e-6);
+
+    // A curated preset built around it mounts its full chain in order.
+    let funk_loaded = dawkey
+        .call(
+            "load_rack_preset",
+            json!({ "track": track, "preset": "funk_drive" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(funk_loaded["track"], track);
+    let funk_state = dawkey.call("get_state", json!({})).await.unwrap();
+    let funk_plugins = funk_state["project"]["tracks"][0]["plugins"]
+        .as_array()
+        .unwrap();
+    let funk_ids: Vec<&str> = funk_plugins
+        .iter()
+        .map(|p| p["plugin"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        funk_ids,
+        [
+            "builtin:gate",
+            "builtin:autowah",
+            "builtin:drive",
+            "builtin:amp",
+            "builtin:cab",
+        ]
+    );
+
+    // Unknown builtin IDs yield a clear tool error rather than a protocol error.
+    let err = dawkey
+        .call_err(
+            "add_plugin",
+            json!({ "track": track, "plugin": "builtin:nonexistent" }),
+        )
+        .await
+        .unwrap();
+    assert!(err.contains("is not installed"), "{err}");
+
+    dawkey.shutdown().await.unwrap();
+}

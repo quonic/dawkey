@@ -4,14 +4,15 @@
 //! commands, one undo step per gesture.
 
 use dawkey_core::{
-    AddAutomationPoint, AddPlugin, AutomationTarget, MASTER, PluginId, PointSpec, RemovePlugin,
+    AddAutomationPoint, AddPlugin, AutomationTarget, LoadRackPreset, LoadSavedRackPreset, MASTER,
+    MovePlugin, PluginId, PointSpec, RackPreset, RemovePlugin, RemoveSavedRackPreset,
     SetAutomation, SetPluginBypass, SetPluginOutput, SetPluginParam, SetPluginSidechain, TrackId,
     TrackKind,
 };
 use dawkey_ui::{Modifiers, Point};
 
 use crate::App;
-use crate::state::{AUTO_H, Gesture, PARAM_W, TextField};
+use crate::state::{AUTO_H, Gesture, KNOB_SPAN, PARAM_W, Page, TextField};
 use crate::view::plugins::{content_height, thumb};
 use crate::view::{LaneKind, lane_label_kind};
 
@@ -115,6 +116,155 @@ impl App {
                 self.close_overlays();
                 self.execute(RemovePlugin { plugin }.into())
             }
+            ["plugin", id, "up"] => {
+                let plugin = PluginId(id.parse().ok()?);
+                let (track, _) = self.studio.session().project().plugin(plugin)?;
+                let pos = track.plugins.iter().position(|p| p.id == plugin)?;
+                if pos == 0 {
+                    return Some(Ok(()));
+                }
+                self.execute(
+                    MovePlugin {
+                        plugin,
+                        index: pos - 1,
+                    }
+                    .into(),
+                )
+            }
+            ["plugin", id, "down"] => {
+                let plugin = PluginId(id.parse().ok()?);
+                let (track, _) = self.studio.session().project().plugin(plugin)?;
+                let pos = track.plugins.iter().position(|p| p.id == plugin)?;
+                if pos + 1 >= track.plugins.len() {
+                    return Some(Ok(()));
+                }
+                self.execute(
+                    MovePlugin {
+                        plugin,
+                        index: pos + 1,
+                    }
+                    .into(),
+                )
+            }
+            ["plugin", id, "edit"] => {
+                let plugin = PluginId(id.parse().ok()?);
+                self.close_overlays();
+                self.view.plugin_editor = Some(plugin);
+                Ok(())
+            }
+            ["plugin", id, "choice", param, val] => {
+                let plugin = PluginId(id.parse().ok()?);
+                let value: f64 = val.parse().ok()?;
+                self.execute(SetPluginParam::new(plugin, *param, value).into())
+            }
+            ["plugin", id, "page_prev"] => {
+                let plugin = PluginId(id.parse().ok()?);
+                let entry = self.view.rack_pages.entry(plugin).or_insert(0);
+                *entry = entry.saturating_sub(1);
+                Ok(())
+            }
+            ["plugin", id, "page_next"] => {
+                let plugin = PluginId(id.parse().ok()?);
+                let pages = self
+                    .studio
+                    .plugin_details_window(plugin, 0, 0)
+                    .map_or(1, |d| d.param_count.div_ceil(8).max(1));
+                let entry = self.view.rack_pages.entry(plugin).or_insert(0);
+                *entry = (*entry + 1).min(pages - 1);
+                Ok(())
+            }
+            ["rack", "track", track] => {
+                let track = TrackId(track.parse().ok()?);
+                if self.studio.session().project().track(track).is_none() {
+                    return Some(Err(format!("track {track} does not exist")));
+                }
+                self.view.rack_track = Some(track);
+                self.view.rack_scroll = 0.0;
+                Ok(())
+            }
+            ["rack", "add", kind] => {
+                let track = self.rack_track();
+                self.execute(
+                    AddPlugin {
+                        track,
+                        plugin: format!("builtin:{kind}"),
+                        index: None,
+                    }
+                    .into(),
+                )
+            }
+            ["rack", "add_plugin"] => {
+                let track = self.rack_track();
+                self.close_overlays();
+                self.view.plugin_picker = Some(track);
+                Ok(())
+            }
+            ["rack", "preset", name] => {
+                let preset = match *name {
+                    "clean" => RackPreset::Clean,
+                    "crunch" => RackPreset::Crunch,
+                    "lead" => RackPreset::Lead,
+                    "ambient" => RackPreset::Ambient,
+                    "blues" => RackPreset::Blues,
+                    "metal" => RackPreset::Metal,
+                    "jazz" => RackPreset::Jazz,
+                    "acoustic" => RackPreset::Acoustic,
+                    "bass" => RackPreset::Bass,
+                    "bass_drive" => RackPreset::BassDrive,
+                    "funk" => RackPreset::Funk,
+                    "reggae" => RackPreset::Reggae,
+                    "funk_drive" => RackPreset::FunkDrive,
+                    "psychedelic" => RackPreset::Psychedelic,
+                    _ => return None,
+                };
+                let track = self.rack_track();
+                self.view.rack_scroll = 0.0;
+                self.execute(
+                    LoadRackPreset {
+                        track,
+                        preset,
+                        replace: Some(true),
+                    }
+                    .into(),
+                )
+            }
+            ["rack", "save_as"] => {
+                let track = self.rack_track();
+                self.start_text_edit(TextField::RackPresetName(track))
+            }
+            ["rack", "saved", index] => {
+                let index: usize = index.parse().ok()?;
+                let name = self
+                    .studio
+                    .session()
+                    .project()
+                    .rack_presets
+                    .get(index)?
+                    .name
+                    .clone();
+                let track = self.rack_track();
+                self.view.rack_scroll = 0.0;
+                self.execute(
+                    LoadSavedRackPreset {
+                        track,
+                        name,
+                        replace: Some(true),
+                    }
+                    .into(),
+                )
+            }
+            ["rack", "remove_saved", index] => {
+                let index: usize = index.parse().ok()?;
+                let name = self
+                    .studio
+                    .session()
+                    .project()
+                    .rack_presets
+                    .get(index)?
+                    .name
+                    .clone();
+                self.execute(RemoveSavedRackPreset { name }.into())
+            }
             ["plugin", id, "param", param] if count == 2 => {
                 // Double-click: type a value.
                 let plugin = PluginId(id.parse().ok()?);
@@ -128,6 +278,27 @@ impl App {
                 let plugin = PluginId(id.parse().ok()?);
                 let p = self.studio.plugin_param(plugin, param)?;
                 self.execute(SetPluginParam::new(plugin, p.id.clone(), p.default).into())
+            }
+            ["plugin", id, "param", param]
+                if self.view.page == Page::Rack && self.view.plugin_editor.is_none() =>
+            {
+                let plugin = PluginId(id.parse().ok()?);
+                let p = self.studio.plugin_param(plugin, param)?;
+                if !p.stepped {
+                    return Some(Ok(()));
+                }
+                let next = if !p.choices.is_empty() {
+                    let at = p
+                        .choices
+                        .iter()
+                        .position(|c| (c.value - p.value).abs() < 1e-6)
+                        .unwrap_or(0);
+                    p.choices[(at + 1) % p.choices.len()].value
+                } else {
+                    let n = p.value.round() + 1.0;
+                    if n > p.max { p.min } else { n }
+                };
+                self.execute(SetPluginParam::new(plugin, p.id.clone(), next).into())
             }
             ["plugin", id, "param", param, "automate"] => {
                 let plugin = PluginId(id.parse().ok()?);
@@ -223,7 +394,11 @@ impl App {
 
     /// Sends a plugin's other output to the next bus that can take it, or
     /// nowhere after the last.
-    fn cycle_plugin_output(&mut self, plugin: PluginId, output: u32) -> Result<(), String> {
+    pub(crate) fn cycle_plugin_output(
+        &mut self,
+        plugin: PluginId,
+        output: u32,
+    ) -> Result<(), String> {
         let project = self.studio.session().project();
         let (track, slot) = project.plugin(plugin).ok_or("no such plugin")?;
         let mut choices = vec![None];
@@ -261,6 +436,7 @@ impl App {
             ["plugin", id, "param", param] => {
                 let plugin = PluginId(id.parse().ok()?);
                 let p = self.studio.plugin_param(plugin, param)?;
+                let knob = self.view.page == Page::Rack && self.view.plugin_editor.is_none();
                 Some(Gesture::PluginParam {
                     plugin,
                     param: p.id.clone(),
@@ -268,6 +444,7 @@ impl App {
                     min: p.min,
                     max: p.max,
                     stepped: p.stepped,
+                    knob,
                     merge_key,
                 })
             }
@@ -324,11 +501,17 @@ impl App {
                 min,
                 max,
                 stepped,
+                knob,
                 merge_key,
             } => {
-                let mut value = (start_value
-                    + f64::from((pos.x - origin.x) / PARAM_W) * (max - min))
-                    .clamp(min, max);
+                let delta_u = if knob {
+                    let scale = if modifiers.ctrl { 0.2 } else { 1.0 };
+                    f64::from((origin.y - pos.y) + (pos.x - origin.x)) * scale
+                        / f64::from(KNOB_SPAN)
+                } else {
+                    f64::from(pos.x - origin.x) / f64::from(PARAM_W)
+                };
+                let mut value = (start_value + delta_u * (max - min)).clamp(min, max);
                 if stepped {
                     value = value.round();
                 }
@@ -385,6 +568,23 @@ impl App {
             }
             _ => return None,
         })
+    }
+
+    /// Scrolls the 19-inch effects rack bay within its content height.
+    pub(crate) fn scroll_rack(&mut self, delta_y: f32) {
+        let track_id = self.rack_track();
+        let total_h = {
+            let project = self.studio.session().project();
+            project
+                .track(track_id)
+                .map(|t| {
+                    crate::view::rack::content_height(t.plugins.iter().map(|p| p.plugin.as_str()))
+                })
+                .unwrap_or_else(|| crate::view::rack::content_height(std::iter::empty()))
+        };
+        let visible = self.ui.find("rack/bay").map_or(400.0, |n| n.rect().h);
+        let max = (total_h - visible).max(0.0);
+        self.view.rack_scroll = (self.view.rack_scroll + delta_y).clamp(0.0, max);
     }
 
     /// Scrolls the picker or editor list. Returns false if `id` is neither.
@@ -497,6 +697,9 @@ impl App {
     pub(crate) fn close_overlays(&mut self) {
         self.view.export_dialog = false;
         self.view.prefs_open = false;
+        self.view.track_menu = None;
+        self.view.mixdown_confirm = None;
+        self.view.delete_confirm = None;
         self.view.plugin_picker = None;
         self.view.picker_query.clear();
         self.view.picker_selected = 0;
@@ -532,7 +735,9 @@ impl App {
             )
             .map_err(|e| e.to_string())?;
         self.close_overlays();
-        self.view.plugin_editor = outcome.plugin;
+        if self.view.page != Page::Rack {
+            self.view.plugin_editor = outcome.plugin;
+        }
         Ok(())
     }
 

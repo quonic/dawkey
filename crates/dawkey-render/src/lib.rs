@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 use dawkey_text::TextSystem;
-use dawkey_ui::{Color, Point, Primitive, Rect, Scene, TextAlign};
+use dawkey_ui::{Color, Direction, Point, Primitive, Rect, Scene, TextAlign};
 
 use crate::atlas::{Atlas, AtlasFull};
 
@@ -165,6 +165,7 @@ const KIND_SHADOW: f32 = 1.0;
 const KIND_LINE: f32 = 2.0;
 const KIND_TRIANGLE: f32 = 3.0;
 const KIND_GLYPH: f32 = 4.0;
+const KIND_GRADIENT: f32 = 5.0;
 
 const NO_CLIP: [f32; 4] = [-1e9, -1e9, 1e9, 1e9];
 
@@ -490,6 +491,35 @@ impl Renderer {
                         params: [KIND_RECT, bw, 0.0, 0.0],
                         clip: clip(cl),
                         ..Default::default()
+                    });
+                }
+                Primitive::Gradient {
+                    rect: r,
+                    start,
+                    end,
+                    direction,
+                    radius,
+                    clip: cl,
+                } => {
+                    let shape = rect(*r);
+                    out.push(Instance {
+                        bounds: expand(shape, 1.0),
+                        color: color(*start),
+                        border_color: color(*end),
+                        radius: radius.map(s),
+                        shape,
+                        extra: [
+                            if *direction == Direction::Row {
+                                1.0
+                            } else {
+                                0.0
+                            },
+                            0.0,
+                            0.0,
+                            0.0,
+                        ],
+                        params: [KIND_GRADIENT, 0.0, 0.0, 0.0],
+                        clip: clip(cl),
                     });
                 }
                 Primitive::Shadow {

@@ -21,6 +21,7 @@ mod prefs_input;
 mod recovery;
 mod roll_input;
 mod state;
+mod step_input;
 mod take_input;
 mod tempo_input;
 mod text_input;
@@ -377,6 +378,50 @@ impl App {
         {
             self.view.plugin_picker = None;
         }
+        self.view
+            .selected_tracks
+            .retain(|&id| project.tracks.iter().any(|t| t.id == id));
+        if self
+            .view
+            .track_anchor
+            .is_some_and(|id| project.tracks.iter().all(|t| t.id != id))
+        {
+            self.view.track_anchor = self.view.selected_tracks.first().copied();
+        }
+        if self
+            .view
+            .track_menu
+            .is_some_and(|m| project.tracks.iter().all(|t| t.id != m.track))
+        {
+            self.view.track_menu = None;
+        }
+        if let Some(confirm) = &mut self.view.mixdown_confirm {
+            confirm
+                .tracks
+                .retain(|&id| project.tracks.iter().any(|t| t.id == id));
+            if confirm.tracks.is_empty() {
+                self.view.mixdown_confirm = None;
+            }
+        }
+        if let Some(confirm) = &mut self.view.delete_confirm {
+            confirm
+                .tracks
+                .retain(|&id| project.tracks.iter().any(|t| t.id == id));
+            if confirm.tracks.is_empty() {
+                self.view.delete_confirm = None;
+            }
+        }
+        if self
+            .view
+            .rack_track
+            .is_some_and(|id| project.track(id).is_none())
+        {
+            self.view.rack_track = None;
+            self.view.rack_scroll = 0.0;
+        }
+        self.view
+            .rack_pages
+            .retain(|id, _| project.plugin(*id).is_some());
         if let Some((track, lane, index)) = self.view.selected_point
             && project
                 .track(track)
@@ -389,7 +434,7 @@ impl App {
         if self.view.editing_clip.is_some() && view::edited(&model, &self.view).is_none() {
             self.view.editing_clip = None;
             self.view.selected_notes.clear();
-            if self.view.page == Page::PianoRoll {
+            if matches!(self.view.page, Page::PianoRoll | Page::StepSequencer) {
                 self.view.page = Page::Arrange;
             }
         }
@@ -681,18 +726,26 @@ impl App {
             .map_err(|e| e.to_string())
     }
 
+    pub(crate) fn rack_track(&self) -> TrackId {
+        let project = self.studio.session().project();
+        self.view
+            .rack_track
+            .filter(|&id| project.track(id).is_some())
+            .unwrap_or_else(|| project.tracks.first().map_or(dawkey_core::MASTER, |t| t.id))
+    }
+
     fn view_model(&mut self) -> ViewModel {
         let meters = self.studio.display_meters();
         let status = self.studio.engine_status();
         // Plugin names come from the catalog; don't scan just to draw a
-        // project without plugins.
+        // project without external plugins.
         let wants_catalog = self.view.plugin_picker.is_some()
             || self
                 .studio
                 .session()
                 .project()
                 .all_tracks()
-                .any(|t| !t.plugins.is_empty());
+                .any(|t| t.plugins.iter().any(|p| !p.plugin.starts_with("builtin:")));
         if wants_catalog {
             // Starts a scan if there's no list yet; the window doesn't wait.
             self.studio.plugin_catalog_now();
@@ -703,6 +756,37 @@ impl App {
             let (first, count) = view::plugins::visible_window(self.view.overlay_scroll);
             self.studio.plugin_details_window(id, first, count)
         });
+        let rack_track = self.rack_track();
+        let rack_units = if self.view.page == Page::Rack {
+            let ids: Vec<dawkey_core::PluginId> = self
+                .studio
+                .session()
+                .project()
+                .track(rack_track)
+                .map(|t| t.plugins.iter().map(|p| p.id).collect())
+                .unwrap_or_default();
+            ids.into_iter()
+                .filter_map(|id| self.studio.plugin_details(id))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let rack_presets = self
+            .studio
+            .session()
+            .project()
+            .rack_presets
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        let drum_patterns = self
+            .studio
+            .session()
+            .project()
+            .drum_patterns
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
         let catalog = self.studio.cached_catalog().filter(|_| wants_catalog);
         let picker = self.view.plugin_picker.map(|_| {
             catalog.map_or_else(Vec::new, |c| {
@@ -717,7 +801,9 @@ impl App {
                     .collect()
             })
         });
-        let plugin_info = |id: &str| catalog.and_then(|c| c.get(id));
+        let plugin_info = |id: &str| {
+            dawkey_studio::builtin_plugin(id).or_else(|| catalog.and_then(|c| c.get(id)))
+        };
         let session = self.studio.session();
         let project = session.project();
         let rate_khz = f64::from(status.sample_rate) / 1000.0;
@@ -783,6 +869,7 @@ impl App {
             mute: t.mute,
             solo: t.solo,
             armed: t.armed,
+            input: t.input,
             monitor: t.monitor,
             take_lanes: t
                 .clips
@@ -810,6 +897,19 @@ impl App {
                         .map_or_else(|| slot.plugin.clone(), |i| i.name.clone()),
                     bypass: slot.bypass,
                     error: status.plugin_problems.iter().any(|p| p.plugin == slot.id),
+                    sample_kit: (slot.plugin == dawkey_studio::DRUMS_ID)
+                        .then(|| project.plugin_states.get(&slot.id))
+                        .flatten()
+                        .and_then(|s| std::str::from_utf8(s.bytes()).ok())
+                        .and_then(dawkey_studio::SampleKit::from_id),
+                    pad_outputs: if slot.plugin == dawkey_studio::DRUMS_ID {
+                        let count = plugin_info(&slot.plugin).map_or(0, |i| i.outputs.len());
+                        (0..count as u32)
+                            .map(|output| slot.outputs.get(&output).copied())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                 })
                 .collect(),
             automation: t
@@ -833,6 +933,7 @@ impl App {
             } else {
                 meters.tracks.get(&t.id).copied().unwrap_or_default()
             },
+            has_mixdown_archive: project.mixdown_archive(t.id).is_some(),
             clips: t
                 .clips
                 .iter()
@@ -865,6 +966,15 @@ impl App {
         };
         let tracks = project.tracks.iter().map(track_view).collect();
         let master_track = track_view(&project.master);
+        let deleted_archive_summary =
+            project
+                .deleted_track_archives
+                .last()
+                .and_then(|a| match a.tracks.as_slice() {
+                    [] => None,
+                    [one] => Some(format!("Restore Deleted Track ({})", one.track.name)),
+                    many => Some(format!("Restore {} Deleted Tracks", many.len())),
+                });
         let meter = project.meter_map();
         ViewModel {
             title: project.name.clone(),
@@ -903,12 +1013,17 @@ impl App {
             message: self.message.clone(),
             editor,
             picker,
+            rack_track,
+            rack_units,
+            rack_presets,
+            drum_patterns,
             scanning,
             automation_write: self.view.automation_write,
             song_end_s: project.frames_to_seconds(project.end()),
             prefs: self.prefs.clone(),
             mcp_http: self.mcp_http_state.clone(),
             mcp_token_path: self.mcp_token_path().map(mcp_http::tilde),
+            deleted_archive_summary,
             exporting: self.export.as_ref().map(|e| {
                 let name = e
                     .path
