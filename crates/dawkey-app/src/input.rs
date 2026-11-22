@@ -3,9 +3,9 @@
 //! project goes through studio commands, so it's undoable like any MCP call.
 
 use dawkey_core::{
-    AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project, RemoveClip, RemoveTrackSend,
-    SetLoop, SetPunch, SetTrackArm, SetTrackGain, SetTrackMute, SetTrackOutput, SetTrackPan,
-    SetTrackSend, SetTrackSolo, TrackId, TrackKind,
+    AddDrumTrack, AddGuitarTrack, AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project,
+    RemoveClip, RemoveTrackSend, SetLoop, SetPunch, SetTrackArm, SetTrackGain, SetTrackInput,
+    SetTrackMute, SetTrackOutput, SetTrackPan, SetTrackSend, SetTrackSolo, TrackId, TrackKind,
 };
 use dawkey_ui::{ChromeAction, DragPhase, Modifiers, MouseButton, Point, Rect, UiAction};
 
@@ -100,6 +100,9 @@ impl App {
         if let Some(result) = self.on_roll_click(&parts, pos, count, modifiers) {
             return result;
         }
+        if let Some(result) = self.on_step_click(&parts, pos, count, modifiers) {
+            return result;
+        }
         if let Some(result) = self.on_tempo_click(&parts, pos, count) {
             return result;
         }
@@ -131,6 +134,10 @@ impl App {
                 self.view.page = Page::Mixer;
                 Ok(())
             }
+            ["view", "rack"] => {
+                self.view.page = Page::Rack;
+                Ok(())
+            }
             ["view", "piano_roll"] => match self.editable_clip() {
                 Some(clip) => self.open_piano_roll(clip),
                 None => Err("select a MIDI clip to edit".into()),
@@ -150,6 +157,8 @@ impl App {
                 Ok(())
             }
             ["arrange", "add_track"] => self.execute(AddTrack::default().into()),
+            ["arrange", "add_guitar_track"] => self.execute(AddGuitarTrack::default().into()),
+            ["arrange", "add_drum_track"] => self.execute(AddDrumTrack::default().into()),
             ["arrange", "add_midi_track"] => self.execute(
                 AddTrack {
                     kind: TrackKind::Midi,
@@ -167,6 +176,10 @@ impl App {
             ["track", track, "output"] => {
                 let track = parse_track(track)?;
                 self.cycle_output(track)
+            }
+            ["track", track, "input"] => {
+                let track = parse_track(track)?;
+                self.cycle_input(track)
             }
             ["track", track, "add_send"] => {
                 let track = parse_track(track)?;
@@ -491,6 +504,25 @@ impl App {
         self.execute(SetTrackOutput { track, bus }.into())
     }
 
+    /// Stereo -> left -> right -> stereo: which input channel(s) an
+    /// armed audio track records and (while monitoring) plays live.
+    fn cycle_input(&mut self, track: TrackId) -> Result<(), String> {
+        let current = self
+            .studio
+            .session()
+            .project()
+            .track(track)
+            .ok_or_else(|| format!("track {track} does not exist"))?
+            .input;
+        self.execute(
+            SetTrackInput {
+                track,
+                input: current.next(),
+            }
+            .into(),
+        )
+    }
+
     /// Adds a send from `track` to the first bus it can send to (at 0 dB).
     fn add_send(&mut self, track: TrackId) -> Result<(), String> {
         let project = self.studio.session().project();
@@ -699,6 +731,10 @@ impl App {
         if self.on_overlay_scroll(id, delta) {
             return;
         }
+        if id == Some("rack/bay") || (id.is_none() && self.view.page == Page::Rack) {
+            self.scroll_rack(delta.y);
+            return;
+        }
         if matches!(
             id,
             Some("piano_roll/grid" | "piano_roll/keys" | "piano_roll/ruler")
@@ -840,8 +876,14 @@ impl App {
             ("tab", false, _) => {
                 self.view.page = match self.view.page {
                     Page::Arrange => Page::Mixer,
-                    Page::Mixer | Page::PianoRoll => Page::Arrange,
+                    Page::Mixer | Page::Rack | Page::PianoRoll | Page::StepSequencer => {
+                        Page::Arrange
+                    }
                 };
+                Ok(())
+            }
+            ("f4", false, _) => {
+                self.view.page = Page::Rack;
                 Ok(())
             }
             ("+" | "=", ..) => {

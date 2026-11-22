@@ -80,6 +80,8 @@ struct Status {
     changes: Mutex<Vec<ParamChange>>,
     /// Its GUI is showing.
     gui_visible: AtomicBool,
+    /// The plugin asked to be reloaded, not yet taken.
+    reload: AtomicBool,
 }
 
 /// A reply from a host process (to the request it names), and its blob.
@@ -363,6 +365,7 @@ fn listen(socket: UnixStream, routes: Routes, dead: Arc<AtomicBool>) {
                     FromHost::StateDirty => route.status.dirty.store(true, Ordering::Relaxed),
                     FromHost::GuiClosed => route.status.gui_visible.store(false, Ordering::Relaxed),
                     FromHost::ParamsChanged(changes) => lock(&route.status.changes).extend(changes),
+                    FromHost::Reload => route.status.reload.store(true, Ordering::Relaxed),
                     message => {
                         // A GUI that opened (or closed) late, after a dialog
                         // was answered, still counts.
@@ -652,6 +655,11 @@ impl BridgedInstance {
 
     pub(crate) fn state_dirty(&self) -> bool {
         self.status.dirty.load(Ordering::Relaxed)
+    }
+
+    /// It asked to be reloaded, since the last call.
+    pub(crate) fn take_wants_reload(&self) -> bool {
+        self.status.reload.swap(false, Ordering::Relaxed)
     }
 
     pub(crate) fn has_gui(&self) -> bool {
