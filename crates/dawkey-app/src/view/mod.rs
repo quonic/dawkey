@@ -19,7 +19,9 @@ mod mixer;
 mod piano_roll;
 pub(crate) mod plugins;
 mod prefs;
+pub(crate) mod rack;
 mod recovery;
+pub(crate) mod step_sequencer;
 pub(crate) mod tempo;
 
 use std::sync::Arc;
@@ -31,7 +33,8 @@ use dawkey_core::{
 use dawkey_media::Peaks;
 use dawkey_studio::PluginDetails;
 use dawkey_ui::{
-    Chrome, Color, FontFamily, FontWeight, Icon, Insets, Node, Paint, Role, Sizing, UiState,
+    Chrome, Color, Direction, FontFamily, FontWeight, Icon, Insets, Node, Paint, Role, Sizing,
+    UiState,
 };
 
 pub(crate) use mixer::{db_from_position, position_from_db};
@@ -77,6 +80,14 @@ pub(crate) struct ViewModel {
     pub(crate) editor: Option<PluginDetails>,
     /// The plugins the picker offers, if open.
     pub(crate) picker: Option<Vec<PickerEntry>>,
+    /// The track shown in the 19-inch effects rack.
+    pub(crate) rack_track: TrackId,
+    /// Full parameter details for the units mounted in the active rack.
+    pub(crate) rack_units: Vec<PluginDetails>,
+    /// The user's own saved rack presets, by name.
+    pub(crate) rack_presets: Vec<String>,
+    /// The user's own saved drum patterns, by name.
+    pub(crate) drum_patterns: Vec<String>,
     /// Plugins are being scanned on a worker thread.
     pub(crate) scanning: bool,
     /// Moving controls while playing writes automation.
@@ -118,6 +129,8 @@ pub(crate) struct TrackView {
     pub(crate) mute: bool,
     pub(crate) solo: bool,
     pub(crate) armed: bool,
+    /// Audio tracks: which input channel(s) it listens to.
+    pub(crate) input: dawkey_core::InputChannels,
     /// Audio tracks: plays its input while armed.
     pub(crate) monitor: bool,
     /// Take lanes its clips use (the highest lane plus one).
@@ -192,6 +205,12 @@ pub(crate) struct SlotView {
     pub(crate) bypass: bool,
     /// Couldn't be loaded.
     pub(crate) error: bool,
+    /// `builtin:drums` only: the sample kit its pads play back from, if any.
+    pub(crate) sample_kit: Option<dawkey_studio::SampleKit>,
+    /// `builtin:drums` only: each pad's output, patched to a bus instead
+    /// of the track's own output (`None`: Master, the default), by pad
+    /// index.
+    pub(crate) pad_outputs: Vec<Option<TrackId>>,
 }
 
 /// An automation lane.
@@ -281,9 +300,10 @@ pub(crate) fn lane_label_kind(
         AutomationTarget::Pan => ("Pan".to_owned(), LaneKind::Pan),
         AutomationTarget::Send { bus } => (format!("Send to bus {bus}"), LaneKind::Gain),
         AutomationTarget::Param { plugin, param } => {
-            let info = track
-                .plugin(*plugin)
-                .and_then(|s| catalog.and_then(|c| c.get(&s.plugin)));
+            let info = track.plugin(*plugin).and_then(|s| {
+                dawkey_studio::builtin_plugin(&s.plugin)
+                    .or_else(|| catalog.and_then(|c| c.get(&s.plugin)))
+            });
             let p = info.and_then(|i| i.params.iter().find(|p| &p.id == param));
             match (info, p) {
                 (Some(i), Some(p)) => (
@@ -372,17 +392,26 @@ pub(crate) fn build(
             s.background = Some(pal().window);
             s.radius = [radius; 4];
             if margin > 0.0 {
-                s.shadow = Some((SHADOW_BLUR, pal().shadow));
+                s.shadow = Some(ELEVATION.high());
                 s.border = Some((1.0, pal().border));
             }
         });
     if window.csd {
         frame = frame.child(titlebar(model, ui, window, radius));
     }
+    let top = if window.csd { TITLEBAR_HEIGHT } else { 0.0 };
+    let area = dawkey_ui::Rect::new(
+        0.0,
+        top,
+        window.size.w - 2.0 * margin,
+        window.size.h - 2.0 * margin - top,
+    );
     let page = match view.page {
         Page::Arrange => arrange::build(model, view, ui),
         Page::Mixer => mixer::build(model, view, ui),
+        Page::Rack => rack::build(model, view, ui, area.w),
         Page::PianoRoll => piano_roll::build(model, view, ui),
+        Page::StepSequencer => step_sequencer::build(model, view, ui, area.w),
     };
     // The plugin picker and editor float over the page.
     let page =
@@ -391,13 +420,6 @@ pub(crate) fn build(
             .child(page)
             .children(plugins::overlay(model, view, ui, window.size));
     // The "save changes?" dialog covers everything below the title bar.
-    let top = if window.csd { TITLEBAR_HEIGHT } else { 0.0 };
-    let area = dawkey_ui::Rect::new(
-        0.0,
-        top,
-        window.size.w - 2.0 * margin,
-        window.size.h - 2.0 * margin - top,
-    );
     let frame = frame
         .child(toolbar(model, view, ui, window.size.w))
         .child(page)
@@ -436,11 +458,13 @@ fn titlebar(model: &ViewModel, ui: &UiState, window: &WindowInfo, radius: f32) -
         })
         .gap(10.0)
         .style(|s| {
-            s.background = Some(if active {
+            let base = if active {
                 pal().titlebar
             } else {
                 pal().titlebar_inactive
-            });
+            };
+            s.background = Some(base);
+            s.gradient = Some((base.mix(Color::hex(0x000000), 0.15), Direction::Column));
             s.radius = [radius, radius, 0.0, 0.0];
         })
         .child(Node::row().size(10.0, 10.0).style(|s| {
@@ -671,20 +695,17 @@ pub(crate) fn track_buttons(track: &TrackView, ui: &UiState) -> Vec<Node> {
 
 /// The narrowest windows whose toolbar shows the Split button, without and
 /// with the piano roll toggle.
-const SPLIT_MIN_W: f32 = 940.0;
-const SPLIT_MIN_W_EDIT: f32 = 1040.0;
+const SPLIT_MIN_W: f32 = 980.0;
+const SPLIT_MIN_W_EDIT: f32 = 1090.0;
 /// The narrowest windows whose toolbar shows "Auto" outside the mixer,
 /// without and with the piano roll toggle.
-const AUTO_MIN_W: f32 = 1000.0;
-const AUTO_MIN_W_EDIT: f32 = 1140.0;
+const AUTO_MIN_W: f32 = 1040.0;
+const AUTO_MIN_W_EDIT: f32 = 1180.0;
 
 /// The narrowest windows whose toolbar shows "Export…".
-const EXPORT_MIN_W: f32 = 1100.0;
+const EXPORT_MIN_W: f32 = 1140.0;
 
 fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> Node {
-    // The master meter takes what room the toolbar has left (up to 140 px)
-    // and disappears in narrow windows rather than overflowing.
-    let meter_w = ((window_w - 1000.0) / 2.0).clamp(0.0, 140.0);
     // The piano roll toggle shows when there's a clip for it: the edited
     // one, or the selected one if it's MIDI. In narrow windows it takes the
     // place of the tempo and time signature.
@@ -695,17 +716,20 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
                     && matches!(c.content, ClipViewContent::Midi { .. })
             })
         });
-    // So does the automation mode, while "Auto" is on (in the mixer, or in
+    // Writing automation (faders, pan, plugin parameters) is the mixer's
+    // and rack's; there, in narrow windows, it takes the place of snapping,
+    // which they have no use for. Elsewhere it shows when there's room.
+    let wide = window_w
+        >= if can_edit {
+            AUTO_MIN_W_EDIT
+        } else {
+            AUTO_MIN_W
+        };
+    // So does the automation mode, while "Auto" is on (in the mixer/rack, or in
     // windows wide enough for it).
-    let show_mode = model.automation_write
-        && (view.page == Page::Mixer
-            || window_w
-                >= if can_edit {
-                    AUTO_MIN_W_EDIT
-                } else {
-                    AUTO_MIN_W
-                });
-    let show_tempo = !(can_edit || show_mode) || window_w >= 980.0;
+    let show_mode =
+        model.automation_write && (matches!(view.page, Page::Mixer | Page::Rack) || wide);
+    let show_tempo = !(can_edit || show_mode) || window_w >= 1040.0;
     // Splitting the selected clip, when there's room for its button.
     let show_split = view.page == Page::Arrange
         && view.selected_clip.is_some()
@@ -715,29 +739,32 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
             } else {
                 SPLIT_MIN_W
             };
-    // Writing automation (faders, pan, plugin parameters) is the mixer's;
-    // there, in narrow windows, it takes the place of snapping, which the
-    // mixer has no use for. Elsewhere it shows when there's room.
-    let wide = window_w
-        >= if can_edit {
-            AUTO_MIN_W_EDIT
-        } else {
-            AUTO_MIN_W
-        };
-    let show_auto = view.page == Page::Mixer || wide;
+    let show_auto = matches!(view.page, Page::Mixer | Page::Rack) || wide;
     // "Export…" needs more room with the Split button and the piano roll
     // toggle.
     let export_min_w =
-        EXPORT_MIN_W + if show_split { 80.0 } else { 0.0 } + if can_edit { 130.0 } else { 0.0 };
-    let show_snap = view.page != Page::Mixer || wide;
+        EXPORT_MIN_W + if show_split { 75.0 } else { 0.0 } + if can_edit { 125.0 } else { 0.0 };
+    let show_snap = !matches!(view.page, Page::Mixer | Page::Rack) || wide;
+    // The master meter takes what room the toolbar has left (up to 140 px)
+    // and disappears in narrow windows rather than overflowing.
+    let used_extra = if can_edit { 95.0 } else { 0.0 }
+        + if show_split { 62.0 } else { 0.0 }
+        + if show_auto && show_snap { 62.0 } else { 0.0 }
+        + if show_tempo && (can_edit || show_mode) {
+            100.0
+        } else {
+            0.0
+        }
+        + if window_w >= export_min_w { 80.0 } else { 0.0 };
+    let meter_w = ((window_w - (980.0 + used_extra)) * 0.55).clamp(0.0, 140.0);
     let play_active = model.playing.then_some(pal().accent);
     Node::row()
         .id("toolbar")
         .role(Role::Toolbar)
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(52.0))
-        .padding(Insets::xy(12.0, 0.0))
-        .gap(8.0)
+        .padding(Insets::xy(10.0, 0.0))
+        .gap(6.0)
         .background(pal().toolbar)
         .child(
             button("transport/play", "Play", ui, play_active)
@@ -773,7 +800,7 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
                 .id("transport/position")
                 .accessible_label("Position")
                 .value(format_time(model.position_s))
-                .padding(Insets::xy(10.0, 0.0))
+                .padding(Insets::xy(6.0, 0.0))
                 .style(|s| {
                     s.family = FontFamily::Mono;
                     s.font_size = 18.0;
@@ -812,7 +839,7 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
                 }
             })
         }))
-        .child(Node::row().width(Sizing::Fixed(6.0)))
+        .child(Node::row().width(Sizing::Fixed(2.0)))
         .child(toggle(
             "transport/loop",
             "Loop",
@@ -848,7 +875,7 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
                 .padding(Insets::xy(8.0, 0.0))
                 .height(Sizing::Fixed(28.0))
         }))
-        .child(Node::row().width(Sizing::Fixed(12.0)))
+        .child(Node::row().width(Sizing::Fixed(6.0)))
         .child(toggle(
             "view/arrange",
             "Arrange",
@@ -862,6 +889,14 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
             "Mixer",
             "Mixer",
             view.page == Page::Mixer,
+            pal().accent,
+            ui,
+        ))
+        .child(toggle(
+            "view/rack",
+            "Effects rack",
+            "Rack",
+            view.page == Page::Rack,
             pal().accent,
             ui,
         ))
@@ -948,6 +983,9 @@ pub(crate) fn meter(
             levels: display,
             vertical,
             background: pal().meter,
+            low: pal().solo_on,
+            mid: pal().mute_on,
+            high: pal().record_on,
         })
 }
 

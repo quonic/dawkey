@@ -35,13 +35,20 @@ impl App {
     /// its notes.
     pub fn open_piano_roll(&mut self, clip: ClipId) -> Result<(), String> {
         let project = self.studio.session().project();
-        let (_, c) = project
+        let (track, c) = project
             .clip(clip)
             .ok_or_else(|| format!("clip {clip} does not exist"))?;
         if c.kind() != dawkey_core::TrackKind::Midi {
             return Err(format!(
                 "clip {clip} is an audio clip; only MIDI clips have notes"
             ));
+        }
+        if track
+            .plugins
+            .first()
+            .is_some_and(|p| p.plugin == "builtin:drums")
+        {
+            return self.open_step_sequencer(clip);
         }
         let beats = project.tempo_map().clip_beats(c.start, c.length).max(1.0);
         let (lo, hi) = c.notes().iter().fold((u8::MAX, 0), |(lo, hi), n| {

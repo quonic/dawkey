@@ -169,11 +169,15 @@ impl Main {
                 let changes = slot.instance.take_param_changes();
                 let dirty = slot.instance.state_dirty() && !slot.told_dirty;
                 slot.told_dirty |= dirty;
+                let reload = slot.instance.wants_reload();
                 if !changes.is_empty() {
                     self.send(id, FromHost::ParamsChanged(changes), &[])?;
                 }
                 if dirty {
                     self.send(id, FromHost::StateDirty, &[])?;
+                }
+                if reload {
+                    self.send(id, FromHost::Reload, &[])?;
                 }
             }
         }

@@ -58,7 +58,27 @@ pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
 }
 
 fn headers(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
-    let top = Node::row()
+    let extra_row = Node::row()
+        .width(Sizing::Fill(1.0))
+        .height(Sizing::Fixed(RULER_H))
+        .padding(Insets::xy(10.0, 0.0))
+        .style(|s| s.background = Some(pal().toolbar))
+        .child(Node::spacer())
+        .child(
+            button(
+                "arrange/add_drum_track",
+                "Add a drum machine track: the synthesized drum kit \
+                 instrument loaded with a starter kit, and an empty clip \
+                 ready for step programming",
+                ui,
+                None,
+            )
+            .text("+ Drum")
+            .padding(Insets::xy(6.0, 0.0))
+            .height(Sizing::Fixed(20.0))
+            .style(|s| s.font_size = 11.0),
+        );
+    let buttons_row = Node::row()
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(RULER_H))
         .padding(Insets::xy(10.0, 0.0))
@@ -70,6 +90,20 @@ fn headers(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
                 .padding(Insets::xy(6.0, 0.0))
                 .height(Sizing::Fixed(20.0))
                 .style(|s| s.font_size = 11.0),
+        )
+        .child(Node::row().width(Sizing::Fixed(4.0)))
+        .child(
+            button(
+                "arrange/add_guitar_track",
+                "Add a guitar track: armed, monitoring, and listening to \
+                 one input channel, ready to plug in and play",
+                ui,
+                None,
+            )
+            .text("+ Gtr")
+            .padding(Insets::xy(6.0, 0.0))
+            .height(Sizing::Fixed(20.0))
+            .style(|s| s.font_size = 11.0),
         )
         .child(Node::row().width(Sizing::Fixed(4.0)))
         .child(
@@ -101,6 +135,11 @@ fn headers(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
             .height(Sizing::Fixed(20.0))
             .style(|s| s.font_size = 11.0),
         );
+    let top = Node::column()
+        .width(Sizing::Fill(1.0))
+        .height(Sizing::Fixed(RULER_H * 2.0))
+        .child(extra_row)
+        .child(buttons_row);
     let layout = rows(model, view);
     let rows = model.tracks.iter().enumerate().flat_map(|(i, track)| {
         let (top, takes, lanes) = layout[i];
@@ -295,6 +334,22 @@ fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> No
                     )
                 }))
                 .children((track.kind == TrackKind::Audio).then(|| {
+                    button(
+                        &format!("track/{id}/input"),
+                        "Input channel: click to cycle stereo, left or right",
+                        ui,
+                        None,
+                    )
+                    .value(track.input.label())
+                    .text(track.input.label())
+                    .padding(Insets::xy(6.0, 0.0))
+                    .height(Sizing::Fixed(18.0))
+                    .style(|s| {
+                        s.font_size = 10.0;
+                        s.color = pal().text_dim;
+                    })
+                }))
+                .children((track.kind == TrackKind::Audio).then(|| {
                     small_toggle(
                         &format!("track/{id}/monitor"),
                         "Input monitoring",
@@ -475,6 +530,15 @@ fn timeline(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
     Node::column()
         .fill()
         .clip()
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .height(Sizing::Fixed(RULER_H))
+                .style(|s| {
+                    s.background = Some(pal().toolbar);
+                    s.border = Some((1.0, pal().border));
+                }),
+        )
         .child(ruler(model, view))
         .children(
             view.tempo_shown

@@ -272,6 +272,41 @@ pub struct PluginSlot {
     pub outputs: BTreeMap<u32, TrackId>,
 }
 
+/// One unit in a `SavedRackPreset`'s chain: a builtin rack plugin ID (e.g.
+/// `"builtin:drive"`) and the parameters saved_rack_preset captured from it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SavedRackUnit {
+    pub plugin: String,
+    #[serde(default)]
+    pub params: BTreeMap<String, f64>,
+}
+
+/// A user's own rack preset (save_rack_preset), saved in the project
+/// alongside the curated ones load_rack_preset mounts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SavedRackPreset {
+    pub name: String,
+    pub chain: Vec<SavedRackUnit>,
+}
+
+/// One hit in a `SavedDrumPattern`'s step grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DrumStep {
+    /// The drum pad's MIDI note number (see builtin:drums in list_plugins).
+    pub pad: u8,
+    /// Position in the pattern's 16-step bar (0 to 15).
+    pub step: u8,
+    pub velocity: u8,
+}
+
+/// A user's own drum pattern (save_drum_pattern), saved in the project
+/// alongside the curated ones apply_drum_pattern mounts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SavedDrumPattern {
+    pub name: String,
+    pub steps: Vec<DrumStep>,
+}
+
 /// What a plugin saved of itself beyond its parameters (presets, loaded
 /// files, settings it has no parameters for), as the plugin wrote it.
 /// Saved in project files as base64.
@@ -433,6 +468,24 @@ impl InputChannels {
         match self {
             Self::Stereo => 2,
             Self::Left | Self::Right => 1,
+        }
+    }
+
+    /// Short label a UI shows on a cycling control.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stereo => "Stereo",
+            Self::Left => "L",
+            Self::Right => "R",
+        }
+    }
+
+    /// The next choice a click cycles to.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Stereo => Self::Left,
+            Self::Left => Self::Right,
+            Self::Right => Self::Stereo,
         }
     }
 }
@@ -832,6 +885,22 @@ impl TimeSignature {
         4.0 / f64::from(self.denominator)
     }
 
+    /// Quarter notes per drum-sequencer step: a 16th note (0.25), or a
+    /// 32nd note (0.125) when the denominator is 32.
+    pub fn step_beats(self) -> f64 {
+        0.25_f64.min(self.beat_unit())
+    }
+
+    /// Drum-sequencer steps in each beat (the denominator's note).
+    pub fn steps_per_beat(self) -> u16 {
+        (16 / u16::from(self.denominator)).max(1)
+    }
+
+    /// Drum-sequencer steps in one bar of this time signature.
+    pub fn steps_per_bar(self) -> u16 {
+        u16::from(self.numerator) * self.steps_per_beat()
+    }
+
     /// Whether this is a time signature Dawkey supports: 1 to 32 beats of
     /// a whole, half, quarter, ... or 32nd note.
     pub fn valid(self) -> bool {
@@ -884,6 +953,12 @@ pub struct Project {
     /// back as it was; not part of the undo history.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugin_states: BTreeMap<PluginId, PluginState>,
+    /// The user's own saved rack presets (save_rack_preset), by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rack_presets: Vec<SavedRackPreset>,
+    /// The user's own saved drum step patterns (save_drum_pattern), by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drum_patterns: Vec<SavedDrumPattern>,
     /// Next IDs to hand out. Saved so IDs stay unique across sessions.
     next_track_id: u64,
     #[serde(default)]
@@ -929,6 +1004,8 @@ impl Project {
             loop_region: Region::default(),
             punch: Region::default(),
             plugin_states: BTreeMap::new(),
+            rack_presets: Vec::new(),
+            drum_patterns: Vec::new(),
             next_track_id: 1,
             next_source_id: 1,
             next_clip_id: 1,
