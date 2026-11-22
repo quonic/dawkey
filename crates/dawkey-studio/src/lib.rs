@@ -2271,7 +2271,8 @@ impl Studio {
             capture.drain();
         }
         if self.plugins.idle() {
-            // A plugin's latency changed: delay compensation follows.
+            // A plugin's latency changed (delay compensation follows), or
+            // it asked to be reloaded (its latency or its buses changed).
             self.synced_revision = None;
             self.sync();
         }

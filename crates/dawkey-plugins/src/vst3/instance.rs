@@ -74,6 +74,9 @@ pub(crate) struct Vst3Instance {
     last_applied: Vec<u64>,
     changes: Vec<ParamChange>,
     dirty: bool,
+    /// It asked to be reloaded (`kLatencyChanged`, `kReloadComponent` or
+    /// `kIoChanged`), not yet taken.
+    reload: bool,
     gui: Option<Gui>,
     /// Its controller made no editor Dawkey can show.
     no_gui: bool,
@@ -95,6 +98,7 @@ impl Vst3Instance {
             links,
             changes: Vec::new(),
             dirty: false,
+            reload: false,
             gui: None,
             no_gui: false,
         };
@@ -251,13 +255,16 @@ impl Vst3Instance {
         if restart & RestartFlags_::kMidiCCAssignmentChanged != 0 {
             self.rebuild_midi_map();
         }
-        if restart & RestartFlags_::kLatencyChanged != 0 {
-            tracing::debug!("a VST3 plugin's latency changed; it counts when it's next loaded");
-        }
-        if restart & (RestartFlags_::kReloadComponent | RestartFlags_::kIoChanged) != 0 {
-            tracing::warn!(
-                "a VST3 plugin asked to be reloaded (its buses changed), which Dawkey doesn't do yet"
-            );
+        if restart
+            & (RestartFlags_::kLatencyChanged
+                | RestartFlags_::kReloadComponent
+                | RestartFlags_::kIoChanged)
+            != 0
+        {
+            // Its latency or its buses changed: reload it, the way a
+            // crashed plugin is reloaded, so the new latency (or bus
+            // layout) takes effect right away instead of at the next load.
+            self.reload = true;
         }
         if self.plugin.handler.dirty.swap(false, Ordering::AcqRel) {
             self.dirty = true;
@@ -306,6 +313,12 @@ impl Vst3Instance {
 
     pub(crate) fn state_dirty(&self) -> bool {
         self.dirty || self.plugin.handler.dirty.load(Ordering::Acquire)
+    }
+
+    /// It asked to be reloaded (its latency or its buses changed), since
+    /// the last call.
+    pub(crate) fn take_wants_reload(&mut self) -> bool {
+        std::mem::replace(&mut self.reload, false)
     }
 
     pub(crate) fn idle(&mut self) {
