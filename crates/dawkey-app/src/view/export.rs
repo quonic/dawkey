@@ -81,13 +81,13 @@ pub(super) fn dialog(
                     .text(value)
                     .width(Sizing::Fill(1.0))
                     .height(Sizing::Fixed(26.0))
-                    .padding(Insets::xy(10.0, 0.0)),
+                    .padding(Insets::xy(SPACING.lg, 0.0)),
             )
     };
     let action_button = |id: &str, text: &str, active: Option<Color>| {
         button(id, text, ui, active)
             .text(text)
-            .padding(Insets::xy(14.0, 0.0))
+            .padding(Insets::xy(SPACING.xl, 0.0))
             .height(Sizing::Fixed(30.0))
             .style(|s| s.weight = FontWeight::SemiBold)
     };
@@ -98,14 +98,14 @@ pub(super) fn dialog(
         // Clicks between the buttons stay in the dialog.
         .clickable()
         .width(Sizing::Fixed(PANEL_W))
-        .padding(Insets::all(20.0))
+        .padding(Insets::all(SPACING.xxl))
         .gap(4.0)
         .align(Align::Start)
         .style(|s| {
             s.background = Some(pal().panel);
             s.border = Some((1.0, pal().border));
-            s.radius = [8.0; 4];
-            s.shadow = Some((12.0, pal().shadow));
+            s.radius = [PANEL_RADIUS; 4];
+            s.shadow = Some(ELEVATION.medium());
         })
         .child(
             Node::label("Export the mix")
@@ -115,7 +115,7 @@ pub(super) fn dialog(
                     s.font_size = 15.0;
                 })
                 .padding(Insets {
-                    bottom: 8.0,
+                    bottom: SPACING.md,
                     ..Insets::default()
                 }),
         )
@@ -127,9 +127,9 @@ pub(super) fn dialog(
         .child(
             Node::row()
                 .width(Sizing::Fill(1.0))
-                .gap(8.0)
+                .gap(SPACING.md)
                 .padding(Insets {
-                    top: 14.0,
+                    top: SPACING.xl,
                     ..Insets::default()
                 })
                 .child(Node::spacer())
