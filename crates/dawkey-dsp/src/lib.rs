@@ -6,8 +6,13 @@
 
 #![forbid(unsafe_code)]
 
+mod rack;
 mod synth;
 
+pub use rack::{
+    BuiltinChoice, BuiltinParam, BuiltinSpec, RackEffect, RackProcessor, builtin_specs,
+    cab_response_db, eq_response_db,
+};
 pub use synth::{PolySynth, VOICES};
 
 #[cfg(test)]

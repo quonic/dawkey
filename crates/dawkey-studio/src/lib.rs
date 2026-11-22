@@ -43,7 +43,7 @@ pub use crate::plugins::{PluginProblem, default_cache as default_plugin_cache};
 use crate::recorder::{Recorder, Take, Target};
 pub use dawkey_plugins::{
     BridgeProgram, Catalog as PluginCatalog, ParamChange, PluginInfo, Sandbox, SearchPath,
-    run_plugin_host,
+    builtin_plugin, builtin_plugins, cab_response_db, eq_response_db, run_plugin_host,
 };
 use serde::Serialize;
 
@@ -2271,7 +2271,8 @@ impl Studio {
             capture.drain();
         }
         if self.plugins.idle() {
-            // A plugin's latency changed: delay compensation follows.
+            // A plugin's latency changed (delay compensation follows), or
+            // it asked to be reloaded (its latency or its buses changed).
             self.synced_revision = None;
             self.sync();
         }
