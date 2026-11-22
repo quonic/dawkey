@@ -15,18 +15,20 @@ const KIND_SHADOW: u32 = 1u;
 const KIND_LINE: u32 = 2u;
 const KIND_TRIANGLE: u32 = 3u;
 const KIND_GLYPH: u32 = 4u;
+const KIND_GRADIENT: u32 = 5u;
 
 struct Instance {
     // Quad to rasterize: x, y, w, h in physical pixels.
     @location(0) bounds: vec4f,
     @location(1) color: vec4f,
+    // Border color, or (gradient) the end color.
     @location(2) border_color: vec4f,
     // Corner radii: top-left, top-right, bottom-right, bottom-left.
     @location(3) radius: vec4f,
-    // Rect/shadow: x, y, w, h. Line: x0, y0, x1, y1. Triangle: a, b.
+    // Rect/shadow/gradient: x, y, w, h. Line: x0, y0, x1, y1. Triangle: a, b.
     // Glyph: atlas x, y, w, h.
     @location(4) shape: vec4f,
-    // Line: half width. Triangle: c.
+    // Line: half width. Triangle: c. Gradient: 1.0 horizontal, 0.0 vertical.
     @location(5) extra: vec4f,
     // kind, border width, blur.
     @location(6) params: vec4f,
@@ -129,6 +131,18 @@ fn fs_main(in: VOut) -> @location(0) vec4f {
             }
             let inner = coverage(d + border);
             return mix(premul(in.border_color), premul(in.color), inner) * coverage(d);
+        }
+        case KIND_GRADIENT: {
+            let half = in.shape.zw * 0.5;
+            let d = sd_round_box(p - (in.shape.xy + half), half, in.radius);
+            var t: f32;
+            if (in.extra.x > 0.5) {
+                t = clamp((p.x - in.shape.x) / max(in.shape.z, 1e-6), 0.0, 1.0);
+            } else {
+                t = clamp((p.y - in.shape.y) / max(in.shape.w, 1e-6), 0.0, 1.0);
+            }
+            let c = mix(in.color, in.border_color, t);
+            return premul(c) * coverage(d);
         }
         case KIND_SHADOW: {
             let half = in.shape.zw * 0.5;

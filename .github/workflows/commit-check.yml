@@ -1,0 +1,68 @@
+name: Commit messages
+
+# Checks that every commit on a pull request (and its title) follows the
+# Conventional Commits format CLAUDE.md requires: release-plz builds
+# CHANGELOG.md and bumps versions from these messages.
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commit-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Conventional Commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check commit messages and PR title
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          # <type>[(scope)][!]: <summary>, as CLAUDE.md's "Commit messages
+          # are Conventional Commits" rule spells out.
+          pattern='^(feat|fix|perf|refactor|docs|test|ci|build|chore)(\([a-z0-9_-]+\))?!?: .+'
+          fail=0
+
+          check() {
+            local what="$1" msg="$2"
+            if [[ ! "$msg" =~ $pattern ]]; then
+              echo "::error::$what does not follow Conventional Commits (<type>[(scope)][!]: <summary>): $msg"
+              fail=1
+            fi
+          }
+
+          check "PR title" "$PR_TITLE"
+
+          while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            sha="${line%% *}"
+            msg="${line#* }"
+            # Merge commits and release-plz's own release commits aren't
+            # authored against this format.
+            case "$msg" in
+              "Merge "*|"chore: release"*) continue ;;
+            esac
+            check "Commit $sha" "$msg"
+          done < <(git log --no-merges --format='%H %s' "$BASE_SHA..$HEAD_SHA")
+
+          if [[ "$fail" -ne 0 ]]; then
+            echo "See CLAUDE.md: squash fixups so every commit in the PR is a clean Conventional Commit."
+            exit 1
+          fi

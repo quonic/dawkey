@@ -19,8 +19,11 @@ mod mixer;
 mod piano_roll;
 pub(crate) mod plugins;
 mod prefs;
+pub(crate) mod rack;
 mod recovery;
+pub(crate) mod step_sequencer;
 pub(crate) mod tempo;
+mod track_menu;
 
 use std::sync::Arc;
 
@@ -31,7 +34,8 @@ use dawkey_core::{
 use dawkey_media::Peaks;
 use dawkey_studio::PluginDetails;
 use dawkey_ui::{
-    Chrome, Color, FontFamily, FontWeight, Icon, Insets, Node, Paint, Role, Sizing, UiState,
+    Chrome, Color, Cursor, Direction, FontFamily, FontWeight, Icon, Insets, Node, Paint, Role,
+    Sizing, UiState,
 };
 
 pub(crate) use mixer::{db_from_position, position_from_db};
@@ -40,7 +44,7 @@ pub(crate) use piano_roll::{edited, lane_value, marquee_notes};
 pub(crate) use piano_roll::{x_of as roll_x, y_of as roll_y};
 
 use crate::WindowInfo;
-use crate::state::{Page, TextField, ViewState};
+use crate::state::{MIN_SPLIT, Page, SplitOrientation, TextField, ViewState};
 use crate::theme::*;
 
 /// Everything the view shows, gathered from the studio.
@@ -72,11 +76,23 @@ pub(crate) struct ViewModel {
     pub(crate) master_track: TrackView,
     pub(crate) master: [f32; 2],
     pub(crate) engine: String,
+    /// Audio backend details for the Preferences page.
+    pub(crate) audio_status: String,
+    pub(crate) midi_inputs: Vec<String>,
+    pub(crate) midi_outputs: Vec<String>,
     pub(crate) message: Option<String>,
     /// The plugin in the editor, if open.
     pub(crate) editor: Option<PluginDetails>,
     /// The plugins the picker offers, if open.
     pub(crate) picker: Option<Vec<PickerEntry>>,
+    /// The track shown in the 19-inch effects rack.
+    pub(crate) rack_track: TrackId,
+    /// Full parameter details for the units mounted in the active rack.
+    pub(crate) rack_units: Vec<PluginDetails>,
+    /// The user's own saved rack presets, by name.
+    pub(crate) rack_presets: Vec<String>,
+    /// The user's own saved drum patterns, by name.
+    pub(crate) drum_patterns: Vec<String>,
     /// Plugins are being scanned on a worker thread.
     pub(crate) scanning: bool,
     /// Moving controls while playing writes automation.
@@ -89,6 +105,8 @@ pub(crate) struct ViewModel {
     /// The HTTP MCP server's state, and where its token is kept.
     pub(crate) mcp_http: crate::McpHttpState,
     pub(crate) mcp_token_path: Option<String>,
+    /// Label for restoring the most recently non-destructively deleted track(s).
+    pub(crate) deleted_archive_summary: Option<String>,
 }
 
 /// A plugin the picker offers.
@@ -105,6 +123,9 @@ pub(crate) struct TrackView {
     pub(crate) id: TrackId,
     pub(crate) name: String,
     pub(crate) kind: TrackKind,
+    /// The user's own color override, if set (`None`: the automatic color
+    /// cycled by the track's position; see `track_color`).
+    pub(crate) color: Option<Color>,
     /// The bus it goes to (`None`: the master), and that bus's name.
     pub(crate) output: Option<TrackId>,
     pub(crate) output_name: String,
@@ -118,6 +139,8 @@ pub(crate) struct TrackView {
     pub(crate) mute: bool,
     pub(crate) solo: bool,
     pub(crate) armed: bool,
+    /// Audio tracks: which input channel(s) it listens to.
+    pub(crate) input: dawkey_core::InputChannels,
     /// Audio tracks: plays its input while armed.
     pub(crate) monitor: bool,
     /// Take lanes its clips use (the highest lane plus one).
@@ -139,6 +162,8 @@ pub(crate) struct TrackView {
     pub(crate) automation: Vec<LaneView>,
     /// Linear peak levels.
     pub(crate) level: [f32; 2],
+    /// Non-destructive mixdown archive attached to this track.
+    pub(crate) has_mixdown_archive: bool,
     pub(crate) clips: Vec<ClipView>,
 }
 
@@ -192,6 +217,12 @@ pub(crate) struct SlotView {
     pub(crate) bypass: bool,
     /// Couldn't be loaded.
     pub(crate) error: bool,
+    /// `builtin:drums` only: the sample kit its pads play back from, if any.
+    pub(crate) sample_kit: Option<dawkey_studio::SampleKit>,
+    /// `builtin:drums` only: each pad's output, patched to a bus instead
+    /// of the track's own output (`None`: Master, the default), by pad
+    /// index.
+    pub(crate) pad_outputs: Vec<Option<TrackId>>,
 }
 
 /// An automation lane.
@@ -281,9 +312,10 @@ pub(crate) fn lane_label_kind(
         AutomationTarget::Pan => ("Pan".to_owned(), LaneKind::Pan),
         AutomationTarget::Send { bus } => (format!("Send to bus {bus}"), LaneKind::Gain),
         AutomationTarget::Param { plugin, param } => {
-            let info = track
-                .plugin(*plugin)
-                .and_then(|s| catalog.and_then(|c| c.get(&s.plugin)));
+            let info = track.plugin(*plugin).and_then(|s| {
+                dawkey_studio::builtin_plugin(&s.plugin)
+                    .or_else(|| catalog.and_then(|c| c.get(&s.plugin)))
+            });
             let p = info.and_then(|i| i.params.iter().find(|p| &p.id == param));
             match (info, p) {
                 (Some(i), Some(p)) => (
@@ -354,11 +386,25 @@ pub(crate) struct NoteView {
     pub(crate) length_s: f64,
 }
 
+/// What a window shows, for [`build`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowContent {
+    /// Today's single window: `view.page` switches what's shown.
+    PageSwitcher,
+    /// The widescreen layout: Arrange, Rack and Mixer side by side.
+    Widescreen,
+    /// One monitor's window in the multi-monitor layout: always this role,
+    /// regardless of `view.page` (Piano Roll and Step Sequencer still take
+    /// over the Arrange monitor's window, as they do the single window).
+    Window(crate::multi_window::ViewRole),
+}
+
 pub(crate) fn build(
     model: &ViewModel,
     view: &ViewState,
     ui: &UiState,
     window: &WindowInfo,
+    content: WindowContent,
 ) -> Node {
     let margin = window.shadow_margin();
     let radius = window.corner_radius();
@@ -372,17 +418,42 @@ pub(crate) fn build(
             s.background = Some(pal().window);
             s.radius = [radius; 4];
             if margin > 0.0 {
-                s.shadow = Some((SHADOW_BLUR, pal().shadow));
+                s.shadow = Some(ELEVATION.high());
                 s.border = Some((1.0, pal().border));
             }
         });
     if window.csd {
-        frame = frame.child(titlebar(model, ui, window, radius));
+        frame = frame.child(titlebar(model, view, ui, window, radius));
     }
-    let page = match view.page {
-        Page::Arrange => arrange::build(model, view, ui),
-        Page::Mixer => mixer::build(model, view, ui),
-        Page::PianoRoll => piano_roll::build(model, view, ui),
+    let top = if window.csd { TITLEBAR_HEIGHT } else { 0.0 };
+    let area = dawkey_ui::Rect::new(
+        0.0,
+        top,
+        window.size.w - 2.0 * margin,
+        window.size.h - 2.0 * margin - top,
+    );
+    // Piano Roll and Step Sequencer take over the whole window — but in the
+    // multi-monitor layout, only the window actually showing Arrange (where
+    // clips and drum pads live); a Rack/Mixer/MixerAndRack-role window
+    // keeps its own fixed content regardless of `view.page`, so opening a
+    // clip or pad doesn't pop the same overlay onto every monitor.
+    let page = match (content, view.page) {
+        (WindowContent::Window(role), Page::PianoRoll | Page::StepSequencer)
+            if role != crate::multi_window::ViewRole::Arrange =>
+        {
+            build_for_role(model, view, ui, role, area)
+        }
+        (WindowContent::Widescreen, Page::Arrange | Page::Mixer | Page::Rack) => {
+            build_widescreen(model, view, ui, area.w)
+        }
+        (WindowContent::Window(role), Page::Arrange | Page::Mixer | Page::Rack) => {
+            build_for_role(model, view, ui, role, area)
+        }
+        (_, Page::Arrange) => arrange::build(model, view, ui),
+        (_, Page::Mixer) => mixer::build(model, view, ui),
+        (_, Page::Rack) => rack::build(model, view, ui, area.w),
+        (_, Page::PianoRoll) => piano_roll::build(model, view, ui),
+        (_, Page::StepSequencer) => step_sequencer::build(model, view, ui, area.w),
     };
     // The plugin picker and editor float over the page.
     let page =
@@ -391,13 +462,6 @@ pub(crate) fn build(
             .child(page)
             .children(plugins::overlay(model, view, ui, window.size));
     // The "save changes?" dialog covers everything below the title bar.
-    let top = if window.csd { TITLEBAR_HEIGHT } else { 0.0 };
-    let area = dawkey_ui::Rect::new(
-        0.0,
-        top,
-        window.size.w - 2.0 * margin,
-        window.size.h - 2.0 * margin - top,
-    );
     let frame = frame
         .child(toolbar(model, view, ui, window.size.w))
         .child(page)
@@ -405,6 +469,12 @@ pub(crate) fn build(
         .children(export::dialog(model, view, ui, area, radius))
         .children(prefs::panel(model, view, ui, area, radius))
         .children(recovery::dialog(view, ui, area, radius))
+        .children(track_menu::menu(model, view, ui, area))
+        .children(track_menu::popup(model, view, area))
+        .children(track_menu::confirm_dialog(model, view, ui, area, radius))
+        .children(track_menu::delete_confirm_dialog(
+            model, view, ui, area, radius,
+        ))
         .children(confirm::dialog(model, view, ui, area, radius));
     Node::column()
         .fill()
@@ -412,11 +482,126 @@ pub(crate) fn build(
         .child(frame)
 }
 
+/// Arrange, Rack and Mixer side by side in one window (the widescreen
+/// layout preference). All three read the same [`ViewState`] — they don't
+/// touch each other's fields (arrange's scroll/zoom, rack's `rack_track`/
+/// `rack_scroll`, …), so showing them at once needs no per-pane state.
+pub(crate) fn build_widescreen(
+    model: &ViewModel,
+    view: &ViewState,
+    ui: &UiState,
+    total_w: f32,
+) -> Node {
+    let pane_w = total_w / 3.0;
+    Node::row()
+        .fill()
+        .child(arrange::build(model, view, ui).width(Sizing::Fixed(pane_w)))
+        .child(rack::build(model, view, ui, pane_w).width(Sizing::Fixed(pane_w)))
+        .child(mixer::build(model, view, ui).width(Sizing::Fixed(pane_w)))
+}
+
+/// What one monitor's window shows in the multi-monitor layout: always
+/// `role`, from the same shared [`ViewState`] every window reads.
+/// Width or height of the drag handle between the Mixer and Rack panes.
+const SPLIT_DIVIDER: f32 = 20.0;
+
+fn build_for_role(
+    model: &ViewModel,
+    view: &ViewState,
+    ui: &UiState,
+    role: crate::multi_window::ViewRole,
+    area: dawkey_ui::Rect,
+) -> Node {
+    use crate::multi_window::ViewRole;
+    match role {
+        ViewRole::Arrange => arrange::build(model, view, ui),
+        ViewRole::Mixer => mixer::build(model, view, ui),
+        ViewRole::Rack => rack::build(model, view, ui, area.w),
+        ViewRole::MixerAndRack => build_mixer_and_rack(model, view, ui, area),
+    }
+}
+
+/// Rack then Mixer, stacked (Rack on top) or side by side (Rack on the
+/// left) with a draggable divider between them (the multi-monitor
+/// layout's 2-monitor window). `mixer_rack_split` is the mixer pane's size
+/// (height if stacked, width if side by side) in logical px, clamped here
+/// to the pane's actual size so a window resize never hides either pane;
+/// `mixer_rack_orientation` picks the direction.
+fn build_mixer_and_rack(
+    model: &ViewModel,
+    view: &ViewState,
+    ui: &UiState,
+    area: dawkey_ui::Rect,
+) -> Node {
+    let stacked = view.mixer_rack_orientation == SplitOrientation::Stacked;
+    let extent = if stacked { area.h } else { area.w } - SPLIT_DIVIDER;
+    let min = MIN_SPLIT.min(extent / 2.0);
+    let mixer_size = view.mixer_rack_split.clamp(min, (extent - min).max(min));
+    // The orientation toggle sits at the divider's own far end, inside its
+    // reserved strip, so it never covers either pane's content.
+    let toggle_label = if stacked { "=" } else { "||" };
+    let toggle_orientation = button(
+        "mixer_rack/orientation",
+        "Switch between Rack above Mixer and side by side",
+        ui,
+        None,
+    )
+    .text(toggle_label)
+    .size(SPLIT_DIVIDER, SPLIT_DIVIDER)
+    .absolute(dawkey_ui::Rect::new(
+        if stacked { area.w - SPLIT_DIVIDER } else { 0.0 },
+        0.0,
+        SPLIT_DIVIDER,
+        SPLIT_DIVIDER,
+    ));
+    let divider = Node::row()
+        .id("mixer_rack/split")
+        .accessible_label("Resize the Mixer and Rack panes")
+        .clickable()
+        .draggable()
+        .cursor(if stacked {
+            Cursor::ResizeVertical
+        } else {
+            Cursor::ResizeHorizontal
+        })
+        .style(|s| {
+            s.background = Some(pal().border);
+        })
+        .child(toggle_orientation);
+    if stacked {
+        Node::column()
+            .fill()
+            .child(rack::build(model, view, ui, area.w).height(Sizing::Fill(1.0)))
+            .child(
+                divider
+                    .width(Sizing::Fill(1.0))
+                    .height(Sizing::Fixed(SPLIT_DIVIDER)),
+            )
+            .child(mixer::build(model, view, ui).height(Sizing::Fixed(mixer_size)))
+    } else {
+        Node::row()
+            .fill()
+            .child(rack::build(model, view, ui, extent - mixer_size).width(Sizing::Fill(1.0)))
+            .child(
+                divider
+                    .width(Sizing::Fixed(SPLIT_DIVIDER))
+                    .height(Sizing::Fill(1.0)),
+            )
+            .child(mixer::build(model, view, ui).width(Sizing::Fixed(mixer_size)))
+    }
+}
+
 pub(crate) fn window_title(name: &str, dirty: bool) -> String {
     format!("{}{name} — Dawkey", if dirty { "• " } else { "" })
 }
 
-fn titlebar(model: &ViewModel, ui: &UiState, window: &WindowInfo, radius: f32) -> Node {
+fn titlebar(
+    model: &ViewModel,
+    view: &ViewState,
+    ui: &UiState,
+    window: &WindowInfo,
+    radius: f32,
+) -> Node {
     let active = window.activated;
     let fg = if active { pal().text } else { pal().text_dim };
     let maximize_icon = if window.maximized {
@@ -436,11 +621,13 @@ fn titlebar(model: &ViewModel, ui: &UiState, window: &WindowInfo, radius: f32) -
         })
         .gap(10.0)
         .style(|s| {
-            s.background = Some(if active {
+            let base = if active {
                 pal().titlebar
             } else {
                 pal().titlebar_inactive
-            });
+            };
+            s.background = Some(base);
+            s.gradient = Some((base.mix(Color::hex(0x000000), 0.15), Direction::Column));
             s.radius = [radius, radius, 0.0, 0.0];
         })
         .child(Node::row().size(10.0, 10.0).style(|s| {
@@ -448,12 +635,16 @@ fn titlebar(model: &ViewModel, ui: &UiState, window: &WindowInfo, radius: f32) -
             s.radius = [5.0; 4];
         }))
         .child(
-            Node::label(window_title(&model.title, model.dirty))
-                .id("window/title")
-                .style(|s| {
-                    s.color = fg;
-                    s.weight = FontWeight::SemiBold;
-                }),
+            // Double-click to rename the project.
+            name_editor(&TextField::ProjectName, "Project name", view, ui).unwrap_or_else(|| {
+                Node::label(window_title(&model.title, model.dirty))
+                    .id("window/title")
+                    .clickable()
+                    .style(|s| {
+                        s.color = fg;
+                        s.weight = FontWeight::SemiBold;
+                    })
+            }),
         )
         .child(Node::spacer())
         .child(window_button(
@@ -612,7 +803,11 @@ pub(crate) fn name_editor(
     view: &ViewState,
     ui: &UiState,
 ) -> Option<Node> {
-    let edit = view.text_edit.as_ref().filter(|e| e.field == *field)?;
+    let edit = view
+        .shared
+        .text_edit
+        .as_ref()
+        .filter(|e| e.field == *field)?;
     let id = crate::text_input::field_id(field);
     Some(text_field(
         &id,
@@ -671,73 +866,76 @@ pub(crate) fn track_buttons(track: &TrackView, ui: &UiState) -> Vec<Node> {
 
 /// The narrowest windows whose toolbar shows the Split button, without and
 /// with the piano roll toggle.
-const SPLIT_MIN_W: f32 = 940.0;
-const SPLIT_MIN_W_EDIT: f32 = 1040.0;
+const SPLIT_MIN_W: f32 = 980.0;
+const SPLIT_MIN_W_EDIT: f32 = 1090.0;
 /// The narrowest windows whose toolbar shows "Auto" outside the mixer,
 /// without and with the piano roll toggle.
-const AUTO_MIN_W: f32 = 1000.0;
-const AUTO_MIN_W_EDIT: f32 = 1140.0;
+const AUTO_MIN_W: f32 = 1040.0;
+const AUTO_MIN_W_EDIT: f32 = 1180.0;
 
 /// The narrowest windows whose toolbar shows "Export…".
-const EXPORT_MIN_W: f32 = 1100.0;
+const EXPORT_MIN_W: f32 = 1140.0;
 
 fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> Node {
-    // The master meter takes what room the toolbar has left (up to 140 px)
-    // and disappears in narrow windows rather than overflowing.
-    let meter_w = ((window_w - 1000.0) / 2.0).clamp(0.0, 140.0);
     // The piano roll toggle shows when there's a clip for it: the edited
     // one, or the selected one if it's MIDI. In narrow windows it takes the
     // place of the tempo and time signature.
     let can_edit = edited(model, view).is_some()
         || model.tracks.iter().any(|t| {
             t.clips.iter().any(|c| {
-                Some(c.id) == view.selected_clip
+                Some(c.id) == view.shared.selected_clip
                     && matches!(c.content, ClipViewContent::Midi { .. })
             })
         });
-    // So does the automation mode, while "Auto" is on (in the mixer, or in
-    // windows wide enough for it).
-    let show_mode = model.automation_write
-        && (view.page == Page::Mixer
-            || window_w
-                >= if can_edit {
-                    AUTO_MIN_W_EDIT
-                } else {
-                    AUTO_MIN_W
-                });
-    let show_tempo = !(can_edit || show_mode) || window_w >= 980.0;
-    // Splitting the selected clip, when there's room for its button.
-    let show_split = view.page == Page::Arrange
-        && view.selected_clip.is_some()
-        && window_w
-            >= if can_edit {
-                SPLIT_MIN_W_EDIT
-            } else {
-                SPLIT_MIN_W
-            };
-    // Writing automation (faders, pan, plugin parameters) is the mixer's;
-    // there, in narrow windows, it takes the place of snapping, which the
-    // mixer has no use for. Elsewhere it shows when there's room.
+    // Writing automation (faders, pan, plugin parameters) is the mixer's
+    // and rack's; there, in narrow windows, it takes the place of snapping,
+    // which they have no use for. Elsewhere it shows when there's room.
     let wide = window_w
         >= if can_edit {
             AUTO_MIN_W_EDIT
         } else {
             AUTO_MIN_W
         };
-    let show_auto = view.page == Page::Mixer || wide;
+    // So does the automation mode, while "Auto" is on (in the mixer/rack, or in
+    // windows wide enough for it).
+    let show_mode =
+        model.automation_write && (matches!(view.page, Page::Mixer | Page::Rack) || wide);
+    let show_tempo = !(can_edit || show_mode) || window_w >= 1040.0;
+    // Splitting the selected clip, when there's room for its button.
+    let show_split = view.page == Page::Arrange
+        && view.shared.selected_clip.is_some()
+        && window_w
+            >= if can_edit {
+                SPLIT_MIN_W_EDIT
+            } else {
+                SPLIT_MIN_W
+            };
+    let show_auto = matches!(view.page, Page::Mixer | Page::Rack) || wide;
     // "Export…" needs more room with the Split button and the piano roll
     // toggle.
     let export_min_w =
-        EXPORT_MIN_W + if show_split { 80.0 } else { 0.0 } + if can_edit { 130.0 } else { 0.0 };
-    let show_snap = view.page != Page::Mixer || wide;
+        EXPORT_MIN_W + if show_split { 75.0 } else { 0.0 } + if can_edit { 125.0 } else { 0.0 };
+    let show_snap = !matches!(view.page, Page::Mixer | Page::Rack) || wide;
+    // The master meter takes what room the toolbar has left (up to 140 px)
+    // and disappears in narrow windows rather than overflowing.
+    let used_extra = if can_edit { 95.0 } else { 0.0 }
+        + if show_split { 62.0 } else { 0.0 }
+        + if show_auto && show_snap { 62.0 } else { 0.0 }
+        + if show_tempo && (can_edit || show_mode) {
+            100.0
+        } else {
+            0.0
+        }
+        + if window_w >= export_min_w { 80.0 } else { 0.0 };
+    let meter_w = ((window_w - (980.0 + used_extra)) * 0.55).clamp(0.0, 140.0);
     let play_active = model.playing.then_some(pal().accent);
     Node::row()
         .id("toolbar")
         .role(Role::Toolbar)
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(52.0))
-        .padding(Insets::xy(12.0, 0.0))
-        .gap(8.0)
+        .padding(Insets::xy(10.0, 0.0))
+        .gap(6.0)
         .background(pal().toolbar)
         .child(
             button("transport/play", "Play", ui, play_active)
@@ -773,7 +971,7 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
                 .id("transport/position")
                 .accessible_label("Position")
                 .value(format_time(model.position_s))
-                .padding(Insets::xy(10.0, 0.0))
+                .padding(Insets::xy(6.0, 0.0))
                 .style(|s| {
                     s.family = FontFamily::Mono;
                     s.font_size = 18.0;
@@ -812,7 +1010,7 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
                 }
             })
         }))
-        .child(Node::row().width(Sizing::Fixed(6.0)))
+        .child(Node::row().width(Sizing::Fixed(2.0)))
         .child(toggle(
             "transport/loop",
             "Loop",
@@ -841,14 +1039,14 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
         }))
         // How it writes, while it's on: each click picks the next mode.
         .children(show_mode.then(|| {
-            let mode = view.automation_mode.label();
+            let mode = view.shared.automation_mode.label();
             button("transport/automation_mode", "Automation mode", ui, None)
                 .value(mode.to_lowercase())
                 .text(mode)
                 .padding(Insets::xy(8.0, 0.0))
                 .height(Sizing::Fixed(28.0))
         }))
-        .child(Node::row().width(Sizing::Fixed(12.0)))
+        .child(Node::row().width(Sizing::Fixed(6.0)))
         .child(toggle(
             "view/arrange",
             "Arrange",
@@ -862,6 +1060,14 @@ fn toolbar(model: &ViewModel, view: &ViewState, ui: &UiState, window_w: f32) -> 
             "Mixer",
             "Mixer",
             view.page == Page::Mixer,
+            pal().accent,
+            ui,
+        ))
+        .child(toggle(
+            "view/rack",
+            "Effects rack",
+            "Rack",
+            view.page == Page::Rack,
             pal().accent,
             ui,
         ))
@@ -948,6 +1154,9 @@ pub(crate) fn meter(
             levels: display,
             vertical,
             background: pal().meter,
+            low: pal().solo_on,
+            mid: pal().mute_on,
+            high: pal().record_on,
         })
 }
 
@@ -986,6 +1195,30 @@ fn statusbar(model: &ViewModel, ui: &UiState, radius: [f32; 4]) -> Node {
                 .id("status/engine")
                 .style(small),
         )
+        .child(status_button(
+            "status/new_project",
+            "New project",
+            "New",
+            ui,
+        ))
+        .child(status_button(
+            "status/open_project",
+            "Open a project",
+            "Open…",
+            ui,
+        ))
+        .child(status_button(
+            "status/save_project",
+            "Save the project",
+            "Save",
+            ui,
+        ))
+        .child(status_button(
+            "status/close_project",
+            "Close the project",
+            "Close",
+            ui,
+        ))
         .child(Node::spacer());
     if let Some((name, done)) = &model.exporting {
         bar = bar
@@ -1015,16 +1248,24 @@ fn statusbar(model: &ViewModel, ui: &UiState, radius: [f32; 4]) -> Node {
         );
     }
     bar.child(Node::label(project).id("status/project").style(small))
-        .child(
-            button("status/preferences", "Preferences", ui, None)
-                .text("Preferences")
-                .padding(Insets::xy(8.0, 0.0))
-                .height(Sizing::Fixed(20.0))
-                .style(|s| {
-                    s.font_size = 11.0;
-                    s.color = pal().text_dim;
-                }),
-        )
+        .child(status_button(
+            "status/preferences",
+            "Preferences",
+            "Preferences",
+            ui,
+        ))
+}
+
+/// A small text button for the status bar, like `status/preferences`.
+fn status_button(id: &'static str, description: &'static str, text: &str, ui: &UiState) -> Node {
+    button(id, description, ui, None)
+        .text(text)
+        .padding(Insets::xy(8.0, 0.0))
+        .height(Sizing::Fixed(20.0))
+        .style(|s| {
+            s.font_size = 11.0;
+            s.color = pal().text_dim;
+        })
 }
 
 /// "92.5" for 92.5, "100" for 100.

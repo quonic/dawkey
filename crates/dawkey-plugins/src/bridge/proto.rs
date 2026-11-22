@@ -105,6 +105,9 @@ pub(crate) enum FromHost {
     ParamsChanged(Vec<ParamChange>),
     /// Notice: its GUI was closed (its window, or by itself).
     GuiClosed,
+    /// Notice: the plugin asked to be reloaded (its latency or its buses
+    /// changed).
+    Reload,
 }
 
 /// Writes a frame.

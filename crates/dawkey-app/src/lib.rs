@@ -14,6 +14,7 @@ mod confirm;
 mod export;
 mod input;
 mod mcp_http;
+mod multi_window;
 mod picker;
 mod plugin_input;
 mod prefs;
@@ -21,6 +22,7 @@ mod prefs_input;
 mod recovery;
 mod roll_input;
 mod state;
+mod step_input;
 mod take_input;
 mod tempo_input;
 mod text_input;
@@ -45,10 +47,11 @@ pub use mcp_http::{
     DEFAULT_MCP_PORT, McpEndpoint, McpHttpServer, McpHttpState, default_token_path,
     load_or_create_token, mcp_url, new_token, tokens_match,
 };
-pub use prefs::{AudioChoice, PluginKind, Preferences, ThemeChoice};
+pub use multi_window::{ExtraWindow, MonitorInfo, ViewRole, WIDESCREEN_ROLES, plan_windows};
+pub use prefs::{AudioChoice, LayoutChoice, PluginKind, Preferences, ThemeChoice};
 pub use state::{
     ExportRange, ExportSettings, ImportRequest, Marker, Page, PendingAction, PlatformRequest,
-    RollLane, ViewState,
+    RollLane, SharedViewState, ViewState,
 };
 pub use theme::{SHADOW_MARGIN, Theme};
 
@@ -207,6 +210,13 @@ pub struct App {
     /// it was last checked.
     pub(crate) autosave_every: Option<Duration>,
     pub(crate) last_autosave: Instant,
+    /// This window's fixed role in the multi-monitor layout (`None`:
+    /// `self.view.page`/the Widescreen preference decide instead, as in
+    /// `Standard` and `Widescreen` layout).
+    pub(crate) primary_role: Option<multi_window::ViewRole>,
+    /// The other windows in the multi-monitor layout, each with its own
+    /// retained UI state and size. See [`multi_window`].
+    pub(crate) extra_windows: Vec<multi_window::ExtraWindow>,
 }
 
 impl std::fmt::Debug for App {
@@ -253,6 +263,8 @@ impl App {
             imports: Vec::new(),
             close_requested: false,
             seen_revision: 0,
+            primary_role: None,
+            extra_windows: Vec::new(),
         };
         app.rebuild();
         app
@@ -330,6 +342,27 @@ impl App {
         if self.studio.session().revision() != self.seen_revision {
             self.redraw = true;
         }
+        self.follow_playhead();
+    }
+
+    /// While playing in the arrange view, scrolls the timeline forward once
+    /// the playhead reaches the right edge (or jumps back into view, after
+    /// a loop or a locate elsewhere), so it never runs off screen.
+    fn follow_playhead(&mut self) {
+        if self.view.page != Page::Arrange || !self.studio.transport().playing {
+            return;
+        }
+        let visible_s = f64::from(self.lanes_rect().w) / f64::from(self.view.px_per_s);
+        if visible_s <= 0.0 {
+            return;
+        }
+        let position_s = self.studio.transport().position_s;
+        let margin_s = visible_s * 0.1;
+        if position_s < self.view.scroll_s || position_s > self.view.scroll_s + visible_s - margin_s
+        {
+            self.view.scroll_s = (position_s - margin_s).max(0.0);
+            self.redraw = true;
+        }
     }
 
     /// True while something on screen changes by itself (playback, meters,
@@ -377,6 +410,52 @@ impl App {
         {
             self.view.plugin_picker = None;
         }
+        self.view
+            .shared
+            .selected_tracks
+            .retain(|&id| project.tracks.iter().any(|t| t.id == id));
+        if self
+            .view
+            .shared
+            .track_anchor
+            .is_some_and(|id| project.tracks.iter().all(|t| t.id != id))
+        {
+            self.view.shared.track_anchor = self.view.shared.selected_tracks.first().copied();
+        }
+        if self
+            .view
+            .track_menu
+            .is_some_and(|m| project.tracks.iter().all(|t| t.id != m.track))
+        {
+            self.view.track_menu = None;
+        }
+        if let Some(confirm) = &mut self.view.shared.mixdown_confirm {
+            confirm
+                .tracks
+                .retain(|&id| project.tracks.iter().any(|t| t.id == id));
+            if confirm.tracks.is_empty() {
+                self.view.shared.mixdown_confirm = None;
+            }
+        }
+        if let Some(confirm) = &mut self.view.shared.delete_confirm {
+            confirm
+                .tracks
+                .retain(|&id| project.tracks.iter().any(|t| t.id == id));
+            if confirm.tracks.is_empty() {
+                self.view.shared.delete_confirm = None;
+            }
+        }
+        if self
+            .view
+            .rack_track
+            .is_some_and(|id| project.track(id).is_none())
+        {
+            self.view.rack_track = None;
+            self.view.rack_scroll = 0.0;
+        }
+        self.view
+            .rack_pages
+            .retain(|id, _| project.plugin(*id).is_some());
         if let Some((track, lane, index)) = self.view.selected_point
             && project
                 .track(track)
@@ -389,12 +468,29 @@ impl App {
         if self.view.editing_clip.is_some() && view::edited(&model, &self.view).is_none() {
             self.view.editing_clip = None;
             self.view.selected_notes.clear();
-            if self.view.page == Page::PianoRoll {
+            if matches!(self.view.page, Page::PianoRoll | Page::StepSequencer) {
                 self.view.page = Page::Arrange;
             }
         }
-        let root = view::build(&model, &self.view, self.ui.state(), &self.zoomed);
+        let content = match self.primary_role {
+            Some(role) => view::WindowContent::Window(role),
+            None if self.prefs.layout == crate::prefs::LayoutChoice::Widescreen => {
+                view::WindowContent::Widescreen
+            }
+            None => view::WindowContent::PageSwitcher,
+        };
+        let root = view::build(&model, &self.view, self.ui.state(), &self.zoomed, content);
         self.ui.set_root(root, self.zoomed.size, &mut self.text);
+        for extra in &mut self.extra_windows {
+            let root = view::build(
+                &model,
+                &self.view,
+                extra.ui.state(),
+                &extra.window,
+                view::WindowContent::Window(extra.role),
+            );
+            extra.ui.set_root(root, extra.window.size, &mut self.text);
+        }
         // A drag that will never end (its widget went away, or its release
         // was lost) drops its gesture, or a preview, an undo merge or touch
         // automation would hang on.
@@ -407,42 +503,24 @@ impl App {
     /// Routes one input event from a device. Window-chrome requests are
     /// returned for the platform.
     pub fn handle_input(&mut self, event: InputEvent) -> Vec<ChromeAction> {
-        // From the platform's logical pixels into the app's units.
         let z = self.ui_scale;
-        let unzoom = |p: Point| Point::new(p.x / z, p.y / z);
-        let event = match event {
-            InputEvent::PointerMove(pos) => InputEvent::PointerMove(unzoom(pos)),
-            InputEvent::PointerDown {
-                pos,
-                button,
-                time_ms,
-            } => InputEvent::PointerDown {
-                pos: unzoom(pos),
-                button,
-                time_ms,
-            },
-            InputEvent::PointerUp { pos, button } => InputEvent::PointerUp {
-                pos: unzoom(pos),
-                button,
-            },
-            InputEvent::Scroll { pos, delta } => InputEvent::Scroll {
-                pos: unzoom(pos),
-                delta: unzoom(delta),
-            },
-            event => event,
-        };
-        let actions = self.ui.handle(event);
+        let actions = self.ui.handle(unzoom_event(z, event));
         let chrome = self.apply(actions);
         self.rebuild();
-        chrome
-            .into_iter()
-            .map(|action| match action {
-                ChromeAction::WindowMenu(p) => {
-                    ChromeAction::WindowMenu(Point::new(p.x * z, p.y * z))
-                }
-                action => action,
-            })
-            .collect()
+        zoom_chrome(z, chrome)
+    }
+
+    /// Like [`Self::handle_input`], for one of the other windows in the
+    /// multi-monitor layout (by index into `self.extra_windows`).
+    pub fn handle_extra_input(&mut self, index: usize, event: InputEvent) -> Vec<ChromeAction> {
+        let Some(extra) = self.extra_windows.get_mut(index) else {
+            return Vec::new();
+        };
+        let z = self.ui_scale;
+        let actions = extra.ui.handle(unzoom_event(z, event));
+        let chrome = self.apply(actions);
+        self.rebuild();
+        zoom_chrome(z, chrome)
     }
 
     /// Runs synthetic input with `modifiers` held, queueing any window
@@ -618,14 +696,15 @@ impl App {
     /// Replaces the open project (from the open dialog).
     pub fn replace_project(&mut self, loaded: LoadedProject) -> Result<(), String> {
         self.studio.replace(loaded).map_err(|e| e.to_string())?;
+        let export = self.view.shared.export;
         self.view = ViewState {
             page: self.view.page,
-            export: self.view.export,
             ..ViewState::default()
         };
+        self.view.shared.export = export;
         // Opened in the window: changes a crash kept are offered back.
         if self.platform == Platform::Wayland {
-            self.view.recovery = self.studio.bundle_recovery();
+            self.view.shared.recovery = self.studio.bundle_recovery();
         }
         self.rebuild();
         Ok(())
@@ -681,18 +760,41 @@ impl App {
             .map_err(|e| e.to_string())
     }
 
+    pub(crate) fn rack_track(&self) -> TrackId {
+        let project = self.studio.session().project();
+        self.view
+            .rack_track
+            .filter(|&id| project.track(id).is_some())
+            .unwrap_or_else(|| project.tracks.first().map_or(dawkey_core::MASTER, |t| t.id))
+    }
+
+    /// Whether the rack is showing somewhere right now: the page switcher's
+    /// on `Page::Rack`, the Widescreen layout always shows it, or it's one
+    /// of the multi-monitor layout's windows' fixed roles.
+    pub(crate) fn rack_visible(&self) -> bool {
+        self.view.page == Page::Rack
+            || self.prefs.layout == crate::prefs::LayoutChoice::Widescreen
+            || self
+                .primary_role
+                .is_some_and(|r| matches!(r, ViewRole::Rack | ViewRole::MixerAndRack))
+            || self
+                .extra_windows
+                .iter()
+                .any(|w| matches!(w.role, ViewRole::Rack | ViewRole::MixerAndRack))
+    }
+
     fn view_model(&mut self) -> ViewModel {
         let meters = self.studio.display_meters();
         let status = self.studio.engine_status();
         // Plugin names come from the catalog; don't scan just to draw a
-        // project without plugins.
+        // project without external plugins.
         let wants_catalog = self.view.plugin_picker.is_some()
             || self
                 .studio
                 .session()
                 .project()
                 .all_tracks()
-                .any(|t| !t.plugins.is_empty());
+                .any(|t| t.plugins.iter().any(|p| !p.plugin.starts_with("builtin:")));
         if wants_catalog {
             // Starts a scan if there's no list yet; the window doesn't wait.
             self.studio.plugin_catalog_now();
@@ -703,6 +805,37 @@ impl App {
             let (first, count) = view::plugins::visible_window(self.view.overlay_scroll);
             self.studio.plugin_details_window(id, first, count)
         });
+        let rack_track = self.rack_track();
+        let rack_units = if self.rack_visible() {
+            let ids: Vec<dawkey_core::PluginId> = self
+                .studio
+                .session()
+                .project()
+                .track(rack_track)
+                .map(|t| t.plugins.iter().map(|p| p.id).collect())
+                .unwrap_or_default();
+            ids.into_iter()
+                .filter_map(|id| self.studio.plugin_details(id))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let rack_presets = self
+            .studio
+            .session()
+            .project()
+            .rack_presets
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        let drum_patterns = self
+            .studio
+            .session()
+            .project()
+            .drum_patterns
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
         let catalog = self.studio.cached_catalog().filter(|_| wants_catalog);
         let picker = self.view.plugin_picker.map(|_| {
             catalog.map_or_else(Vec::new, |c| {
@@ -717,7 +850,9 @@ impl App {
                     .collect()
             })
         });
-        let plugin_info = |id: &str| catalog.and_then(|c| c.get(id));
+        let plugin_info = |id: &str| {
+            dawkey_studio::builtin_plugin(id).or_else(|| catalog.and_then(|c| c.get(id)))
+        };
         let session = self.studio.session();
         let project = session.project();
         let rate_khz = f64::from(status.sample_rate) / 1000.0;
@@ -737,6 +872,25 @@ impl App {
                 line
             }
         };
+        let audio_status = match &status.pipewire {
+            None => format!("Virtual audio · {} Hz", status.sample_rate),
+            Some(pw) => {
+                let mut details = format!("PipeWire · {} · {} Hz", pw.state, status.sample_rate);
+                if let Some(sink) = &pw.linked_to {
+                    details.push_str(&format!(" · Output: {sink}"));
+                }
+                if let Some(source) = &pw.capture_from {
+                    details.push_str(&format!(" · Input: {source}"));
+                }
+                if let Some(quantum) = pw.quantum {
+                    details.push_str(&format!(" · Quantum: {quantum} frames"));
+                }
+                if let Some(error) = &pw.error {
+                    details.push_str(&format!(" · {error}"));
+                }
+                details
+            }
+        };
         let tempo = project.tempo_map();
         // Faders and pan show what their automation has at the playhead.
         let now = project.seconds_to_frames(status.transport.position_s);
@@ -750,6 +904,7 @@ impl App {
             id: t.id,
             name: t.name.clone(),
             kind: t.kind,
+            color: t.color.map(dawkey_ui::Color::hex),
             output: t.output,
             output_name: t
                 .output
@@ -783,6 +938,7 @@ impl App {
             mute: t.mute,
             solo: t.solo,
             armed: t.armed,
+            input: t.input,
             monitor: t.monitor,
             take_lanes: t
                 .clips
@@ -810,6 +966,19 @@ impl App {
                         .map_or_else(|| slot.plugin.clone(), |i| i.name.clone()),
                     bypass: slot.bypass,
                     error: status.plugin_problems.iter().any(|p| p.plugin == slot.id),
+                    sample_kit: (slot.plugin == dawkey_studio::DRUMS_ID)
+                        .then(|| project.plugin_states.get(&slot.id))
+                        .flatten()
+                        .and_then(|s| std::str::from_utf8(s.bytes()).ok())
+                        .and_then(dawkey_studio::SampleKit::from_id),
+                    pad_outputs: if slot.plugin == dawkey_studio::DRUMS_ID {
+                        let count = plugin_info(&slot.plugin).map_or(0, |i| i.outputs.len());
+                        (0..count as u32)
+                            .map(|output| slot.outputs.get(&output).copied())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                 })
                 .collect(),
             automation: t
@@ -833,6 +1002,7 @@ impl App {
             } else {
                 meters.tracks.get(&t.id).copied().unwrap_or_default()
             },
+            has_mixdown_archive: project.mixdown_archive(t.id).is_some(),
             clips: t
                 .clips
                 .iter()
@@ -865,6 +1035,15 @@ impl App {
         };
         let tracks = project.tracks.iter().map(track_view).collect();
         let master_track = track_view(&project.master);
+        let deleted_archive_summary =
+            project
+                .deleted_track_archives
+                .last()
+                .and_then(|a| match a.tracks.as_slice() {
+                    [] => None,
+                    [one] => Some(format!("Restore Deleted Track ({})", one.track.name)),
+                    many => Some(format!("Restore {} Deleted Tracks", many.len())),
+                });
         let meter = project.meter_map();
         ViewModel {
             title: project.name.clone(),
@@ -900,15 +1079,23 @@ impl App {
             master_track,
             master: meters.master,
             engine,
+            audio_status,
+            midi_inputs: status.midi_inputs.clone(),
+            midi_outputs: status.midi_outputs.clone(),
             message: self.message.clone(),
             editor,
             picker,
+            rack_track,
+            rack_units,
+            rack_presets,
+            drum_patterns,
             scanning,
-            automation_write: self.view.automation_write,
+            automation_write: self.view.shared.automation_write,
             song_end_s: project.frames_to_seconds(project.end()),
             prefs: self.prefs.clone(),
             mcp_http: self.mcp_http_state.clone(),
             mcp_token_path: self.mcp_token_path().map(mcp_http::tilde),
+            deleted_archive_summary,
             exporting: self.export.as_ref().map(|e| {
                 let name = e
                     .path
@@ -918,6 +1105,43 @@ impl App {
             }),
         }
     }
+}
+
+/// From the platform's logical pixels into the app's units.
+fn unzoom_event(z: f32, event: InputEvent) -> InputEvent {
+    let unzoom = |p: Point| Point::new(p.x / z, p.y / z);
+    match event {
+        InputEvent::PointerMove(pos) => InputEvent::PointerMove(unzoom(pos)),
+        InputEvent::PointerDown {
+            pos,
+            button,
+            time_ms,
+        } => InputEvent::PointerDown {
+            pos: unzoom(pos),
+            button,
+            time_ms,
+        },
+        InputEvent::PointerUp { pos, button } => InputEvent::PointerUp {
+            pos: unzoom(pos),
+            button,
+        },
+        InputEvent::Scroll { pos, delta } => InputEvent::Scroll {
+            pos: unzoom(pos),
+            delta: unzoom(delta),
+        },
+        event => event,
+    }
+}
+
+/// Back from the app's units into the platform's logical pixels.
+fn zoom_chrome(z: f32, chrome: Vec<ChromeAction>) -> Vec<ChromeAction> {
+    chrome
+        .into_iter()
+        .map(|action| match action {
+            ChromeAction::WindowMenu(p) => ChromeAction::WindowMenu(Point::new(p.x * z, p.y * z)),
+            action => action,
+        })
+        .collect()
 }
 
 #[cfg(test)]

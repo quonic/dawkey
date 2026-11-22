@@ -43,7 +43,7 @@ impl App {
 
     /// Whether moving a control writes automation now.
     pub(crate) fn writing_automation(&self) -> bool {
-        self.view.automation_write && self.studio.transport().playing
+        self.view.shared.automation_write && self.studio.transport().playing
     }
 
     /// The value a control has at the playhead: its lane's, if it has one,
@@ -60,19 +60,20 @@ impl App {
 
     /// The transport's mode button: the next mode. A pass going on ends.
     pub(crate) fn cycle_automation_mode(&mut self) {
-        let next = self.view.automation_mode.next();
+        let next = self.view.shared.automation_mode.next();
         self.end_automation_pass();
-        self.view.automation_mode = next;
+        self.view.shared.automation_mode = next;
     }
 
     /// The undo step automation is written in: the gesture's while
     /// touching, otherwise the pass's (started here if there's none).
     fn write_key(&mut self, gesture_key: &str) -> String {
-        if self.view.automation_mode == AutomationMode::Touch {
+        if self.view.shared.automation_mode == AutomationMode::Touch {
             return gesture_key.to_owned();
         }
-        let passes = &mut self.view.passes;
+        let passes = &mut self.view.shared.passes;
         self.view
+            .shared
             .pass
             .get_or_insert_with(|| {
                 *passes += 1;
@@ -109,6 +110,7 @@ impl App {
         let key = self.write_key(merge_key);
         let found = self
             .view
+            .shared
             .writing
             .iter()
             .position(|w| w.track == track && w.target == target);
@@ -116,7 +118,7 @@ impl App {
             Some(i) => {
                 // The playhead jumped back (a loop): a new stretch, in the
                 // same undo step.
-                let write = &mut self.view.writing[i];
+                let write = &mut self.view.shared.writing[i];
                 if write.points.last().is_some_and(|&(t, _)| t > now) {
                     write.from_s = now;
                     write.points.clear();
@@ -124,16 +126,16 @@ impl App {
                 i
             }
             None => {
-                self.view.writing.push(AutomationWrite {
+                self.view.shared.writing.push(AutomationWrite {
                     track,
                     target: target.clone(),
                     from_s: now,
                     points: Vec::new(),
                 });
-                self.view.writing.len() - 1
+                self.view.shared.writing.len() - 1
             }
         };
-        let write = &mut self.view.writing[index];
+        let write = &mut self.view.shared.writing[index];
         let points = &mut write.points;
         match points[..] {
             [.., (t, _)] if now - t < MIN_STEP_S => points.last_mut().expect("matched").1 = value,
@@ -219,10 +221,10 @@ impl App {
     /// A gesture let go: its undo step ends. Touching, its writing stops;
     /// in latch and write modes it goes on, in the pass's undo step.
     pub(crate) fn release_automation(&mut self) {
-        if self.view.pass.is_some() && self.writing_automation() {
+        if self.view.shared.pass.is_some() && self.writing_automation() {
             return;
         }
-        self.view.writing.clear();
+        self.view.shared.writing.clear();
         self.studio.end_merge();
     }
 
@@ -234,16 +236,17 @@ impl App {
             self.end_automation_pass();
             return;
         }
-        if self.view.automation_mode == AutomationMode::Write
-            && !self.view.pass.as_ref().is_some_and(|p| p.every_lane)
+        if self.view.shared.automation_mode == AutomationMode::Write
+            && !self.view.shared.pass.as_ref().is_some_and(|p| p.every_lane)
         {
             self.write_every_lane();
         }
-        if self.view.pass.is_none() && self.view.gesture.is_none() {
+        if self.view.shared.pass.is_none() && self.view.gesture.is_none() {
             return;
         }
         let writes: Vec<(TrackId, AutomationTarget, f64)> = self
             .view
+            .shared
             .writing
             .iter()
             .filter_map(|w| Some((w.track, w.target.clone(), w.points.last()?.1)))
@@ -292,10 +295,10 @@ impl App {
             })
             .collect();
         self.write_key("");
-        if let Some(pass) = &mut self.view.pass {
+        if let Some(pass) = &mut self.view.shared.pass {
             pass.every_lane = true;
         }
-        let writing = &self.view.writing;
+        let writing = &self.view.shared.writing;
         let lanes = lanes
             .into_iter()
             .filter(|(track, target, _)| {
@@ -310,13 +313,13 @@ impl App {
     /// Ends a latch or write pass: the lanes stop being written, and write
     /// mode goes back to touch.
     pub(crate) fn end_automation_pass(&mut self) {
-        let Some(pass) = self.view.pass.take() else {
+        let Some(pass) = self.view.shared.pass.take() else {
             return;
         };
-        self.view.writing.clear();
+        self.view.shared.writing.clear();
         self.studio.end_merge();
-        if pass.every_lane || self.view.automation_mode == AutomationMode::Write {
-            self.view.automation_mode = AutomationMode::Touch;
+        if pass.every_lane || self.view.shared.automation_mode == AutomationMode::Write {
+            self.view.shared.automation_mode = AutomationMode::Touch;
         }
     }
 }

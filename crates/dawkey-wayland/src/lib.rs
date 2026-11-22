@@ -20,7 +20,7 @@ mod dialogs;
 use std::ptr::NonNull;
 use std::time::Duration;
 
-use dawkey_app::{App, WindowInfo};
+use dawkey_app::{App, LayoutChoice, MonitorInfo, ViewRole, WindowInfo, plan_windows};
 use dawkey_core::Handle;
 use dawkey_core::host::{Closed, Job};
 use dawkey_render::{Gpu, GpuPreference, wgpu};
@@ -226,6 +226,10 @@ pub fn run(app: App, on_ready: impl FnOnce(Handle<App>)) -> Result<App, GuiError
         output_state: OutputState::new(&globals, &qh),
         compositor,
         shm,
+        xdg_shell,
+        extras: Vec::new(),
+        outputs: Vec::new(),
+        focused_extra: None,
     };
 
     on_ready(handle);
@@ -244,6 +248,58 @@ pub fn run(app: App, on_ready: impl FnOnce(Handle<App>)) -> Result<App, GuiError
 struct Graphics {
     surface: wgpu::Surface<'static>,
     config: Option<wgpu::SurfaceConfiguration>,
+}
+
+/// Configures (or reconfigures, on a resize) a window's wgpu surface.
+/// Shared by the primary window and the multi-monitor layout's extra ones,
+/// which all present through the one [`Gpu`] opened for the primary window.
+fn configure_wgpu_surface(gpu: &Gpu, gfx: &mut Graphics, width: u32, height: u32) {
+    let config = match &mut gfx.config {
+        Some(config) => {
+            config.width = width;
+            config.height = height;
+            config.clone()
+        }
+        None => {
+            let caps = gfx.surface.get_capabilities(&gpu.adapter);
+            // Colors are written as-is, so prefer non-sRGB formats.
+            let format = caps
+                .formats
+                .iter()
+                .copied()
+                .find(|f| !f.is_srgb())
+                .unwrap_or(caps.formats[0]);
+            let alpha_mode = if caps
+                .alpha_modes
+                .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+            {
+                wgpu::CompositeAlphaMode::PreMultiplied
+            } else {
+                tracing::warn!("no premultiplied alpha; the window shadow will be opaque");
+                caps.alpha_modes[0]
+            };
+            let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+                wgpu::PresentMode::Mailbox
+            } else {
+                wgpu::PresentMode::Fifo
+            };
+            tracing::debug!("surface: {format:?}, {alpha_mode:?}, {present_mode:?}");
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format,
+                color_space: wgpu::SurfaceColorSpace::Auto,
+                width,
+                height,
+                present_mode,
+                desired_maximum_frame_latency: 2,
+                alpha_mode,
+                view_formats: vec![],
+            };
+            gfx.config = Some(config.clone());
+            config
+        }
+    };
+    gfx.surface.configure(&gpu.device, &config);
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -292,7 +348,39 @@ struct Gui {
     output_state: OutputState,
     compositor: CompositorState,
     shm: Shm,
+    xdg_shell: XdgShell,
+    /// The other windows in the multi-monitor layout, in the same order as
+    /// `app.extra_window_roles()`.
+    extras: Vec<ExtraGui>,
+    /// Known monitors, for `plan_windows` when the `layout` preference is
+    /// `MultiMonitor`.
+    outputs: Vec<(wl_output::WlOutput, MonitorInfo)>,
+    /// Which extra window has keyboard focus (`None`: the primary one).
+    focused_extra: Option<usize>,
 }
+
+/// One of the other windows in the multi-monitor layout: fullscreened on
+/// its own monitor, with no decorations of its own (`view::build` skips
+/// the titlebar for it).
+struct ExtraGui {
+    // Declared first so it drops before the window, like `Gui::gfx`.
+    gfx: Option<Graphics>,
+    window: Window,
+    geometry: (u32, u32),
+    scale: f64,
+    configured: bool,
+    resized: bool,
+    dirty: bool,
+    frame_pending: bool,
+}
+
+/// What `desired_plan` says to show: this window's role and output, then
+/// the other windows' roles and outputs.
+type LayoutPlan = (
+    ViewRole,
+    wl_output::WlOutput,
+    Vec<(ViewRole, wl_output::WlOutput)>,
+);
 
 impl Gui {
     fn window_info(&self) -> WindowInfo {
@@ -373,52 +461,7 @@ impl Gui {
         let (Some(gfx), Some(gpu)) = (&mut self.gfx, self.app.gpu()) else {
             return;
         };
-        let config = match &mut gfx.config {
-            Some(config) => {
-                config.width = width;
-                config.height = height;
-                config.clone()
-            }
-            None => {
-                let caps = gfx.surface.get_capabilities(&gpu.adapter);
-                // Colors are written as-is, so prefer non-sRGB formats.
-                let format = caps
-                    .formats
-                    .iter()
-                    .copied()
-                    .find(|f| !f.is_srgb())
-                    .unwrap_or(caps.formats[0]);
-                let alpha_mode = if caps
-                    .alpha_modes
-                    .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
-                {
-                    wgpu::CompositeAlphaMode::PreMultiplied
-                } else {
-                    tracing::warn!("no premultiplied alpha; the window shadow will be opaque");
-                    caps.alpha_modes[0]
-                };
-                let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-                    wgpu::PresentMode::Mailbox
-                } else {
-                    wgpu::PresentMode::Fifo
-                };
-                tracing::debug!("surface: {format:?}, {alpha_mode:?}, {present_mode:?}");
-                let config = wgpu::SurfaceConfiguration {
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    format,
-                    color_space: wgpu::SurfaceColorSpace::Auto,
-                    width,
-                    height,
-                    present_mode,
-                    desired_maximum_frame_latency: 2,
-                    alpha_mode,
-                    view_formats: vec![],
-                };
-                gfx.config = Some(config.clone());
-                config
-            }
-        };
-        gfx.surface.configure(&gpu.device, &config);
+        configure_wgpu_surface(gpu, gfx, width, height);
     }
 
     /// After the app may have changed: carry out its window, dialog and
@@ -433,13 +476,23 @@ impl Gui {
         if !imports.is_empty() {
             self.dialogs.import(imports, self.app.studio.sample_rate());
         }
-        self.request_redraw();
+        // Cheap unless the `layout` preference or the monitors actually
+        // changed, so fine to check after every input-driven change.
+        self.sync_layout();
     }
 
     fn key(&mut self, event: KeyEvent) {
         if let Some(key) = key_name(&event) {
-            let chrome = self.app.handle_input(InputEvent::Key { key });
-            self.chrome(chrome, None);
+            match self.focused_extra {
+                // No decorations on an extra window, so no chrome actions.
+                Some(i) => {
+                    self.app.handle_extra_input(i, InputEvent::Key { key });
+                }
+                None => {
+                    let chrome = self.app.handle_input(InputEvent::Key { key });
+                    self.chrome(chrome, None);
+                }
+            }
             self.after_app_change();
         }
     }
@@ -448,6 +501,9 @@ impl Gui {
     /// compositor is ready for a frame.
     fn request_redraw(&mut self) {
         self.dirty = true;
+        for extra in &mut self.extras {
+            extra.dirty = true;
+        }
     }
 
     /// After each batch of events: applies the latest size and draws, at
@@ -464,6 +520,16 @@ impl Gui {
         }
         if self.dirty && !self.frame_pending {
             self.draw();
+        }
+        for i in 0..self.extras.len() {
+            if self.extras[i].resized {
+                self.extras[i].resized = false;
+                self.apply_extra_size(i);
+                self.extras[i].frame_pending = false;
+            }
+            if self.extras[i].dirty && !self.extras[i].frame_pending {
+                self.draw_extra(i);
+            }
         }
     }
 
@@ -502,6 +568,214 @@ impl Gui {
             gpu.queue.present(frame);
         }
         self.dirty = false;
+    }
+
+    /// Like [`Self::draw`], for one of the other windows in the
+    /// multi-monitor layout.
+    fn draw_extra(&mut self, index: usize) {
+        let Some(extra) = self.extras.get(index) else {
+            return;
+        };
+        if !extra.configured {
+            return;
+        }
+        let Some(gfx) = &extra.gfx else { return };
+        let Some(config) = gfx.config.clone() else {
+            return;
+        };
+        let frame = match gfx.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                let (width, height) = (config.width, config.height);
+                if let (Some(gfx), Some(gpu)) = (&mut self.extras[index].gfx, self.app.gpu()) {
+                    configure_wgpu_surface(gpu, gfx, width, height);
+                }
+                return;
+            }
+            _ => return,
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let surface = extra.window.wl_surface();
+        surface.frame(&self.qh, FrameCallbackData(surface.clone()));
+        self.extras[index].frame_pending = true;
+        self.app
+            .draw_extra(index, &view, config.format, (config.width, config.height));
+        if let Some(gpu) = self.app.gpu() {
+            gpu.queue.present(frame);
+        }
+        self.extras[index].dirty = false;
+    }
+
+    /// Opens a new fullscreen window for the multi-monitor layout, sharing
+    /// the primary window's `Gpu`. No decorations: `view::build` skips the
+    /// titlebar for it (`WindowInfo::csd` is false).
+    fn create_extra_window(&mut self) -> ExtraGui {
+        let surface = self.compositor.create_surface(&self.qh);
+        let window =
+            self.xdg_shell
+                .create_window(surface, WindowDecorations::RequestServer, &self.qh);
+        window.set_app_id("dawkey");
+        window.commit();
+        let gfx = (|| {
+            let display = NonNull::new(self.conn.backend().display_ptr().cast())?;
+            let wl_surface = NonNull::new(window.wl_surface().id().as_ptr().cast())?;
+            let gpu = self.app.gpu()?;
+            // SAFETY: as the primary window's surface in `run`: the display
+            // and surface outlive it, and `ExtraGui::gfx` drops before
+            // `ExtraGui::window`.
+            let wgpu_surface = unsafe {
+                gpu.instance
+                    .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                        raw_display_handle: Some(RawDisplayHandle::Wayland(
+                            WaylandDisplayHandle::new(display),
+                        )),
+                        raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(
+                            wl_surface,
+                        )),
+                    })
+            }
+            .ok()?;
+            Some(Graphics {
+                surface: wgpu_surface,
+                config: None,
+            })
+        })();
+        if gfx.is_none() {
+            tracing::warn!("couldn't make a wgpu surface for a multi-monitor window");
+        }
+        ExtraGui {
+            gfx,
+            window,
+            geometry: DEFAULT_SIZE,
+            scale: 1.0,
+            configured: false,
+            resized: false,
+            dirty: true,
+            frame_pending: false,
+        }
+    }
+
+    /// Applies one of the other windows' latest geometry/scale to its
+    /// surface and tells `App` its new size. No CSD, so none of the
+    /// primary window's decoration/resize-region/viewport handling applies.
+    fn apply_extra_size(&mut self, index: usize) {
+        let Some(extra) = self.extras.get(index) else {
+            return;
+        };
+        let (gw, gh) = extra.geometry;
+        let scale = extra.scale;
+        let buffer_scale = scale.round().max(1.0) as u32;
+        if let Err(e) = extra.window.set_buffer_scale(buffer_scale) {
+            tracing::warn!("setting a multi-monitor window's buffer scale {buffer_scale}: {e:?}");
+        }
+        let physical = (
+            ((gw as f64) * scale).round().max(1.0) as u32,
+            ((gh as f64) * scale).round().max(1.0) as u32,
+        );
+        let current = extra
+            .gfx
+            .as_ref()
+            .and_then(|g| g.config.as_ref())
+            .map(|c| (c.width, c.height));
+        if current != Some(physical) {
+            let (Some(gfx), Some(gpu)) = (&mut self.extras[index].gfx, self.app.gpu()) else {
+                return;
+            };
+            configure_wgpu_surface(gpu, gfx, physical.0, physical.1);
+        }
+        let info = WindowInfo {
+            size: Size::new(gw as f32, gh as f32),
+            scale: scale as f32,
+            maximized: false,
+            fullscreen: true,
+            tiled: false,
+            activated: true,
+            csd: false,
+            zoom: 1.0,
+        };
+        self.app.resize_extra_window(index, info);
+        self.extras[index].dirty = true;
+    }
+
+    /// What `plan_windows` says to show, from the known monitors and the
+    /// `layout` preference: this window's role, and the outputs the other
+    /// windows should be placed on. `None` outside `MultiMonitor`, or with
+    /// fewer than two monitors.
+    fn desired_plan(&self) -> Option<LayoutPlan> {
+        if self.app.preferences().layout != LayoutChoice::MultiMonitor {
+            return None;
+        }
+        let monitors: Vec<MonitorInfo> = self.outputs.iter().map(|(_, m)| m.clone()).collect();
+        let mut plan = plan_windows(&monitors).into_iter();
+        let (primary_role, primary_idx) = plan.next()?;
+        let primary_output = self.outputs[primary_idx].0.clone();
+        let extras = plan
+            .map(|(role, idx)| (role, self.outputs[idx].0.clone()))
+            .collect();
+        Some((primary_role, primary_output, extras))
+    }
+
+    /// Opens, places and closes windows to match `desired_plan`, and tells
+    /// `App` about it. Called whenever the `layout` preference or the known
+    /// monitors might have changed.
+    fn sync_layout(&mut self) {
+        tracing::info!(
+            "sync_layout: {} known monitor(s), layout={:?}",
+            self.outputs.len(),
+            self.app.preferences().layout
+        );
+        match self.desired_plan() {
+            Some((primary_role, primary_output, extras)) => {
+                tracing::info!(
+                    "placing primary ({primary_role:?}) on {:?}, {} extra window(s)",
+                    primary_output.id(),
+                    extras.len()
+                );
+                self.window.set_fullscreen(Some(&primary_output));
+                while self.extras.len() > extras.len() {
+                    self.extras.pop();
+                }
+                for (i, (role, output)) in extras.iter().enumerate() {
+                    if i >= self.extras.len() {
+                        let extra = self.create_extra_window();
+                        self.extras.push(extra);
+                    }
+                    tracing::info!("placing extra window {i} ({role:?}) on {:?}", output.id());
+                    self.extras[i].window.set_fullscreen(Some(output));
+                }
+                let roles: Vec<ViewRole> = extras.iter().map(|(role, _)| *role).collect();
+                self.app
+                    .set_window_roles(Some(primary_role), &roles, WindowInfo::headless());
+            }
+            None => {
+                if self.app.primary_role().is_some() || !self.extras.is_empty() {
+                    self.window.unset_fullscreen();
+                    self.extras.clear();
+                    self.app.set_window_roles(None, &[], WindowInfo::headless());
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Records (or updates) `output`'s info in `self.outputs`, for
+    /// `desired_plan`.
+    fn update_monitor(&mut self, output: wl_output::WlOutput) {
+        let Some(info) = self.output_state.info(&output) else {
+            tracing::warn!("no OutputInfo yet for a monitor");
+            return;
+        };
+        let x = info.logical_position.unwrap_or(info.location).0;
+        let name = info.name.unwrap_or_else(|| format!("output-{}", info.id));
+        tracing::info!("monitor {name:?} at x={x}");
+        let monitor = MonitorInfo { name, x };
+        match self.outputs.iter_mut().find(|(o, _)| o == &output) {
+            Some((_, m)) => *m = monitor,
+            None => self.outputs.push((output, monitor)),
+        }
     }
 
     /// Carries out window-management requests. `press` is the seat and
@@ -573,8 +847,20 @@ impl Gui {
             Some(ResizeEdge::BottomRight) => CursorIcon::SeResize,
             _ => match self.app.cursor() {
                 Some(Cursor::ResizeHorizontal) => CursorIcon::EwResize,
+                Some(Cursor::ResizeVertical) => CursorIcon::NsResize,
                 None => CursorIcon::Default,
             },
+        };
+        self.set_cursor(icon, false);
+    }
+
+    /// Like [`Self::update_cursor`], for one of the other windows in the
+    /// multi-monitor layout: fullscreen, so no resize edges to consider.
+    fn update_extra_cursor(&mut self, index: usize, _pos: Point) {
+        let icon = match self.app.extra_cursor(index) {
+            Some(Cursor::ResizeHorizontal) => CursorIcon::EwResize,
+            Some(Cursor::ResizeVertical) => CursorIcon::NsResize,
+            None => CursorIcon::Default,
         };
         self.set_cursor(icon, false);
     }
@@ -596,10 +882,18 @@ impl CompositorHandler for Gui {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         new_factor: i32,
     ) {
-        if !self.fractional_active {
+        // Extra windows skip fractional scaling (no viewport of their own).
+        if let Some(i) = self
+            .extras
+            .iter()
+            .position(|e| e.window.wl_surface() == surface)
+        {
+            self.extras[i].scale = f64::from(new_factor.max(1));
+            self.extras[i].resized = true;
+        } else if !self.fractional_active {
             self.scale = f64::from(new_factor.max(1));
             self.resized = true;
         }
@@ -618,9 +912,20 @@ impl CompositorHandler for Gui {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        if let Some(i) = self
+            .extras
+            .iter()
+            .position(|e| e.window.wl_surface() == surface)
+        {
+            self.extras[i].frame_pending = false;
+            if self.app.animating() {
+                self.extras[i].dirty = true;
+            }
+            return;
+        }
         self.frame_pending = false;
         if self.app.animating() {
             self.request_redraw();
@@ -647,7 +952,21 @@ impl CompositorHandler for Gui {
 }
 
 impl WindowHandler for Gui {
-    fn request_close(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _window: &Window) {
+    fn request_close(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, window: &Window) {
+        if window.wl_surface() != self.window.wl_surface() {
+            // One of the multi-monitor layout's windows closed (there's no
+            // decoration of its own to do this, but the compositor or a
+            // shortcut like Alt+F4 still can): the layout can't be shown as
+            // asked, so fall back to one window.
+            if self
+                .extras
+                .iter()
+                .any(|e| e.window.wl_surface() == window.wl_surface())
+            {
+                self.app.set_layout_standard();
+            }
+            return;
+        }
         // With unsaved changes, the app asks first.
         if self.app.request_close() {
             self.exit = true;
@@ -660,10 +979,26 @@ impl WindowHandler for Gui {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _window: &Window,
+        window: &Window,
         configure: WindowConfigure,
         _serial: u32,
     ) {
+        if window.wl_surface() != self.window.wl_surface() {
+            if let Some(i) = self
+                .extras
+                .iter()
+                .position(|e| e.window.wl_surface() == window.wl_surface())
+            {
+                let (w, h) = configure.new_size;
+                self.extras[i].geometry = (
+                    w.map_or(self.extras[i].geometry.0, |w| w.get()),
+                    h.map_or(self.extras[i].geometry.1, |h| h.get()),
+                );
+                self.extras[i].configured = true;
+                self.extras[i].resized = true;
+            }
+            return;
+        }
         self.flags = Flags {
             maximized: configure.is_maximized(),
             fullscreen: configure.is_fullscreen(),
@@ -767,29 +1102,48 @@ impl PointerHandler for Gui {
             .data::<PointerData<()>>()
             .map(|data| data.seat().clone());
         for event in events {
-            if &event.surface != self.window.wl_surface() {
+            let extra = self
+                .extras
+                .iter()
+                .position(|e| &event.surface == e.window.wl_surface());
+            if extra.is_none() && &event.surface != self.window.wl_surface() {
                 continue;
             }
             let pos = Point::new(event.position.0 as f32, event.position.1 as f32);
             match event.kind {
                 PointerEventKind::Enter { .. } => {
-                    self.app.handle_input(InputEvent::PointerMove(pos));
-                    self.update_cursor(pos);
+                    if let Some(i) = extra {
+                        self.app.handle_extra_input(i, InputEvent::PointerMove(pos));
+                        self.update_extra_cursor(i, pos);
+                    } else {
+                        self.app.handle_input(InputEvent::PointerMove(pos));
+                        self.update_cursor(pos);
+                    }
                     self.set_cursor(self.cursor, true);
                 }
                 PointerEventKind::Leave { .. } => {
-                    self.app.handle_input(InputEvent::PointerLeave);
+                    if let Some(i) = extra {
+                        self.app.handle_extra_input(i, InputEvent::PointerLeave);
+                    } else {
+                        self.app.handle_input(InputEvent::PointerLeave);
+                    }
                 }
                 PointerEventKind::Motion { .. } => {
-                    self.app.handle_input(InputEvent::PointerMove(pos));
-                    self.update_cursor(pos);
+                    if let Some(i) = extra {
+                        self.app.handle_extra_input(i, InputEvent::PointerMove(pos));
+                        self.update_extra_cursor(i, pos);
+                    } else {
+                        self.app.handle_input(InputEvent::PointerMove(pos));
+                        self.update_cursor(pos);
+                    }
                 }
                 PointerEventKind::Press {
                     button,
                     serial,
                     time,
                 } => {
-                    if button == BTN_LEFT
+                    if extra.is_none()
+                        && button == BTN_LEFT
                         && let (Some(edge), Some(seat)) = (self.resize_edge(pos), &seat)
                     {
                         self.window.resize(seat, serial, edge);
@@ -798,20 +1152,40 @@ impl PointerHandler for Gui {
                     let Some(button) = mouse_button(button) else {
                         continue;
                     };
-                    let actions = self.app.handle_input(InputEvent::PointerDown {
-                        pos,
-                        button,
-                        time_ms: time,
-                    });
-                    self.chrome(actions, seat.as_ref().map(|s| (s, serial)));
+                    if let Some(i) = extra {
+                        // No decorations on the multi-monitor layout's extra
+                        // windows, so they never produce window-chrome
+                        // actions (move, menu, …) worth routing anywhere.
+                        self.app.handle_extra_input(
+                            i,
+                            InputEvent::PointerDown {
+                                pos,
+                                button,
+                                time_ms: time,
+                            },
+                        );
+                    } else {
+                        let actions = self.app.handle_input(InputEvent::PointerDown {
+                            pos,
+                            button,
+                            time_ms: time,
+                        });
+                        self.chrome(actions, seat.as_ref().map(|s| (s, serial)));
+                    }
                 }
                 PointerEventKind::Release { button, .. } => {
                     let Some(button) = mouse_button(button) else {
                         continue;
                     };
-                    let actions = self.app.handle_input(InputEvent::PointerUp { pos, button });
-                    self.chrome(actions, None);
-                    self.update_cursor(pos);
+                    if let Some(i) = extra {
+                        self.app
+                            .handle_extra_input(i, InputEvent::PointerUp { pos, button });
+                        self.update_extra_cursor(i, pos);
+                    } else {
+                        let actions = self.app.handle_input(InputEvent::PointerUp { pos, button });
+                        self.chrome(actions, None);
+                        self.update_cursor(pos);
+                    }
                 }
                 PointerEventKind::Axis {
                     horizontal,
@@ -826,7 +1200,12 @@ impl PointerHandler for Gui {
                     let delta =
                         Point::new(scroll_px(horizontal, fingers), scroll_px(vertical, fingers));
                     if delta != Point::default() {
-                        self.app.handle_input(InputEvent::Scroll { pos, delta });
+                        if let Some(i) = extra {
+                            self.app
+                                .handle_extra_input(i, InputEvent::Scroll { pos, delta });
+                        } else {
+                            self.app.handle_input(InputEvent::Scroll { pos, delta });
+                        }
                     }
                 }
             }
@@ -849,11 +1228,30 @@ impl OutputHandler for Gui {
         &mut self.output_state
     }
 
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        self.update_monitor(output);
+        self.sync_layout();
+    }
 
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn update_output(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        self.update_monitor(output);
+        self.sync_layout();
+    }
 
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn output_destroyed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        self.outputs.retain(|(o, _)| o != &output);
+        self.sync_layout();
+    }
 }
 
 impl ShmHandler for Gui {
@@ -937,11 +1335,15 @@ impl KeyboardHandler for Gui {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &WlKeyboard,
-        _: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _: u32,
         _: &[u32],
         _: &[Keysym],
     ) {
+        self.focused_extra = self
+            .extras
+            .iter()
+            .position(|e| e.window.wl_surface() == surface);
     }
 
     fn leave(
@@ -952,8 +1354,16 @@ impl KeyboardHandler for Gui {
         _: &wl_surface::WlSurface,
         _: u32,
     ) {
-        self.app
-            .handle_input(InputEvent::Modifiers(Modifiers::default()));
+        match self.focused_extra.take() {
+            Some(i) => {
+                self.app
+                    .handle_extra_input(i, InputEvent::Modifiers(Modifiers::default()));
+            }
+            None => {
+                self.app
+                    .handle_input(InputEvent::Modifiers(Modifiers::default()));
+            }
+        }
     }
 
     fn press_key(
@@ -998,12 +1408,20 @@ impl KeyboardHandler for Gui {
         _: RawModifiers,
         _: u32,
     ) {
-        self.app.handle_input(InputEvent::Modifiers(Modifiers {
+        let mods = Modifiers {
             ctrl: modifiers.ctrl,
             shift: modifiers.shift,
             alt: modifiers.alt,
             logo: modifiers.logo,
-        }));
+        };
+        match self.focused_extra {
+            Some(i) => {
+                self.app.handle_extra_input(i, InputEvent::Modifiers(mods));
+            }
+            None => {
+                self.app.handle_input(InputEvent::Modifiers(mods));
+            }
+        }
     }
 }
 

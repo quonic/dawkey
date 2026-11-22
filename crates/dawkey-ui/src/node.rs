@@ -140,6 +140,8 @@ pub enum Chrome {
 pub enum Cursor {
     /// Dragging moves an edge left or right.
     ResizeHorizontal,
+    /// Dragging moves an edge up or down.
+    ResizeVertical,
 }
 
 /// Vector icons drawn by the renderer.
@@ -160,11 +162,15 @@ pub enum Icon {
 pub enum Paint {
     Icon(Icon),
     /// A stereo peak meter; levels are 0..=1 of the meter's length, over
-    /// `background`.
+    /// `background`. The fill is `low` up to 80%, `mid` to 95%, `high`
+    /// above that (the theme's colors, so it reads right in either theme).
     Meter {
         levels: [f32; 2],
         vertical: bool,
         background: Color,
+        low: Color,
+        mid: Color,
+        high: Color,
     },
     /// A waveform: one (min, max) sample range per logical pixel column,
     /// -1..=1, drawn around the vertical center.
@@ -185,6 +191,16 @@ pub enum Paint {
         width: f32,
         color: Color,
     },
+    /// A studio rotary potentiometer knob; `value` and `default` are 0..=1.
+    Knob {
+        value: f32,
+        default: f32,
+        bipolar: bool,
+        accent: Color,
+        body: Color,
+        rim: Color,
+        tick: Color,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,6 +208,10 @@ pub struct Style {
     /// Drop shadow: blur radius and color.
     pub shadow: Option<(f32, Color)>,
     pub background: Option<Color>,
+    /// Fades `background` to this color along a direction, in place of a
+    /// flat fill. Has no effect without `background`, and (for now) takes
+    /// priority over `border`: a node can't have both.
+    pub gradient: Option<(Color, Direction)>,
     pub border: Option<(f32, Color)>,
     /// Corner radii: top-left, top-right, bottom-right, bottom-left.
     pub radius: [f32; 4],
@@ -217,6 +237,7 @@ impl Default for Style {
         Self {
             shadow: None,
             background: None,
+            gradient: None,
             border: None,
             radius: [0.0; 4],
             color: DEFAULT_TEXT.get(),

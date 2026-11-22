@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Opening another project and closing the window ask first when there are
-//! unsaved changes: save them, discard them, or cancel.
+//! Starting a new project, opening another one, and closing the window ask
+//! first when there are unsaved changes: save them, discard them, or cancel.
+
+use dawkey_core::Project;
+use dawkey_studio::LoadedProject;
 
 use crate::App;
 use crate::state::{PendingAction, PlatformRequest};
@@ -10,7 +13,7 @@ impl App {
     /// are unsaved changes.
     pub(crate) fn request_action(&mut self, action: PendingAction) {
         if self.has_unsaved_changes() {
-            self.view.confirm = Some(action);
+            self.view.shared.confirm = Some(action);
         } else {
             self.proceed(action);
         }
@@ -23,7 +26,7 @@ impl App {
         if !self.has_unsaved_changes() {
             return true;
         }
-        self.view.confirm = Some(PendingAction::Close);
+        self.view.shared.confirm = Some(PendingAction::Close);
         self.rebuild();
         false
     }
@@ -44,8 +47,14 @@ impl App {
     /// they're saved (the platform calls this after a save dialog asked for
     /// by the "save changes?" dialog), or when they may be discarded.
     pub fn proceed(&mut self, action: PendingAction) {
-        self.view.confirm = None;
+        self.view.shared.confirm = None;
         match action {
+            PendingAction::NewProject => {
+                let project = Project::new("Untitled");
+                if let Err(e) = self.studio.replace(LoadedProject::new(project)) {
+                    self.message = Some(e.to_string());
+                }
+            }
             PendingAction::OpenProject => self
                 .platform_requests
                 .push(PlatformRequest::ChooseProjectToOpen),
@@ -55,7 +64,7 @@ impl App {
 
     /// Clicks in the dialog. `None` if `parts` isn't one of its widgets.
     pub(crate) fn on_confirm_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
-        let action = self.view.confirm?;
+        let action = self.view.shared.confirm?;
         Some(match parts {
             ["confirm", "save"] => self.save_then(action),
             ["confirm", "discard"] => {
@@ -63,7 +72,7 @@ impl App {
                 Ok(())
             }
             ["confirm", "cancel"] => {
-                self.view.confirm = None;
+                self.view.shared.confirm = None;
                 Ok(())
             }
             // The backdrop (and anything else) waits for an answer.
@@ -74,11 +83,11 @@ impl App {
     /// Keys while the dialog is open: Return saves, Escape cancels, and
     /// nothing else gets through.
     pub(crate) fn on_confirm_key(&mut self, key: &str) -> Option<Result<(), String>> {
-        let action = self.view.confirm?;
+        let action = self.view.shared.confirm?;
         Some(match key {
             "return" => self.save_then(action),
             "escape" => {
-                self.view.confirm = None;
+                self.view.shared.confirm = None;
                 Ok(())
             }
             _ => Ok(()),
@@ -88,7 +97,7 @@ impl App {
     /// Saves, then does `action`. A project without a file asks where to
     /// save it first, and the platform carries on from there.
     fn save_then(&mut self, action: PendingAction) -> Result<(), String> {
-        self.view.confirm = None;
+        self.view.shared.confirm = None;
         if self.studio.session().path().is_none() {
             self.platform_requests
                 .push(PlatformRequest::ChooseSaveLocation { then: Some(action) });
