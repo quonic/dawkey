@@ -432,7 +432,17 @@ pub(crate) fn build(
         window.size.w - 2.0 * margin,
         window.size.h - 2.0 * margin - top,
     );
+    // Piano Roll and Step Sequencer take over the whole window — but in the
+    // multi-monitor layout, only the window actually showing Arrange (where
+    // clips and drum pads live); a Rack/Mixer/MixerAndRack-role window
+    // keeps its own fixed content regardless of `view.page`, so opening a
+    // clip or pad doesn't pop the same overlay onto every monitor.
     let page = match (content, view.page) {
+        (WindowContent::Window(role), Page::PianoRoll | Page::StepSequencer)
+            if role != crate::multi_window::ViewRole::Arrange =>
+        {
+            build_for_role(model, view, ui, role, area)
+        }
         (WindowContent::Widescreen, Page::Arrange | Page::Mixer | Page::Rack) => {
             build_widescreen(model, view, ui, area.w)
         }

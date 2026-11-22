@@ -3446,6 +3446,31 @@ fn multi_monitor_windows_render_their_own_role_from_the_shared_project() {
 }
 
 #[test]
+fn opening_the_piano_roll_only_takes_over_the_arrange_monitor() {
+    use crate::{ViewRole, WindowInfo};
+    use dawkey_core::ClipId;
+    let mut app = app();
+    let (_track, clip) = add_midi(&mut app, 0.0, &[(60, 0.0, 1.0)]);
+    app.set_window_roles(
+        Some(ViewRole::Arrange),
+        &[ViewRole::MixerAndRack],
+        WindowInfo::headless(),
+    );
+    app.open_piano_roll(ClipId(clip)).unwrap();
+
+    // The Arrange monitor shows the piano roll, full-window.
+    let primary = app.access_tree();
+    assert!(primary.find("piano_roll/grid").is_some());
+
+    // The other monitor isn't affected: it keeps showing Mixer+Rack, not a
+    // second copy of the piano roll.
+    let extra = app.extra_access_tree(0).unwrap();
+    assert!(extra.find("piano_roll/grid").is_none());
+    assert!(extra.find("master/strip").is_some());
+    assert!(extra.find("rack/bay").is_some());
+}
+
+#[test]
 fn widescreen_layout_shows_arrange_rack_and_mixer_at_once() {
     use crate::prefs::LayoutChoice;
     let mut app = app();
