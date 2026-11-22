@@ -4,8 +4,9 @@
 
 use crate::error::CoreError;
 use crate::model::{
-    AutomationLane, Clip, ClipContent, ClipId, ControlPoint, InputChannels, MidiOutput, Note,
-    PluginSlot, Project, Region, Send, SynthParams, TimeSignature, Track, TrackId,
+    AutomationLane, Clip, ClipContent, ClipId, ControlPoint, DeletedTrackArchive, InputChannels,
+    MidiOutput, MixdownArchive, Note, PluginSlot, Project, Region, SavedDrumPattern,
+    SavedRackPreset, Send, Source, SynthParams, TimeSignature, Track, TrackId,
 };
 use crate::tempo::{MeterChange, TempoChange};
 
@@ -47,6 +48,11 @@ pub(crate) enum Edit {
     },
     SetLoop(Region),
     SetPunch(Region),
+    SetRackPresets(Vec<SavedRackPreset>),
+    SetDrumPatterns(Vec<SavedDrumPattern>),
+    SetMixdownArchives(Vec<MixdownArchive>),
+    SetDeletedTrackArchives(Vec<DeletedTrackArchive>),
+    SetSources(Vec<Source>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +75,8 @@ pub(crate) enum TrackProp {
     Output(Option<TrackId>),
     /// Its aux sends.
     Sends(Vec<Send>),
+    /// Its user-assigned color override (`None`: back to automatic).
+    Color(Option<u32>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,6 +145,7 @@ impl Edit {
                         TrackProp::Output(std::mem::replace(&mut track.output, v))
                     }
                     TrackProp::Sends(v) => TrackProp::Sends(std::mem::replace(&mut track.sends, v)),
+                    TrackProp::Color(v) => TrackProp::Color(std::mem::replace(&mut track.color, v)),
                     TrackProp::Synth(v) => {
                         let Some(synth) = &mut track.synth else {
                             return Err(CoreError::invalid(format!(
@@ -220,6 +229,20 @@ impl Edit {
             },
             Edit::SetLoop(v) => Edit::SetLoop(std::mem::replace(&mut project.loop_region, v)),
             Edit::SetPunch(v) => Edit::SetPunch(std::mem::replace(&mut project.punch, v)),
+            Edit::SetRackPresets(v) => {
+                Edit::SetRackPresets(std::mem::replace(&mut project.rack_presets, v))
+            }
+            Edit::SetDrumPatterns(v) => {
+                Edit::SetDrumPatterns(std::mem::replace(&mut project.drum_patterns, v))
+            }
+            Edit::SetMixdownArchives(v) => {
+                Edit::SetMixdownArchives(std::mem::replace(&mut project.mixdown_archives, v))
+            }
+            Edit::SetDeletedTrackArchives(v) => Edit::SetDeletedTrackArchives(std::mem::replace(
+                &mut project.deleted_track_archives,
+                v,
+            )),
+            Edit::SetSources(v) => Edit::SetSources(std::mem::replace(&mut project.sources, v)),
         })
     }
 }

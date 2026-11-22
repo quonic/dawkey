@@ -121,12 +121,20 @@ pub struct Transport {
 #[derive(Debug)]
 pub struct AuxBuffer {
     pub channels: [Box<[f32]>; 2],
+    /// Whether this output actually goes to a bus. `ProcessContext::aux` is
+    /// sized up to the highest *routed* output index, which can leave lower
+    /// indices allocated but unrouted (routing only output 3 still
+    /// allocates slots 0–2); a plugin that cares which of its outputs are
+    /// live (rather than orphaned filler) reads this instead of assuming
+    /// every slot it's handed is routed.
+    pub routed: bool,
 }
 
 impl AuxBuffer {
     pub fn new() -> Self {
         Self {
             channels: [(); 2].map(|()| vec![0.0; crate::MAX_BLOCK].into_boxed_slice()),
+            routed: false,
         }
     }
 }

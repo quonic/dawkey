@@ -131,6 +131,11 @@ pub struct Track {
     /// besides `output`. At most one per bus.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sends: Vec<Send>,
+    /// The user's own color for this track in the arrange and mixer views,
+    /// as packed 0xRRGGBB. `None` keeps the automatic color cycled by the
+    /// track's position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
 }
 
 /// An aux send: a copy of a track's signal to a bus, at its own level,
@@ -169,6 +174,7 @@ impl Track {
             plugins: Vec::new(),
             automation: Vec::new(),
             output: None,
+            color: None,
         }
     }
 
@@ -270,6 +276,41 @@ pub struct PluginSlot {
     /// The plugin's other outputs (by number, from 0) that go to a bus.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub outputs: BTreeMap<u32, TrackId>,
+}
+
+/// One unit in a `SavedRackPreset`'s chain: a builtin rack plugin ID (e.g.
+/// `"builtin:drive"`) and the parameters saved_rack_preset captured from it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SavedRackUnit {
+    pub plugin: String,
+    #[serde(default)]
+    pub params: BTreeMap<String, f64>,
+}
+
+/// A user's own rack preset (save_rack_preset), saved in the project
+/// alongside the curated ones load_rack_preset mounts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SavedRackPreset {
+    pub name: String,
+    pub chain: Vec<SavedRackUnit>,
+}
+
+/// One hit in a `SavedDrumPattern`'s step grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DrumStep {
+    /// The drum pad's MIDI note number (see builtin:drums in list_plugins).
+    pub pad: u8,
+    /// Position in the pattern's 16-step bar (0 to 15).
+    pub step: u8,
+    pub velocity: u8,
+}
+
+/// A user's own drum pattern (save_drum_pattern), saved in the project
+/// alongside the curated ones apply_drum_pattern mounts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SavedDrumPattern {
+    pub name: String,
+    pub steps: Vec<DrumStep>,
 }
 
 /// What a plugin saved of itself beyond its parameters (presets, loaded
@@ -433,6 +474,24 @@ impl InputChannels {
         match self {
             Self::Stereo => 2,
             Self::Left | Self::Right => 1,
+        }
+    }
+
+    /// Short label a UI shows on a cycling control.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stereo => "Stereo",
+            Self::Left => "L",
+            Self::Right => "R",
+        }
+    }
+
+    /// The next choice a click cycles to.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Stereo => Self::Left,
+            Self::Left => Self::Right,
+            Self::Right => Self::Stereo,
         }
     }
 }
@@ -832,6 +891,22 @@ impl TimeSignature {
         4.0 / f64::from(self.denominator)
     }
 
+    /// Quarter notes per drum-sequencer step: a 16th note (0.25), or a
+    /// 32nd note (0.125) when the denominator is 32.
+    pub fn step_beats(self) -> f64 {
+        0.25_f64.min(self.beat_unit())
+    }
+
+    /// Drum-sequencer steps in each beat (the denominator's note).
+    pub fn steps_per_beat(self) -> u16 {
+        (16 / u16::from(self.denominator)).max(1)
+    }
+
+    /// Drum-sequencer steps in one bar of this time signature.
+    pub fn steps_per_bar(self) -> u16 {
+        u16::from(self.numerator) * self.steps_per_beat()
+    }
+
     /// Whether this is a time signature Dawkey supports: 1 to 32 beats of
     /// a whole, half, quarter, ... or 32nd note.
     pub fn valid(self) -> bool {
@@ -848,6 +923,46 @@ impl Default for TimeSignature {
             denominator: 4,
         }
     }
+}
+
+/// A track removed by a non-destructive mixdown, with the position it occupied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ArchivedTrack {
+    pub index: usize,
+    pub track: Track,
+}
+
+/// Routing on a remaining track that pointed to an archived track or bus
+/// before the mixdown, kept so restoring the mixdown can re-attach it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DetachedTrackRoutes {
+    pub track: TrackId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<TrackId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sends: Vec<Send>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub send_automation: Vec<AutomationLane>,
+    /// `(plugin_id, sidechain, outputs)` detached from plugins on `track`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_routes: Vec<(PluginId, Option<TrackId>, BTreeMap<u32, TrackId>)>,
+}
+
+/// Original tracks archived when creating `mix_track`, restorable later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MixdownArchive {
+    pub mix_track: TrackId,
+    pub tracks: Vec<ArchivedTrack>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detached_routes: Vec<DetachedTrackRoutes>,
+}
+
+/// Tracks archived by a non-destructive delete, restorable later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DeletedTrackArchive {
+    pub tracks: Vec<ArchivedTrack>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detached_routes: Vec<DetachedTrackRoutes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -884,6 +999,20 @@ pub struct Project {
     /// back as it was; not part of the undo history.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugin_states: BTreeMap<PluginId, PluginState>,
+    /// The user's own saved rack presets (save_rack_preset), by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rack_presets: Vec<SavedRackPreset>,
+    /// The user's own saved drum step patterns (save_drum_pattern), by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drum_patterns: Vec<SavedDrumPattern>,
+    /// Original tracks archived by non-destructive mixdowns, keyed by the
+    /// combined mixdown track's ID so they can be restored later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mixdown_archives: Vec<MixdownArchive>,
+    /// Tracks archived by non-destructive deletion (most recent last),
+    /// restorable later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_track_archives: Vec<DeletedTrackArchive>,
     /// Next IDs to hand out. Saved so IDs stay unique across sessions.
     next_track_id: u64,
     #[serde(default)]
@@ -929,6 +1058,10 @@ impl Project {
             loop_region: Region::default(),
             punch: Region::default(),
             plugin_states: BTreeMap::new(),
+            rack_presets: Vec::new(),
+            drum_patterns: Vec::new(),
+            mixdown_archives: Vec::new(),
+            deleted_track_archives: Vec::new(),
             next_track_id: 1,
             next_source_id: 1,
             next_clip_id: 1,
@@ -943,6 +1076,22 @@ impl Project {
             return Some(&self.master);
         }
         self.tracks.iter().find(|t| t.id == id)
+    }
+
+    /// Archived source tracks associated with mixdown track `mix_track`.
+    pub fn mixdown_archive(&self, mix_track: TrackId) -> Option<&MixdownArchive> {
+        self.mixdown_archives
+            .iter()
+            .find(|a| a.mix_track == mix_track)
+    }
+
+    /// Every track stored inside non-destructive mixdown or deleted-track archives.
+    pub fn archived_tracks(&self) -> impl Iterator<Item = &Track> {
+        self.mixdown_archives
+            .iter()
+            .flat_map(|a| &a.tracks)
+            .chain(self.deleted_track_archives.iter().flat_map(|a| &a.tracks))
+            .map(|at| &at.track)
     }
 
     pub(crate) fn track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
@@ -1130,7 +1279,14 @@ impl Project {
 
     /// Repairs invariants a hand-edited or corrupted file could break.
     pub(crate) fn sanitize(&mut self) {
-        let max_track = self.tracks.iter().map(|t| t.id.0).max().unwrap_or(0);
+        let archived_max_track = self.archived_tracks().map(|t| t.id.0).max().unwrap_or(0);
+        let max_track = self
+            .tracks
+            .iter()
+            .map(|t| t.id.0)
+            .max()
+            .unwrap_or(0)
+            .max(archived_max_track);
         self.next_track_id = self.next_track_id.max(max_track + 1);
         // Track 0 is the master's.
         for i in 0..self.tracks.len() {
@@ -1146,14 +1302,28 @@ impl Project {
         master.output = None;
         let max_source = self.sources.iter().map(|s| s.id.0).max().unwrap_or(0);
         self.next_source_id = self.next_source_id.max(max_source + 1);
+        let archived_max_clip = self
+            .archived_tracks()
+            .flat_map(|t| &t.clips)
+            .map(|c| c.id.0)
+            .max()
+            .unwrap_or(0);
         let max_clip = self
             .tracks
             .iter()
             .flat_map(|t| &t.clips)
             .map(|c| c.id.0)
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(archived_max_clip);
         self.next_clip_id = self.next_clip_id.max(max_clip + 1);
+        let archived_max_note = self
+            .archived_tracks()
+            .flat_map(|t| &t.clips)
+            .flat_map(|c| c.notes())
+            .map(|n| n.id.0)
+            .max()
+            .unwrap_or(0);
         let max_note = self
             .tracks
             .iter()
@@ -1161,14 +1331,22 @@ impl Project {
             .flat_map(|c| c.notes())
             .map(|n| n.id.0)
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(archived_max_note);
         self.next_note_id = self.next_note_id.max(max_note + 1);
+        let archived_max_plugin = self
+            .archived_tracks()
+            .flat_map(|t| &t.plugins)
+            .map(|p| p.id.0)
+            .max()
+            .unwrap_or(0);
         let max_plugin = self
             .all_tracks()
             .flat_map(|t| &t.plugins)
             .map(|p| p.id.0)
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(archived_max_plugin);
         self.next_plugin_id = self.next_plugin_id.max(max_plugin + 1);
         if !(TEMPO_BPM_MIN..=TEMPO_BPM_MAX).contains(&self.tempo_bpm) {
             self.tempo_bpm = 120.0;
@@ -1363,6 +1541,25 @@ mod tests {
         // A clip doesn't get in its own way.
         assert_eq!(track.free_start(120, 100, Some(ClipId(1))), 120);
         assert_eq!(track.free_start(120, 140, Some(ClipId(1))), 110);
+    }
+
+    #[test]
+    fn track_color_round_trips_and_is_left_out_when_unset() {
+        let plain = Track::new(TrackId(1), "T".to_owned(), TrackKind::Audio);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("color"), "{json}");
+        assert_eq!(serde_json::from_str::<Track>(&json).unwrap(), plain);
+
+        let colored = Track {
+            color: Some(0x4c8dff),
+            ..Track::new(TrackId(1), "T".to_owned(), TrackKind::Audio)
+        };
+        let json = serde_json::to_string(&colored).unwrap();
+        assert!(
+            json.contains(&format!("\"color\":{}", 0x4c8dffu32)),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<Track>(&json).unwrap(), colored);
     }
 
     #[test]

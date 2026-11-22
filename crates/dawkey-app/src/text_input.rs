@@ -12,8 +12,8 @@
 //! type nothing).
 
 use dawkey_core::{
-    DEVICE_LATENCY_MS_MAX, RenameClip, RenameTrack, SetPluginParam, SetTempo, SetTimeSignature,
-    SetTrackMidiOutput, TEMPO_BPM_MAX, TEMPO_BPM_MIN,
+    DEVICE_LATENCY_MS_MAX, RenameClip, RenameProject, RenameTrack, SaveDrumPattern, SaveRackPreset,
+    SetPluginParam, SetTempo, SetTimeSignature, SetTrackMidiOutput, TEMPO_BPM_MAX, TEMPO_BPM_MIN,
 };
 use dawkey_ui::Modifiers;
 
@@ -33,6 +33,9 @@ pub(crate) fn field_id(field: &TextField) -> String {
         TextField::McpPort => "prefs/mcp_port".into(),
         TextField::TrackName(track) => format!("track/{track}/name"),
         TextField::ClipName(clip) => format!("clip/{clip}/name"),
+        TextField::RackPresetName(_) => "rack/save_name".into(),
+        TextField::DrumPatternName(_) => "step_seq/save_name".into(),
+        TextField::ProjectName => "window/title".into(),
     }
 }
 
@@ -43,7 +46,9 @@ fn max_len(field: &TextField) -> usize {
         TextField::McpPort => 5,
         TextField::Tempo(_) | TextField::DeviceLatency(_) | TextField::RecordOffset => 10,
         TextField::PluginParam { .. } => 40,
-        TextField::TrackName(_) | TextField::ClipName(_) => 256,
+        TextField::TrackName(_) | TextField::ClipName(_) | TextField::ProjectName => 256,
+        TextField::RackPresetName(_) => 64,
+        TextField::DrumPatternName(_) => 64,
     }
 }
 
@@ -51,7 +56,12 @@ fn max_len(field: &TextField) -> usize {
 fn free_text(field: &TextField) -> bool {
     matches!(
         field,
-        TextField::PluginParam { .. } | TextField::TrackName(_) | TextField::ClipName(_)
+        TextField::PluginParam { .. }
+            | TextField::TrackName(_)
+            | TextField::ClipName(_)
+            | TextField::RackPresetName(_)
+            | TextField::DrumPatternName(_)
+            | TextField::ProjectName
     )
 }
 
@@ -135,8 +145,10 @@ impl App {
                     .ok_or_else(|| format!("clip {clip} does not exist"))?;
                 clip_label(project, track, c)
             }
+            TextField::RackPresetName(_) | TextField::DrumPatternName(_) => String::new(),
+            TextField::ProjectName => self.studio.session().project().name.clone(),
         };
-        self.view.text_edit = Some(TextEdit {
+        self.view.shared.text_edit = Some(TextEdit {
             field,
             text,
             selected: true,
@@ -147,6 +159,7 @@ impl App {
     /// Whether `field` is being typed in.
     pub(crate) fn editing(&self, field: &TextField) -> bool {
         self.view
+            .shared
             .text_edit
             .as_ref()
             .is_some_and(|e| e.field == *field)
@@ -154,7 +167,7 @@ impl App {
 
     /// A key for the field being typed in; `None` if no field is.
     pub(crate) fn on_text_key(&mut self, key: &str, m: Modifiers) -> Option<Result<(), String>> {
-        let edit = self.view.text_edit.as_mut()?;
+        let edit = self.view.shared.text_edit.as_mut()?;
         match key {
             "tab" => {
                 let field = edit.field.clone();
@@ -166,7 +179,7 @@ impl App {
                 return Some(result);
             }
             "return" => return Some(self.commit_text_edit()),
-            "escape" => self.view.text_edit = None,
+            "escape" => self.view.shared.text_edit = None,
             "backspace" | "delete" => {
                 if std::mem::take(&mut edit.selected) {
                     edit.text.clear();
@@ -227,7 +240,7 @@ impl App {
     /// Before a click or drag on widget `id`: anywhere but the field being
     /// typed in sets it.
     pub(crate) fn leave_text_edit(&mut self, id: &str) -> Result<(), String> {
-        match &self.view.text_edit {
+        match &self.view.shared.text_edit {
             Some(edit) if field_id(&edit.field) != id => self.commit_text_edit(),
             _ => Ok(()),
         }
@@ -240,7 +253,7 @@ impl App {
             field,
             text,
             selected,
-        }) = self.view.text_edit.take()
+        }) = self.view.shared.text_edit.take()
         else {
             return Ok(());
         };
@@ -310,6 +323,32 @@ impl App {
                     .into(),
                 )
             }
+            TextField::RackPresetName(track) => {
+                let name = text.trim();
+                if name.is_empty() {
+                    return Ok(());
+                }
+                self.execute(
+                    SaveRackPreset {
+                        track,
+                        name: name.to_owned(),
+                    }
+                    .into(),
+                )
+            }
+            TextField::DrumPatternName(clip) => {
+                let name = text.trim();
+                if name.is_empty() {
+                    return Ok(());
+                }
+                self.execute(
+                    SaveDrumPattern {
+                        clip,
+                        name: name.to_owned(),
+                    }
+                    .into(),
+                )
+            }
             TextField::Tempo(n) => {
                 let bpm: f64 = text
                     .parse()
@@ -372,6 +411,19 @@ impl App {
                         numerator,
                         denominator,
                         at_bar: (n > 0).then_some(bar + 1),
+                    }
+                    .into(),
+                )
+            }
+            TextField::ProjectName => {
+                let current = self.studio.session().project().name.clone();
+                let text = text.trim();
+                if selected || text.is_empty() || text == current {
+                    return Ok(());
+                }
+                self.execute(
+                    RenameProject {
+                        name: text.to_owned(),
                     }
                     .into(),
                 )
