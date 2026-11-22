@@ -3,16 +3,18 @@
 //! project goes through studio commands, so it's undoable like any MCP call.
 
 use dawkey_core::{
-    AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project, RemoveClip, RemoveTrackSend,
-    SetLoop, SetPunch, SetTrackArm, SetTrackGain, SetTrackMute, SetTrackOutput, SetTrackPan,
-    SetTrackSend, SetTrackSolo, TrackId, TrackKind,
+    AddDrumTrack, AddGuitarTrack, AddTrack, AutomationTarget, ClipId, Command, MoveClip, Project,
+    RemoveClip, RemoveTrackSend, RestoreDeletedTracks, RestoreMixdownTracks, SetLoop, SetPunch,
+    SetTrackArm, SetTrackColor, SetTrackGain, SetTrackInput, SetTrackMute, SetTrackOutput,
+    SetTrackPan, SetTrackSend, SetTrackSolo, TrackId, TrackKind,
 };
 use dawkey_ui::{ChromeAction, DragPhase, Modifiers, MouseButton, Point, Rect, UiAction};
 
 use crate::App;
 use crate::state::{
-    ClipEdge, FADER_H, Gesture, ImportRequest, MAX_ZOOM, MIN_ZOOM, PAN_W, Page, PendingAction,
-    PlatformRequest, RangeKind, SEND_W, TextField, takes_shown, track_tops,
+    ClipEdge, DeleteConfirm, FADER_H, Gesture, ImportRequest, MAX_ZOOM, MIN_ZOOM, MixdownConfirm,
+    PAN_W, Page, PendingAction, PlatformRequest, RangeKind, SEND_W, TextField, TrackMenu,
+    TrackPopup, TrackPopupKind, takes_shown, track_tops,
 };
 use crate::view::{db_from_position, position_from_db};
 
@@ -77,15 +79,48 @@ impl App {
         count: u8,
         modifiers: Modifiers,
     ) -> Result<(), String> {
+        self.leave_text_edit(id)?;
+        let parts: Vec<&str> = id.split('/').collect();
+        if button == MouseButton::Right {
+            if self.view.page == Page::Arrange
+                && self.view.confirm.is_none()
+                && self.view.mixdown_confirm.is_none()
+                && self.view.delete_confirm.is_none()
+                && let ["track", track, ..] = parts[..]
+                && let Ok(track) = parse_track(track)
+                && track != dawkey_core::MASTER
+                && self.studio.session().project().track(track).is_some()
+            {
+                if !self.view.selected_tracks.contains(&track) {
+                    self.select_track(track, Modifiers::default())?;
+                }
+                self.view.track_menu = Some(TrackMenu { track, pos });
+                self.view.track_popup = None;
+                return Ok(());
+            }
+            self.view.track_menu = None;
+            self.view.track_popup = None;
+            return Ok(());
+        }
         if button != MouseButton::Left {
             return Ok(());
         }
-        self.leave_text_edit(id)?;
-        let parts: Vec<&str> = id.split('/').collect();
         if let Some(result) = self.on_recovery_click(&parts) {
             return result;
         }
         if let Some(result) = self.on_confirm_click(&parts) {
+            return result;
+        }
+        if let Some(result) = self.on_mixdown_confirm_click(&parts) {
+            return result;
+        }
+        if let Some(result) = self.on_delete_confirm_click(&parts) {
+            return result;
+        }
+        if let Some(result) = self.on_track_menu_click(&parts) {
+            return result;
+        }
+        if let Some(result) = self.on_track_popup_click(&parts) {
             return result;
         }
         if let Some(result) = self.on_prefs_click(&parts) {
@@ -98,6 +133,9 @@ impl App {
             return result;
         }
         if let Some(result) = self.on_roll_click(&parts, pos, count, modifiers) {
+            return result;
+        }
+        if let Some(result) = self.on_step_click(&parts, pos, count, modifiers) {
             return result;
         }
         if let Some(result) = self.on_tempo_click(&parts, pos, count) {
@@ -131,6 +169,10 @@ impl App {
                 self.view.page = Page::Mixer;
                 Ok(())
             }
+            ["view", "rack"] => {
+                self.view.page = Page::Rack;
+                Ok(())
+            }
             ["view", "piano_roll"] => match self.editable_clip() {
                 Some(clip) => self.open_piano_roll(clip),
                 None => Err("select a MIDI clip to edit".into()),
@@ -150,6 +192,8 @@ impl App {
                 Ok(())
             }
             ["arrange", "add_track"] => self.execute(AddTrack::default().into()),
+            ["arrange", "add_guitar_track"] => self.execute(AddGuitarTrack::default().into()),
+            ["arrange", "add_drum_track"] => self.execute(AddDrumTrack::default().into()),
             ["arrange", "add_midi_track"] => self.execute(
                 AddTrack {
                     kind: TrackKind::Midi,
@@ -164,9 +208,14 @@ impl App {
                 }
                 .into(),
             ),
+            ["arrange", "restore_deleted"] => self.restore_deleted_tracks(),
             ["track", track, "output"] => {
                 let track = parse_track(track)?;
                 self.cycle_output(track)
+            }
+            ["track", track, "input"] => {
+                let track = parse_track(track)?;
+                self.cycle_input(track)
             }
             ["track", track, "add_send"] => {
                 let track = parse_track(track)?;
@@ -215,7 +264,22 @@ impl App {
                 };
                 self.execute(command)
             }
-            // Double-clicking a track's name types a new one.
+            // Clicking a track's header selects it (Ctrl toggles, Shift extends range).
+            ["track", track] => {
+                let track = parse_track(track)?;
+                if track != dawkey_core::MASTER {
+                    self.select_track(track, modifiers)?;
+                }
+                Ok(())
+            }
+            // Clicking a track's name once selects it; double-clicking types a new one.
+            ["track", track, "name"] if count == 1 => {
+                let track = parse_track(track)?;
+                if track != dawkey_core::MASTER {
+                    self.select_track(track, modifiers)?;
+                }
+                Ok(())
+            }
             ["track", track, "name"] if count == 2 => {
                 let field = TextField::TrackName(parse_track(track)?);
                 match self.editing(&field) {
@@ -231,7 +295,7 @@ impl App {
                 if name && self.editing(&TextField::ClipName(clip)) {
                     return Ok(());
                 }
-                self.view.selected_clip = Some(clip);
+                self.select_clip(clip, modifiers);
                 self.view.selected_marker = None;
                 if count == 2 && name {
                     return self.start_text_edit(TextField::ClipName(clip));
@@ -242,9 +306,25 @@ impl App {
                 }
                 Ok(())
             }
+            // Double-clicking the window title renames the project.
+            ["window", "title"] if count == 2 => self.start_text_edit(TextField::ProjectName),
+            ["status", "new_project"] => {
+                self.request_action(PendingAction::NewProject);
+                Ok(())
+            }
+            ["status", "open_project"] => {
+                self.request_action(PendingAction::OpenProject);
+                Ok(())
+            }
+            ["status", "save_project"] => self.save_project(),
+            ["status", "close_project"] => {
+                self.request_action(PendingAction::Close);
+                Ok(())
+            }
             ["timeline", "ruler"] => self.locate_at(pos.x),
             ["timeline", "lanes"] => {
                 self.view.selected_clip = None;
+                self.view.selected_clips.clear();
                 self.view.selected_marker = None;
                 // Double-clicking an empty MIDI lane makes a clip there.
                 if count == 2
@@ -342,6 +422,72 @@ impl App {
                 });
                 Ok(())
             }
+            Gesture::GroupMove {
+                anchor,
+                grab_s,
+                members,
+                ..
+            } => {
+                let project = self.studio.session().project();
+                let anchor_start = members
+                    .iter()
+                    .find(|&&(id, ..)| id == anchor)
+                    .map_or(0.0, |&(_, _, s)| s);
+                let anchor_idx = members
+                    .iter()
+                    .find(|&&(id, ..)| id == anchor)
+                    .map_or(0, |&(_, idx, _)| idx);
+                let mut new_anchor_start = (self.time_at(pos.x) - grab_s).max(0.0);
+                if self.view.snap && !modifiers.shift {
+                    new_anchor_start = snap(project, new_anchor_start);
+                }
+                let delta_s = new_anchor_start - anchor_start;
+                let target_idx = self
+                    .track_at(pos.y)
+                    .and_then(|t| project.tracks.iter().position(|pt| pt.id == t));
+                let mut delta_rows = target_idx.map_or(0, |t| t as i32 - anchor_idx as i32);
+                // Clamp toward zero until every member lands on a track
+                // of its own kind (or off the end, which keeps it put).
+                while delta_rows != 0
+                    && !members.iter().all(|&(id, idx, _)| {
+                        usize::try_from(idx as i32 + delta_rows).is_ok_and(|new_idx| {
+                            project.tracks.get(new_idx).map(|t| t.kind) == self.clip_kind(id)
+                        })
+                    })
+                {
+                    delta_rows -= delta_rows.signum();
+                }
+                if end {
+                    self.view.gesture = None;
+                    let mut commands = Vec::new();
+                    for &(id, idx, start_s) in &members {
+                        let Ok(new_idx) = usize::try_from(idx as i32 + delta_rows) else {
+                            continue;
+                        };
+                        let Some(new_track) = project.tracks.get(new_idx).map(|t| t.id) else {
+                            continue;
+                        };
+                        let current_track = project.clip(id).map(|(t, _)| t.id);
+                        commands.push(
+                            MoveClip {
+                                clip: id,
+                                position_s: Some((start_s + delta_s).max(0.0)),
+                                track: (Some(new_track) != current_track).then_some(new_track),
+                            }
+                            .into(),
+                        );
+                    }
+                    return self.execute_batch("move_clips", commands);
+                }
+                self.view.gesture = Some(Gesture::GroupMove {
+                    anchor,
+                    grab_s,
+                    members,
+                    delta_s,
+                    delta_rows,
+                });
+                Ok(())
+            }
             Gesture::TrimClip { .. } => self.on_trim_drag(gesture, pos, end, modifiers),
             Gesture::Repeat { .. } => self.on_repeat_drag(gesture, pos, end, modifiers),
             Gesture::Fader {
@@ -414,6 +560,19 @@ impl App {
                     self.view.gesture = None;
                 }
                 self.locate_at(pos.x)
+            }
+            Gesture::ClipMarquee { base, from, .. } => {
+                let to = (self.time_at(pos.x).max(0.0), self.lane_content_y(pos.y));
+                let mut selected = base.clone();
+                for id in self.clips_touched(from, to) {
+                    if !selected.contains(&id) {
+                        selected.push(id);
+                    }
+                }
+                self.view.selected_clips = selected.clone();
+                self.view.selected_clip = selected.last().copied();
+                self.view.gesture = (!end).then_some(Gesture::ClipMarquee { base, from, to });
+                Ok(())
             }
             Gesture::MoveNotes { .. }
             | Gesture::ResizeNote { .. }
@@ -489,6 +648,25 @@ impl App {
             return Err("there's no bus to send it to (+ Bus makes one)".into());
         }
         self.execute(SetTrackOutput { track, bus }.into())
+    }
+
+    /// Stereo -> left -> right -> stereo: which input channel(s) an
+    /// armed audio track records and (while monitoring) plays live.
+    fn cycle_input(&mut self, track: TrackId) -> Result<(), String> {
+        let current = self
+            .studio
+            .session()
+            .project()
+            .track(track)
+            .ok_or_else(|| format!("track {track} does not exist"))?
+            .input;
+        self.execute(
+            SetTrackInput {
+                track,
+                input: current.next(),
+            }
+            .into(),
+        )
     }
 
     /// Adds a send from `track` to the first bus it can send to (at 0 dB).
@@ -615,15 +793,42 @@ impl App {
                     .clip(clip)
                     .ok_or_else(|| format!("clip {clip} does not exist"))?;
                 let start = project.frames_to_seconds(c.start);
-                self.view.selected_clip = Some(clip);
+                let preview_track = track.id;
+                // Grabbing a clip already in a multi-selection keeps the
+                // whole selection and moves it as a group; grabbing any
+                // other one selects just it.
+                if !self.view.selected_clips.contains(&clip) {
+                    self.select_clip(clip, modifiers);
+                }
                 self.view.selected_marker = None;
-                Some(Gesture::Clip {
-                    clip,
-                    grab_s: self.time_at(origin.x) - start,
-                    preview_start_s: start,
-                    preview_track: track.id,
-                    copy: modifiers.ctrl,
-                })
+                if self.view.selected_clips.len() > 1 {
+                    let project = self.studio.session().project();
+                    let members: Vec<(ClipId, usize, f64)> = self
+                        .view
+                        .selected_clips
+                        .iter()
+                        .filter_map(|&id| {
+                            let (t, c) = project.clip(id)?;
+                            let idx = project.tracks.iter().position(|pt| pt.id == t.id)?;
+                            Some((id, idx, project.frames_to_seconds(c.start)))
+                        })
+                        .collect();
+                    Some(Gesture::GroupMove {
+                        anchor: clip,
+                        grab_s: self.time_at(origin.x) - start,
+                        members,
+                        delta_s: 0.0,
+                        delta_rows: 0,
+                    })
+                } else {
+                    Some(Gesture::Clip {
+                        clip,
+                        grab_s: self.time_at(origin.x) - start,
+                        preview_start_s: start,
+                        preview_track,
+                        copy: modifiers.ctrl,
+                    })
+                }
             }
             ["track", track, "fader"] => {
                 let track = parse_track(track)?;
@@ -684,6 +889,24 @@ impl App {
                 })
             }
             ["timeline", "ruler"] => Some(Gesture::Scrub),
+            ["timeline", "lanes"] => {
+                let at = (
+                    self.time_at(origin.x).max(0.0),
+                    self.lane_content_y(origin.y),
+                );
+                let base = if modifiers.shift || modifiers.ctrl {
+                    self.view.selected_clips.clone()
+                } else {
+                    Vec::new()
+                };
+                self.view.selected_clips = base.clone();
+                self.view.selected_clip = base.last().copied();
+                Some(Gesture::ClipMarquee {
+                    base,
+                    from: at,
+                    to: at,
+                })
+            }
             _ => None,
         })
     }
@@ -697,6 +920,10 @@ impl App {
 
     fn on_scroll(&mut self, id: Option<&str>, pos: Point, delta: Point, modifiers: Modifiers) {
         if self.on_overlay_scroll(id, delta) {
+            return;
+        }
+        if id == Some("rack/bay") || (id.is_none() && self.view.page == Page::Rack) {
+            self.scroll_rack(delta.y);
             return;
         }
         if matches!(
@@ -728,10 +955,19 @@ impl App {
                 (anchor - f64::from(pos.x - self.lanes_rect().x) / f64::from(pps)).max(0.0);
             return;
         }
+        // Shift forces a horizontal pan; otherwise scrolling over a track's
+        // own row scrolls the track list vertically (there's something to
+        // scroll to), and scrolling anywhere else over the timeline (empty
+        // space past the last track, the ruler, a tempo or meter lane) pans
+        // it, since those have no track rows of their own.
+        let over_track = matches!(id, Some("timeline/lanes" | "arrange/headers"))
+            && self.track_at(pos.y).is_some();
         let (dx, dy) = if modifiers.shift {
             (delta.y, 0.0)
-        } else {
+        } else if over_track {
             (delta.x, delta.y)
+        } else {
+            (delta.x + delta.y, 0.0)
         };
         self.view.scroll_s = (self.view.scroll_s + f64::from(dx / self.view.px_per_s)).max(0.0);
         let (_, content) = self.track_rows();
@@ -744,6 +980,9 @@ impl App {
             return result;
         }
         if let Some(result) = self.on_confirm_key(key) {
+            return result;
+        }
+        if let Some(result) = self.on_mixdown_key(key) {
             return result;
         }
         if let Some(result) = self.on_text_key(key, m) {
@@ -789,21 +1028,14 @@ impl App {
             ("z", true, true) | ("y", true, _) => {
                 self.studio.redo().map(|_| ()).map_err(|e| e.to_string())
             }
-            ("s", true, false) => {
-                if self.studio.session().path().is_some() {
-                    self.studio
-                        .save(None)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                } else {
-                    self.platform_requests
-                        .push(PlatformRequest::ChooseSaveLocation { then: None });
-                    Ok(())
-                }
-            }
+            ("s", true, false) => self.save_project(),
             ("s", true, true) => {
                 self.platform_requests
                     .push(PlatformRequest::ChooseSaveLocation { then: None });
+                Ok(())
+            }
+            ("n", true, _) => {
+                self.request_action(PendingAction::NewProject);
                 Ok(())
             }
             ("o", true, _) => {
@@ -833,15 +1065,29 @@ impl App {
                 Ok(())
             }
             ("v", true, false) if self.view.page == Page::Arrange => self.paste_clip(),
-            ("delete" | "backspace", false, _) => match self.view.selected_clip.take() {
-                Some(clip) => self.execute(RemoveClip { clip }.into()),
-                None => Ok(()),
-            },
+            ("delete" | "backspace", false, _) => {
+                let mut clips = std::mem::take(&mut self.view.selected_clips);
+                if clips.is_empty() {
+                    clips.extend(self.view.selected_clip.take());
+                } else {
+                    self.view.selected_clip = None;
+                }
+                for clip in clips {
+                    self.execute(RemoveClip { clip }.into())?;
+                }
+                Ok(())
+            }
             ("tab", false, _) => {
                 self.view.page = match self.view.page {
                     Page::Arrange => Page::Mixer,
-                    Page::Mixer | Page::PianoRoll => Page::Arrange,
+                    Page::Mixer | Page::Rack | Page::PianoRoll | Page::StepSequencer => {
+                        Page::Arrange
+                    }
                 };
+                Ok(())
+            }
+            ("f4", false, _) => {
+                self.view.page = Page::Rack;
                 Ok(())
             }
             ("+" | "=", ..) => {
@@ -854,6 +1100,9 @@ impl App {
             }
             ("escape", ..) => {
                 self.view.selected_clip = None;
+                self.view.selected_clips.clear();
+                self.view.selected_tracks.clear();
+                self.view.track_anchor = None;
                 Ok(())
             }
             _ => Ok(()),
@@ -912,6 +1161,35 @@ impl App {
             .execute_merging(command, key)
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+
+    /// Runs several commands as one undo step (see
+    /// [`Session::execute_batch`](dawkey_core::Session::execute_batch)).
+    pub(crate) fn execute_batch(
+        &mut self,
+        label: &str,
+        commands: Vec<Command>,
+    ) -> Result<(), String> {
+        let mut commands = commands.into_iter();
+        self.studio
+            .execute_batch_with(label, |_, _| Ok(commands.next()))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Saves over the project's own file, or asks where if it doesn't have
+    /// one yet.
+    pub(crate) fn save_project(&mut self) -> Result<(), String> {
+        if self.studio.session().path().is_some() {
+            self.studio
+                .save(None)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        } else {
+            self.platform_requests
+                .push(PlatformRequest::ChooseSaveLocation { then: None });
+            Ok(())
+        }
     }
 
     fn locate_at(&mut self, x: f32) -> Result<(), String> {
@@ -985,6 +1263,417 @@ impl App {
             .project()
             .clip(clip)
             .map(|(_, c)| c.kind())
+    }
+
+    /// Window y to the arrange lanes' own unscrolled coordinate space (as
+    /// `track_rows`' tops are in), so a marquee's corners stay comparable
+    /// to each other across scrolling.
+    fn lane_content_y(&self, y: f32) -> f32 {
+        y - self.lanes_rect().y + self.view.scroll_y
+    }
+
+    /// The clips a marquee from `a` to `b` ((time in seconds, lane content
+    /// y) corners) touches: every clip on a track whose row the marquee's
+    /// y span crosses, that overlaps its time span.
+    fn clips_touched(&self, a: (f64, f32), b: (f64, f32)) -> Vec<ClipId> {
+        let (from_s, to_s) = (a.0.min(b.0), a.0.max(b.0));
+        let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
+        let (tops, total) = self.track_rows();
+        let project = self.studio.session().project();
+        let mut ids = Vec::new();
+        for (i, &top) in tops.iter().enumerate() {
+            let bottom = tops.get(i + 1).copied().unwrap_or(total);
+            if bottom <= y0 || top >= y1 {
+                continue;
+            }
+            let Some(track) = project.tracks.get(i) else {
+                continue;
+            };
+            for clip in &track.clips {
+                let start = project.frames_to_seconds(clip.start);
+                let end = project.frames_to_seconds(clip.start + clip.length);
+                if end > from_s && start < to_s {
+                    ids.push(clip.id);
+                }
+            }
+        }
+        ids
+    }
+
+    /// Selects clip `clip` in the arrange view: a plain click replaces
+    /// the selection with just it; Shift toggles it in the
+    /// multi-selection instead (Ctrl is reserved for dragging a copy of
+    /// a clip).
+    pub(crate) fn select_clip(&mut self, clip: ClipId, modifiers: Modifiers) {
+        // Ctrl is reserved for dragging a copy of a clip, so only Shift
+        // toggles it in the multi-selection here.
+        if modifiers.shift {
+            if let Some(pos) = self.view.selected_clips.iter().position(|&c| c == clip) {
+                self.view.selected_clips.remove(pos);
+            } else {
+                self.view.selected_clips.push(clip);
+            }
+        } else {
+            self.view.selected_clips = vec![clip];
+        }
+        self.view.selected_clip = self.view.selected_clips.last().copied();
+    }
+
+    /// Selects track `track` in the arrange view (`Ctrl` toggles, `Shift`
+    /// selects a range from the anchor track).
+    pub(crate) fn select_track(
+        &mut self,
+        track: TrackId,
+        modifiers: Modifiers,
+    ) -> Result<(), String> {
+        let project = self.studio.session().project();
+        if track == dawkey_core::MASTER || project.track(track).is_none() {
+            return Err(format!("track {track} does not exist"));
+        }
+        if modifiers.shift {
+            let anchor = self
+                .view
+                .track_anchor
+                .or_else(|| self.view.selected_tracks.first().copied())
+                .filter(|&id| project.track(id).is_some())
+                .unwrap_or(track);
+            let Some(a) = project.track_index(anchor) else {
+                return Ok(());
+            };
+            let Some(b) = project.track_index(track) else {
+                return Ok(());
+            };
+            let (lo, hi) = (a.min(b), a.max(b));
+            let range: Vec<TrackId> = project.tracks[lo..=hi].iter().map(|t| t.id).collect();
+            if modifiers.ctrl {
+                for id in range {
+                    if !self.view.selected_tracks.contains(&id) {
+                        self.view.selected_tracks.push(id);
+                    }
+                }
+            } else {
+                self.view.selected_tracks = range;
+            }
+            if self.view.track_anchor.is_none() {
+                self.view.track_anchor = Some(anchor);
+            }
+        } else if modifiers.ctrl {
+            if let Some(pos) = self.view.selected_tracks.iter().position(|&id| id == track) {
+                self.view.selected_tracks.remove(pos);
+            } else {
+                self.view.selected_tracks.push(track);
+            }
+            self.view.track_anchor = Some(track);
+        } else {
+            self.view.selected_tracks = vec![track];
+            self.view.track_anchor = Some(track);
+        }
+        self.view.rack_track = Some(track);
+        Ok(())
+    }
+
+    fn menu_tracks(&self, fallback: TrackId) -> Vec<TrackId> {
+        let project = self.studio.session().project();
+        let mut tracks: Vec<TrackId> = project
+            .tracks
+            .iter()
+            .map(|t| t.id)
+            .filter(|id| self.view.selected_tracks.contains(id))
+            .collect();
+        if tracks.is_empty() {
+            tracks.push(fallback);
+        }
+        tracks
+    }
+
+    fn on_track_menu_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
+        let menu = self.view.track_menu?;
+        Some(match parts {
+            ["track_menu"] => Ok(()),
+            ["track_menu", "backdrop"] => {
+                self.view.track_menu = None;
+                Ok(())
+            }
+            ["track_menu", "mixdown"] => {
+                let tracks = self.menu_tracks(menu.track);
+                self.view.track_menu = None;
+                self.view.mixdown_confirm = Some(MixdownConfirm {
+                    tracks,
+                    remove_originals: true,
+                });
+                Ok(())
+            }
+            ["track_menu", "restore_mixdown"] => {
+                self.view.track_menu = None;
+                self.execute(
+                    RestoreMixdownTracks {
+                        mix_track: menu.track,
+                        remove_mix_track: true,
+                    }
+                    .into(),
+                )
+            }
+            ["track_menu", "delete"] => {
+                let tracks = self.menu_tracks(menu.track);
+                self.view.track_menu = None;
+                self.view.delete_confirm = Some(DeleteConfirm {
+                    tracks,
+                    permanent: false,
+                });
+                Ok(())
+            }
+            ["track_menu", "restore_deleted"] => {
+                self.view.track_menu = None;
+                self.restore_deleted_tracks()
+            }
+            ["track_menu", "select_all_clips"] => {
+                let tracks = self.menu_tracks(menu.track);
+                self.view.track_menu = None;
+                let project = self.studio.session().project();
+                self.view.selected_clips = project
+                    .tracks
+                    .iter()
+                    .filter(|t| tracks.contains(&t.id))
+                    .flat_map(|t| t.clips.iter().map(|c| c.id))
+                    .collect();
+                self.view.selected_clip = self.view.selected_clips.last().copied();
+                Ok(())
+            }
+            ["track_menu", "rename"] => {
+                self.view.track_menu = None;
+                self.start_text_edit(TextField::TrackName(menu.track))
+            }
+            ["track_menu", "insert_above" | "insert_below"] => {
+                let below = parts[1] == "insert_below";
+                let project = self.studio.session().project();
+                let source = project.track(menu.track);
+                let kind = source.map(|t| t.kind).unwrap_or_default();
+                // A drum track is a MIDI track with the drum instrument
+                // first in its chain, not a kind of its own: match it with
+                // another drum track, not a bare MIDI one.
+                let is_drum = source.is_some_and(|t| {
+                    t.plugins
+                        .first()
+                        .is_some_and(|p| p.plugin == "builtin:drums")
+                });
+                let index = project
+                    .track_index(menu.track)
+                    .map(|i| if below { i + 1 } else { i });
+                self.view.track_menu = None;
+                self.execute(if is_drum {
+                    AddDrumTrack {
+                        index,
+                        ..Default::default()
+                    }
+                    .into()
+                } else {
+                    AddTrack {
+                        kind,
+                        index,
+                        ..Default::default()
+                    }
+                    .into()
+                })
+            }
+            ["track_menu", "duplicate"] => {
+                self.view.track_menu = None;
+                match self.studio.duplicate_track(menu.track) {
+                    Ok(outcome) => {
+                        if let Some(track) = outcome.track {
+                            self.view.selected_tracks = vec![track];
+                            self.view.track_anchor = Some(track);
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            ["track_menu", "output"] => {
+                self.view.track_popup = Some(TrackPopup {
+                    kind: TrackPopupKind::Output,
+                    track: menu.track,
+                    pos: menu.pos,
+                });
+                self.view.track_menu = None;
+                Ok(())
+            }
+            ["track_menu", "color"] => {
+                self.view.track_popup = Some(TrackPopup {
+                    kind: TrackPopupKind::Color,
+                    track: menu.track,
+                    pos: menu.pos,
+                });
+                self.view.track_menu = None;
+                Ok(())
+            }
+            _ => return None,
+        })
+    }
+
+    fn on_track_popup_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
+        let popup = self.view.track_popup?;
+        Some(match parts {
+            ["track_popup"] => Ok(()),
+            ["track_popup", "backdrop"] => {
+                self.view.track_popup = None;
+                Ok(())
+            }
+            ["track_popup", "output", "master"] => {
+                self.view.track_popup = None;
+                self.execute(
+                    SetTrackOutput {
+                        track: popup.track,
+                        bus: None,
+                    }
+                    .into(),
+                )
+            }
+            ["track_popup", "output", "bus", bus] => {
+                let bus = parse_track(bus).ok()?;
+                self.view.track_popup = None;
+                self.execute(
+                    SetTrackOutput {
+                        track: popup.track,
+                        bus: Some(bus),
+                    }
+                    .into(),
+                )
+            }
+            ["track_popup", "color", "swatch", n] => {
+                let n: usize = n.parse().ok()?;
+                let color = *crate::theme::TRACK_COLOR_HEX.get(n)?;
+                self.view.track_popup = None;
+                self.execute(
+                    SetTrackColor {
+                        track: popup.track,
+                        color: Some(color),
+                    }
+                    .into(),
+                )
+            }
+            ["track_popup", "color", "default"] => {
+                self.view.track_popup = None;
+                self.execute(
+                    SetTrackColor {
+                        track: popup.track,
+                        color: None,
+                    }
+                    .into(),
+                )
+            }
+            _ => return None,
+        })
+    }
+
+    fn on_mixdown_confirm_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
+        self.view.mixdown_confirm.as_ref()?;
+        Some(match parts {
+            ["mixdown_confirm"] => Ok(()),
+            ["mixdown_confirm", "cancel"] | ["mixdown_confirm", "backdrop"] => {
+                self.view.mixdown_confirm = None;
+                Ok(())
+            }
+            ["mixdown_confirm", "remove_originals"] => {
+                if let Some(confirm) = &mut self.view.mixdown_confirm {
+                    confirm.remove_originals = !confirm.remove_originals;
+                }
+                Ok(())
+            }
+            ["mixdown_confirm", "confirm"] => self.confirm_mixdown(),
+            _ => return None,
+        })
+    }
+
+    fn on_delete_confirm_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
+        self.view.delete_confirm.as_ref()?;
+        Some(match parts {
+            ["delete_confirm"] => Ok(()),
+            ["delete_confirm", "cancel"] | ["delete_confirm", "backdrop"] => {
+                self.view.delete_confirm = None;
+                Ok(())
+            }
+            ["delete_confirm", "permanent"] => {
+                if let Some(confirm) = &mut self.view.delete_confirm {
+                    confirm.permanent = !confirm.permanent;
+                }
+                Ok(())
+            }
+            ["delete_confirm", "confirm"] => self.confirm_delete_tracks(),
+            _ => return None,
+        })
+    }
+
+    fn on_mixdown_key(&mut self, key: &str) -> Option<Result<(), String>> {
+        if self.view.mixdown_confirm.is_some() {
+            return Some(match key {
+                "escape" => {
+                    self.view.mixdown_confirm = None;
+                    Ok(())
+                }
+                "return" => self.confirm_mixdown(),
+                _ => Ok(()),
+            });
+        }
+        if self.view.delete_confirm.is_some() {
+            return Some(match key {
+                "escape" => {
+                    self.view.delete_confirm = None;
+                    Ok(())
+                }
+                "return" => self.confirm_delete_tracks(),
+                _ => Ok(()),
+            });
+        }
+        if self.view.track_menu.is_some() && key == "escape" {
+            self.view.track_menu = None;
+            return Some(Ok(()));
+        }
+        if self.view.track_popup.is_some() && key == "escape" {
+            self.view.track_popup = None;
+            return Some(Ok(()));
+        }
+        None
+    }
+
+    fn confirm_mixdown(&mut self) -> Result<(), String> {
+        let Some(confirm) = self.view.mixdown_confirm.take() else {
+            return Ok(());
+        };
+        let outcome = self
+            .studio
+            .mixdown_tracks(&confirm.tracks, None, confirm.remove_originals)
+            .map_err(|e| e.to_string())?;
+        if let Some(new_track) = outcome.track {
+            self.view.selected_tracks = vec![new_track];
+            self.view.track_anchor = Some(new_track);
+            self.view.rack_track = Some(new_track);
+        }
+        Ok(())
+    }
+
+    fn confirm_delete_tracks(&mut self) -> Result<(), String> {
+        let Some(confirm) = self.view.delete_confirm.take() else {
+            return Ok(());
+        };
+        self.studio
+            .delete_tracks(&confirm.tracks, confirm.permanent)
+            .map_err(|e| e.to_string())?;
+        self.view.selected_tracks.clear();
+        self.view.track_anchor = None;
+        Ok(())
+    }
+
+    fn restore_deleted_tracks(&mut self) -> Result<(), String> {
+        let outcome = self
+            .studio
+            .execute(RestoreDeletedTracks { index: None }.into())
+            .map_err(|e| e.to_string())?;
+        if let Some(restored) = outcome.track {
+            self.view.selected_tracks = vec![restored];
+            self.view.track_anchor = Some(restored);
+            self.view.rack_track = Some(restored);
+        }
+        Ok(())
     }
 
     /// The clip the piano roll would open: the one being edited, else the

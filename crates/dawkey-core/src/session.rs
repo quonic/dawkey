@@ -34,6 +34,10 @@ pub struct Outcome {
     /// The plugin slot the command created, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin: Option<PluginId>,
+    /// Every plugin slot the command created, when it can make several
+    /// (duplicate_track, in the same order as the source track's own).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<PluginId>,
 }
 
 impl Outcome {
@@ -240,10 +244,12 @@ impl Session {
         self.states_changed |= changed;
     }
 
-    /// Every plugin slot in the project.
+    /// Every plugin slot in the project (including tracks in non-destructive
+    /// mixdown and deleted-track archives, so their states survive save and reload).
     fn plugin_ids(&self) -> Vec<PluginId> {
         self.project
             .all_tracks()
+            .chain(self.project.archived_tracks())
             .flat_map(|t| &t.plugins)
             .map(|p| p.id)
             .collect()
@@ -512,10 +518,10 @@ fn resolve_source_path(bundle: Option<&Path>, path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::command::{
-        AddClip, AddTrack, MoveClip, RemoveClip, RemoveTrack, RenameClip, RenameTrack, SetClipGain,
-        SetTempo, SetTrackGain,
+        AddClip, AddGuitarTrack, AddTrack, MoveClip, RemoveClip, RemoveTrack, RenameClip,
+        RenameTrack, SetClipGain, SetTempo, SetTrackGain,
     };
-    use crate::model::TrackKind;
+    use crate::model::{InputChannels, TrackKind};
 
     fn add(session: &mut Session, name: &str) -> TrackId {
         session
@@ -543,6 +549,53 @@ mod tests {
         assert_eq!(s.redo().unwrap().as_deref(), Some("add_track"));
         assert_eq!(s.project().tracks[0].id, id);
         assert_eq!(s.project().tracks[0].name, "Drums");
+    }
+
+    #[test]
+    fn add_guitar_track_is_armed_monitoring_and_mono_in_one_undo_step() {
+        let mut s = Session::default();
+        let id = s
+            .execute(AddGuitarTrack::default().into())
+            .unwrap()
+            .track
+            .unwrap();
+        let track = s.project().track(id).unwrap();
+        assert_eq!(track.name, "Guitar 1");
+        assert_eq!(track.kind, TrackKind::Audio);
+        assert!(track.armed);
+        assert!(track.monitor);
+        assert_eq!(track.input, InputChannels::Left);
+
+        // One undo step undoes the whole thing, not just the last field.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("add_guitar_track"));
+        assert!(s.project().tracks.is_empty());
+
+        // A second, unrelated session: a second default one gets its own
+        // number, and an explicit name and channel are honored.
+        let mut s = Session::default();
+        s.execute(AddGuitarTrack::default().into()).unwrap();
+        let second = s
+            .execute(
+                AddGuitarTrack {
+                    name: Some("Bass".into()),
+                    input: Some(InputChannels::Right),
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        assert_eq!(s.project().tracks[0].name, "Guitar 1");
+        let second = s.project().track(second).unwrap();
+        assert_eq!(second.name, "Bass");
+        assert_eq!(second.input, InputChannels::Right);
+        // A third default one skips the taken "Guitar 1".
+        let third = s
+            .execute(AddGuitarTrack::default().into())
+            .unwrap()
+            .track
+            .unwrap();
+        assert_eq!(s.project().track(third).unwrap().name, "Guitar 2");
     }
 
     #[test]
@@ -2472,6 +2525,666 @@ mod tests {
     }
 
     #[test]
+    fn saving_and_loading_a_rack_preset() {
+        use crate::command::{
+            AddPlugin, LoadSavedRackPreset, RemoveSavedRackPreset, SaveRackPreset, SetPluginParam,
+        };
+
+        let mut s = Session::default();
+        let gtr = add(&mut s, "Guitar");
+        let gate = s
+            .execute(
+                AddPlugin {
+                    track: gtr,
+                    plugin: "builtin:gate".into(),
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .plugin
+            .unwrap();
+        s.execute(SetPluginParam::new(gate, "threshold", -40.0).into())
+            .unwrap();
+        s.execute(
+            AddPlugin {
+                track: gtr,
+                plugin: "builtin:drive".into(),
+                index: None,
+            }
+            .into(),
+        )
+        .unwrap();
+        // An external plugin in the chain isn't part of what's saved.
+        s.execute(
+            AddPlugin {
+                track: gtr,
+                plugin: "clap:reverb".into(),
+                index: None,
+            }
+            .into(),
+        )
+        .unwrap();
+
+        // Saving with no builtin units at all is refused.
+        let empty = add(&mut s, "Empty");
+        assert!(
+            s.execute(
+                SaveRackPreset {
+                    track: empty,
+                    name: "Nothing".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+
+        s.execute(
+            SaveRackPreset {
+                track: gtr,
+                name: "My Tone".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().rack_presets.len(), 1);
+        assert_eq!(s.project().rack_presets[0].chain.len(), 2);
+        assert_eq!(s.project().rack_presets[0].chain[0].plugin, "builtin:gate");
+        assert_eq!(
+            s.project().rack_presets[0].chain[0].params["threshold"],
+            -40.0
+        );
+
+        // Saving again under the same name replaces it, not duplicates it.
+        s.execute(SetPluginParam::new(gate, "threshold", -30.0).into())
+            .unwrap();
+        s.execute(
+            SaveRackPreset {
+                track: gtr,
+                name: "My Tone".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().rack_presets.len(), 1);
+        assert_eq!(
+            s.project().rack_presets[0].chain[0].params["threshold"],
+            -30.0
+        );
+
+        // Loading it onto another track mounts the same builtin chain.
+        let other = add(&mut s, "Other");
+        s.execute(
+            LoadSavedRackPreset {
+                track: other,
+                name: "My Tone".into(),
+                replace: None,
+            }
+            .into(),
+        )
+        .unwrap();
+        let loaded = &s.project().track(other).unwrap().plugins;
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].plugin, "builtin:gate");
+        assert_eq!(loaded[0].params["threshold"], -30.0);
+        assert_eq!(loaded[1].plugin, "builtin:drive");
+
+        // One undo step undoes the whole load.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("load_saved_rack_preset"));
+        assert!(s.project().track(other).unwrap().plugins.is_empty());
+
+        // An unknown name is refused, for both loading and removing.
+        assert!(
+            s.execute(
+                LoadSavedRackPreset {
+                    track: other,
+                    name: "Nope".into(),
+                    replace: None,
+                }
+                .into(),
+            )
+            .is_err()
+        );
+        assert!(
+            s.execute(
+                RemoveSavedRackPreset {
+                    name: "Nope".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+
+        s.execute(
+            RemoveSavedRackPreset {
+                name: "My Tone".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert!(s.project().rack_presets.is_empty());
+    }
+
+    #[test]
+    fn add_drum_track_loads_a_kit_and_an_empty_clip_in_one_undo_step() {
+        use crate::command::{AddDrumTrack, DrumKit};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let id = outcome.track.unwrap();
+        let clip = outcome.clip.unwrap();
+        let track = s.project().track(id).unwrap();
+        assert_eq!(track.name, "Drums 1");
+        assert_eq!(track.kind, TrackKind::Midi);
+        assert_eq!(track.plugins[0].plugin, "builtin:drums");
+        // The 808 kit's chain is mounted: the instrument plus its processing.
+        assert!(track.plugins.len() > 1);
+        let (_, clip) = s.project().clip(clip).unwrap();
+        assert!(matches!(
+            &clip.content,
+            crate::model::ClipContent::Midi { notes, .. } if notes.is_empty()
+        ));
+
+        // One undo step undoes the whole thing: track, plugins and clip.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("add_drum_track"));
+        assert!(s.project().tracks.is_empty());
+
+        // A second track with an explicit kit.
+        let mut s = Session::default();
+        let id = s
+            .execute(
+                AddDrumTrack {
+                    name: None,
+                    kit: Some(DrumKit::Trap),
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        assert_eq!(
+            s.project().track(id).unwrap().plugins[0].params["kick_decay"],
+            260.0
+        );
+    }
+
+    #[test]
+    fn applying_a_drum_kit_requires_a_midi_track() {
+        use crate::command::{ApplyDrumKit, DrumKit};
+
+        let mut s = Session::default();
+        let audio = add(&mut s, "Not MIDI");
+        assert!(
+            s.execute(
+                ApplyDrumKit {
+                    track: audio,
+                    kit: DrumKit::Kit909,
+                }
+                .into(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn applying_a_drum_kit_keeps_the_instruments_plugin_id() {
+        // A kit change replaces the processing chain, but must not give
+        // the instrument itself a new ID: the sample kit a client picked
+        // for it (set_drum_sample_kit) is keyed by that ID, outside this
+        // Edit entirely, and would silently fall back to synthesis if the
+        // instrument's slot were recreated. Per-pad bus routing on that
+        // slot must also survive the kit change.
+        use crate::command::{AddDrumTrack, ApplyDrumKit, DrumKit, SetPluginOutput};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let track = outcome.track.unwrap();
+        let drums_id = s.project().track(track).unwrap().plugins[0].id;
+        let bus = s
+            .execute(
+                AddTrack {
+                    name: Some("Kick Bus".into()),
+                    kind: TrackKind::Bus,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        s.execute(
+            SetPluginOutput {
+                plugin: drums_id,
+                output: 0,
+                bus: Some(bus),
+            }
+            .into(),
+        )
+        .unwrap();
+
+        s.execute(
+            ApplyDrumKit {
+                track,
+                kit: DrumKit::Metal,
+            }
+            .into(),
+        )
+        .unwrap();
+        let after = s.project().track(track).unwrap();
+        assert_eq!(after.plugins[0].id, drums_id);
+        assert_eq!(after.plugins[0].plugin, "builtin:drums");
+        assert_eq!(after.plugins[0].outputs.get(&0), Some(&bus));
+        // The processing chain itself is still fully replaced.
+        assert_eq!(
+            after
+                .plugins
+                .iter()
+                .map(|p| p.plugin.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "builtin:drums",
+                "builtin:gate",
+                "builtin:comp",
+                "builtin:eq",
+                "builtin:drive"
+            ]
+        );
+    }
+
+    #[test]
+    fn applying_a_curated_drum_pattern_writes_sixteen_steps() {
+        use crate::command::{AddDrumTrack, ApplyDrumPattern, DrumPattern};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let clip = outcome.clip.unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FourOnTheFloor,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, clip_ref) = s.project().clip(clip).unwrap();
+        let notes = match &clip_ref.content {
+            crate::model::ClipContent::Midi { notes, .. } => notes,
+            _ => panic!("expected a MIDI clip"),
+        };
+        assert_eq!(notes.len(), 10);
+        // The kick lands on the quarter notes (steps 0, 4, 8, 12): frame 0,
+        // the first quarter, ...
+        assert_eq!(notes[0].pitch, 36);
+        assert_eq!(notes[0].start, 0);
+
+        // One undo step undoes the whole pattern.
+        assert_eq!(s.undo().unwrap().as_deref(), Some("apply_drum_pattern"));
+        let (_, clip_ref) = s.project().clip(clip).unwrap();
+        assert!(matches!(
+            &clip_ref.content,
+            crate::model::ClipContent::Midi { notes, .. } if notes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn saving_and_loading_a_drum_pattern() {
+        use crate::command::{
+            AddDrumTrack, ApplyDrumPattern, DrumPattern, LoadSavedDrumPattern,
+            RemoveSavedDrumPattern, SaveDrumPattern,
+        };
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let clip = outcome.clip.unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::BoomBap,
+            }
+            .into(),
+        )
+        .unwrap();
+
+        s.execute(
+            SaveDrumPattern {
+                clip,
+                name: "My Beat".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().drum_patterns.len(), 1);
+        assert_eq!(s.project().drum_patterns[0].steps.len(), 12);
+
+        // Loading it onto another clip writes the same steps.
+        let other_outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let other_clip = other_outcome.clip.unwrap();
+        s.execute(
+            LoadSavedDrumPattern {
+                clip: other_clip,
+                name: "My Beat".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, other_ref) = s.project().clip(other_clip).unwrap();
+        let other_notes = match &other_ref.content {
+            crate::model::ClipContent::Midi { notes, .. } => notes.clone(),
+            _ => panic!("expected a MIDI clip"),
+        };
+        let (_, first_ref) = s.project().clip(clip).unwrap();
+        let first_notes = match &first_ref.content {
+            crate::model::ClipContent::Midi { notes, .. } => notes.clone(),
+            _ => panic!("expected a MIDI clip"),
+        };
+        assert_eq!(other_notes.len(), first_notes.len());
+
+        // An unknown name is refused, for both loading and removing.
+        assert!(
+            s.execute(
+                LoadSavedDrumPattern {
+                    clip: other_clip,
+                    name: "Nope".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+        assert!(
+            s.execute(
+                RemoveSavedDrumPattern {
+                    name: "Nope".into(),
+                }
+                .into(),
+            )
+            .is_err()
+        );
+
+        s.execute(
+            RemoveSavedDrumPattern {
+                name: "My Beat".into(),
+            }
+            .into(),
+        )
+        .unwrap();
+        assert!(s.project().drum_patterns.is_empty());
+    }
+
+    #[test]
+    fn changing_the_meter_resizes_drum_clips_and_patterns_to_match() {
+        use crate::command::{AddDrumTrack, ApplyDrumPattern, DrumPattern, SetTimeSignature};
+
+        let mut s = Session::default();
+        let outcome = s.execute(AddDrumTrack::default().into()).unwrap();
+        let clip = outcome.clip.unwrap();
+        let per_beat = 24_000;
+        assert_eq!(s.project().clip(clip).unwrap().1.length, 4 * per_beat);
+
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FourOnTheFloor,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(s.project().clip(clip).unwrap().1.notes().len(), 10);
+
+        // Switching to 3/4 shrinks the drum clip to 3 beats and drops the
+        // 4th beat's notes; undoing restores both the length and notes.
+        s.execute(SetTimeSignature::new(3, 4).into()).unwrap();
+        let (_, shrunk) = s.project().clip(clip).unwrap();
+        assert_eq!(shrunk.length, 3 * per_beat);
+        assert!(shrunk.notes().iter().all(|n| n.start < 3 * per_beat));
+        assert_eq!(shrunk.notes().len(), 7);
+
+        s.undo().unwrap();
+        let (_, restored) = s.project().clip(clip).unwrap();
+        assert_eq!(restored.length, 4 * per_beat);
+        assert_eq!(restored.notes().len(), 10);
+
+        // Switching to 5/4 widens the drum clip to 5 beats, and applying a
+        // curated pattern fills the 5th beat too (step 16 at 4.0 beats).
+        s.execute(SetTimeSignature::new(5, 4).into()).unwrap();
+        assert_eq!(s.project().clip(clip).unwrap().1.length, 5 * per_beat);
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FourOnTheFloor,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, five_four) = s.project().clip(clip).unwrap();
+        assert_eq!(five_four.length, 5 * per_beat);
+        assert!(
+            five_four
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 36 && n.start == 4 * per_beat)
+        );
+    }
+
+    #[test]
+    fn meter_specific_drum_patterns_switch_meter_and_undo_together() {
+        use crate::{AddDrumTrack, AddMidiClip, ApplyDrumPattern, DrumPattern, TimeSignature};
+        let mut s = Session::default();
+        let track = s
+            .execute(
+                AddDrumTrack {
+                    name: None,
+                    kit: None,
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let clip = s
+            .execute(
+                AddMidiClip {
+                    track: Some(track),
+                    track_name: None,
+                    position_s: 0.0,
+                    length_s: None,
+                    notes: vec![],
+                    controls: vec![],
+                    muted: false,
+                    take: false,
+                }
+                .into(),
+            )
+            .unwrap()
+            .clip
+            .unwrap();
+        let per_beat = s.project().tempo_map().clip_frames(0, 1.0);
+        let step = per_beat / 4;
+
+        // 3/4 Waltz switches the meter from 4/4 and reverts in one undo.
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::Waltz,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 3,
+                denominator: 4,
+            }
+        );
+        let (_, waltz) = s.project().clip(clip).unwrap();
+        assert_eq!(waltz.length, 3 * per_beat);
+        assert!(waltz.notes().iter().any(|n| n.pitch == 36 && n.start == 0));
+        assert!(waltz.notes().iter().all(|n| n.start < 12 * step));
+
+        s.undo().unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 4,
+                denominator: 4,
+            }
+        );
+        let (_, reverted) = s.project().clip(clip).unwrap();
+        assert_eq!(reverted.length, 4 * per_beat);
+        assert!(reverted.notes().is_empty());
+
+        // 5/4, 7/8, and 12/8 patterns switch meter and populate their full bars.
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::TakeFive,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 5,
+                denominator: 4,
+            }
+        );
+        let (_, take_five) = s.project().clip(clip).unwrap();
+        assert_eq!(take_five.length, 5 * per_beat);
+        assert!(
+            take_five
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 51 && n.start == 19 * step)
+        );
+
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::ProgSevenEight,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 7,
+                denominator: 8,
+            }
+        );
+        let (_, seven_eight) = s.project().clip(clip).unwrap();
+        assert_eq!(seven_eight.length, 14 * step);
+        assert!(
+            seven_eight
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 45 && n.start == 13 * step)
+        );
+
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::TwelveEightShuffle,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(
+            s.project().time_signature,
+            TimeSignature {
+                numerator: 12,
+                denominator: 8,
+            }
+        );
+        let (_, twelve_eight) = s.project().clip(clip).unwrap();
+        assert_eq!(twelve_eight.length, 6 * per_beat);
+        assert!(
+            twelve_eight
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 38 && n.start == 23 * step)
+        );
+    }
+
+    #[test]
+    fn drum_fills_end_align_to_any_measure() {
+        use crate::{AddDrumTrack, AddMidiClip, ApplyDrumPattern, DrumPattern, SetTimeSignature};
+        let mut s = Session::default();
+        let track = s
+            .execute(
+                AddDrumTrack {
+                    name: None,
+                    kit: None,
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let clip = s
+            .execute(
+                AddMidiClip {
+                    track: Some(track),
+                    track_name: None,
+                    position_s: 0.0,
+                    length_s: None,
+                    notes: vec![],
+                    controls: vec![],
+                    muted: false,
+                    take: false,
+                }
+                .into(),
+            )
+            .unwrap()
+            .clip
+            .unwrap();
+        let step = s.project().tempo_map().clip_frames(0, 0.25);
+
+        // 3/4 (12 steps): FillSnareRoll's climax crash lands on step 11.
+        s.execute(SetTimeSignature::new(3, 4).into()).unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FillSnareRoll,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, three_four) = s.project().clip(clip).unwrap();
+        assert!(
+            three_four
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 49 && n.start == 11 * step),
+            "crash should land on step 11 in 3/4"
+        );
+
+        // 5/4 (20 steps): FillSnareRoll's crash lands on step 19 and keeps a beat-1 hit.
+        s.execute(SetTimeSignature::new(5, 4).into()).unwrap();
+        s.execute(
+            ApplyDrumPattern {
+                clip,
+                pattern: DrumPattern::FillSnareRoll,
+            }
+            .into(),
+        )
+        .unwrap();
+        let (_, five_four) = s.project().clip(clip).unwrap();
+        assert!(five_four.notes().iter().any(|n| n.start == 0));
+        assert!(
+            five_four
+                .notes()
+                .iter()
+                .any(|n| n.pitch == 49 && n.start == 19 * step),
+            "crash should land on step 19 in 5/4"
+        );
+    }
+
+    #[test]
     fn time_signature_changes() {
         use crate::command::NoteSpec;
         use crate::command::{
@@ -2953,5 +3666,442 @@ mod tests {
         assert_eq!(recovered.project(), s.project());
         assert_eq!(recovered.path(), Some(bundle.as_path()));
         assert!(recovered.is_dirty());
+    }
+
+    #[test]
+    fn archiving_and_restoring_mixdown_tracks_preserves_plugins_routing_and_states() {
+        use crate::{
+            AddDrumTrack, AddPlugin, ArchiveTracksForMixdown, PluginState, RestoreMixdownTracks,
+            SetPluginOutput, SetPluginSidechain, SetTrackSend,
+        };
+        let mut s = Session::default();
+        let bus = s
+            .execute(
+                AddTrack {
+                    name: Some("Drum Bus".into()),
+                    kind: TrackKind::Bus,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let drums = s
+            .execute(
+                AddDrumTrack {
+                    name: Some("Drums".into()),
+                    kit: None,
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let drum_plugin = s.project().track(drums).unwrap().plugins[0].id;
+        // Patch pad 0 of the drum instrument to the bus, and save binary state.
+        s.execute(
+            SetPluginOutput {
+                plugin: drum_plugin,
+                output: 0,
+                bus: Some(bus),
+            }
+            .into(),
+        )
+        .unwrap();
+        s.set_plugin_state(drum_plugin, Some(PluginState::new(vec![1, 2, 3, 4])));
+
+        // Another remaining track has a plugin sidechained from Drums, and sends to Drum Bus.
+        let bass = add(&mut s, "Bass");
+        let comp = s
+            .execute(
+                AddPlugin {
+                    track: bass,
+                    plugin: "builtin:comp".into(),
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .plugin
+            .unwrap();
+        s.execute(
+            SetPluginSidechain {
+                plugin: comp,
+                source: Some(drums),
+            }
+            .into(),
+        )
+        .unwrap();
+        s.execute(
+            SetTrackSend {
+                track: bass,
+                bus,
+                gain_db: Some(-6.0),
+                pre_fader: None,
+            }
+            .into(),
+        )
+        .unwrap();
+
+        let mix = add(&mut s, "Mixdown 1");
+        s.execute(
+            ArchiveTracksForMixdown {
+                mix_track: mix,
+                tracks: vec![bus, drums],
+            }
+            .into(),
+        )
+        .unwrap();
+
+        assert!(s.project().track(bus).is_none());
+        assert!(s.project().track(drums).is_none());
+        assert!(s.project().mixdown_archive(mix).is_some());
+        // Incoming routes from Bass were cleanly detached while archived.
+        let bass_now = s.project().track(bass).unwrap();
+        assert_eq!(bass_now.plugins[0].sidechain, None);
+        assert!(bass_now.sends.is_empty());
+
+        // Saving and reopening keeps the archived tracks' plugin states intact.
+        let dir = tempfile::tempdir().unwrap();
+        let saved = s.save(Some(&dir.path().join("Archived"))).unwrap();
+        let mut reopened = Session::open(&saved).unwrap();
+        assert_eq!(
+            reopened
+                .project()
+                .plugin_states
+                .get(&drum_plugin)
+                .map(PluginState::bytes),
+            Some([1, 2, 3, 4].as_slice())
+        );
+
+        // New tracks do not collide with archived track/plugin IDs.
+        let extra = add(&mut reopened, "Extra");
+        assert!(extra != bus && extra != drums);
+
+        // Restoring brings back both archived tracks, their per-pad bus routing,
+        // binary plugin state, and Bass's sidechain & send.
+        reopened
+            .execute(
+                RestoreMixdownTracks {
+                    mix_track: mix,
+                    remove_mix_track: true,
+                }
+                .into(),
+            )
+            .unwrap();
+        assert!(reopened.project().track(mix).is_none());
+        assert!(reopened.project().mixdown_archive(mix).is_none());
+        let restored_drums = reopened.project().track(drums).unwrap();
+        assert_eq!(restored_drums.plugins[0].outputs.get(&0), Some(&bus));
+        assert_eq!(
+            reopened
+                .project()
+                .plugin_states
+                .get(&drum_plugin)
+                .map(PluginState::bytes),
+            Some([1, 2, 3, 4].as_slice())
+        );
+        let restored_bass = reopened.project().track(bass).unwrap();
+        assert_eq!(restored_bass.plugins[0].sidechain, Some(drums));
+        assert_eq!(restored_bass.sends.len(), 1);
+        assert_eq!(restored_bass.sends[0].bus, bus);
+
+        // Undo re-archives them in one step; redo restores again.
+        reopened.undo().unwrap();
+        assert!(reopened.project().track(mix).is_some());
+        assert!(reopened.project().track(drums).is_none());
+        reopened.redo().unwrap();
+        assert!(reopened.project().track(mix).is_none());
+        assert!(reopened.project().track(drums).is_some());
+    }
+
+    #[test]
+    fn duplicate_track_copies_clips_plugins_and_automation_with_fresh_ids() {
+        use crate::{
+            AddDrumTrack, AddMidiNotes, AutomationTarget, DuplicateTrack, NoteSpec, PointSpec,
+            SetAutomation,
+        };
+        let mut s = Session::default();
+        let drums = s
+            .execute(
+                AddDrumTrack {
+                    name: Some("Drums".into()),
+                    kit: None,
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let old_plugin = s.project().track(drums).unwrap().plugins[0].id;
+        let clip = s.project().track(drums).unwrap().clips[0].id;
+        s.execute(
+            AddMidiNotes {
+                clip,
+                notes: vec![NoteSpec {
+                    pitch: 36,
+                    start_beats: 0.0,
+                    length_beats: 1.0,
+                    velocity: 100,
+                }],
+            }
+            .into(),
+        )
+        .unwrap();
+        s.execute(
+            SetAutomation {
+                track: drums,
+                target: AutomationTarget::Param {
+                    plugin: old_plugin,
+                    param: "gain".into(),
+                },
+                points: vec![PointSpec {
+                    time_s: 0.0,
+                    value: 0.5,
+                }],
+            }
+            .into(),
+        )
+        .unwrap();
+
+        let outcome = s
+            .execute(
+                DuplicateTrack {
+                    track: drums,
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap();
+        let new_track = outcome.track.unwrap();
+        assert_ne!(new_track, drums);
+        let source_plugin_count = s.project().track(drums).unwrap().plugins.len();
+        assert_eq!(outcome.plugins.len(), source_plugin_count);
+        // Plugin IDs come back in the same order as the source track's own,
+        // so index 0 is the duplicate of old_plugin (the drum instrument).
+        let new_plugin = outcome.plugins[0];
+        assert_ne!(new_plugin, old_plugin);
+
+        let project = s.project();
+        assert_eq!(project.track(new_track).unwrap().name, "Drums copy");
+        assert_eq!(
+            project.track_index(new_track),
+            project.track_index(drums).map(|i| i + 1)
+        );
+        let (orig_clip, new_clip) = (
+            &project.track(drums).unwrap().clips[0],
+            &project.track(new_track).unwrap().clips[0],
+        );
+        assert_ne!(orig_clip.id, new_clip.id);
+        assert_eq!(orig_clip.notes().len(), new_clip.notes().len());
+        let new_lane = &project.track(new_track).unwrap().automation[0];
+        assert_eq!(
+            new_lane.target,
+            AutomationTarget::Param {
+                plugin: new_plugin,
+                param: "gain".into()
+            }
+        );
+        // The source track's own automation still points at its own plugin.
+        let orig_lane = &project.track(drums).unwrap().automation[0];
+        assert_eq!(
+            orig_lane.target,
+            AutomationTarget::Param {
+                plugin: old_plugin,
+                param: "gain".into()
+            }
+        );
+
+        // Undo removes exactly the duplicate.
+        s.undo().unwrap();
+        assert!(s.project().track(new_track).is_none());
+        assert!(s.project().track(drums).is_some());
+    }
+
+    #[test]
+    fn deleting_tracks_archives_non_destructively_and_permanent_deletes_sources_and_archives() {
+        use crate::{
+            AddClip, AddDrumTrack, AddPlugin, ArchiveTracksForMixdown, DeleteTracks, PluginState,
+            RestoreDeletedTracks, SetPluginOutput, SetPluginSidechain, SetTrackSend,
+        };
+        let mut s = Session::default();
+        let bus = s
+            .execute(
+                AddTrack {
+                    name: Some("Drum Bus".into()),
+                    kind: TrackKind::Bus,
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let drums = s
+            .execute(
+                AddDrumTrack {
+                    name: Some("Drums".into()),
+                    kit: None,
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .track
+            .unwrap();
+        let drum_plugin = s.project().track(drums).unwrap().plugins[0].id;
+        s.execute(
+            SetPluginOutput {
+                plugin: drum_plugin,
+                output: 0,
+                bus: Some(bus),
+            }
+            .into(),
+        )
+        .unwrap();
+        s.set_plugin_state(drum_plugin, Some(PluginState::new(vec![9, 8, 7])));
+
+        let bass = add(&mut s, "Bass");
+        let comp = s
+            .execute(
+                AddPlugin {
+                    track: bass,
+                    plugin: "builtin:comp".into(),
+                    index: None,
+                }
+                .into(),
+            )
+            .unwrap()
+            .plugin
+            .unwrap();
+        s.execute(
+            SetPluginSidechain {
+                plugin: comp,
+                source: Some(drums),
+            }
+            .into(),
+        )
+        .unwrap();
+        s.execute(
+            SetTrackSend {
+                track: bass,
+                bus,
+                gain_db: Some(-3.0),
+                pre_fader: None,
+            }
+            .into(),
+        )
+        .unwrap();
+
+        // Non-destructive delete (default: permanent = false) archives tracks, plugins, and routes.
+        s.execute(
+            DeleteTracks {
+                tracks: vec![bus, drums],
+                permanent: false,
+            }
+            .into(),
+        )
+        .unwrap();
+        assert!(s.project().track(bus).is_none());
+        assert!(s.project().track(drums).is_none());
+        assert_eq!(s.project().deleted_track_archives.len(), 1);
+        assert_eq!(s.project().track(bass).unwrap().plugins[0].sidechain, None);
+        assert!(s.project().track(bass).unwrap().sends.is_empty());
+
+        // Saving and reloading preserves deleted tracks' plugin states and reserved IDs.
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let wav_only = src_dir.join("only.wav");
+        let wav_shared = src_dir.join("shared.wav");
+        let wav_mix = src_dir.join("mix.wav");
+        std::fs::write(&wav_only, b"only").unwrap();
+        std::fs::write(&wav_shared, b"shared").unwrap();
+        std::fs::write(&wav_mix, b"mix").unwrap();
+
+        let only_src = s.add_source("only", &wav_only, 2, 4800);
+        let shared_src = s.add_source("shared", &wav_shared, 2, 4800);
+        let mix_src = s.add_source("mix", &wav_mix, 2, 4800);
+        s.execute(AddClip::new(shared_src, Some(bass), 0.0).into())
+            .unwrap();
+        let saved = s.save(Some(&dir.path().join("DeletedTest"))).unwrap();
+        let mut reopened = Session::open(&saved).unwrap();
+        assert_eq!(
+            reopened
+                .project()
+                .plugin_states
+                .get(&drum_plugin)
+                .map(PluginState::bytes),
+            Some([9, 8, 7].as_slice())
+        );
+
+        // Restore brings back both deleted tracks, per-pad bus routing, state, and incoming routes.
+        let restored = reopened
+            .execute(RestoreDeletedTracks { index: None }.into())
+            .unwrap()
+            .track;
+        assert!(restored.is_some());
+        assert!(reopened.project().deleted_track_archives.is_empty());
+        assert_eq!(
+            reopened.project().track(drums).unwrap().plugins[0]
+                .outputs
+                .get(&0),
+            Some(&bus)
+        );
+        assert_eq!(
+            reopened.project().track(bass).unwrap().plugins[0].sidechain,
+            Some(drums)
+        );
+        assert_eq!(reopened.project().track(bass).unwrap().sends.len(), 1);
+
+        // Undo re-archives them; redo restores them again.
+        reopened.undo().unwrap();
+        assert!(reopened.project().track(drums).is_none());
+        assert_eq!(reopened.project().deleted_track_archives.len(), 1);
+        reopened.redo().unwrap();
+        assert!(reopened.project().track(drums).is_some());
+
+        // Permanent delete removes exclusive audio sources and attached mixdown archives,
+        // while keeping sources shared with remaining tracks.
+        let gtr = add(&mut reopened, "Guitar");
+        reopened
+            .execute(AddClip::new(only_src, Some(gtr), 0.0).into())
+            .unwrap();
+        reopened
+            .execute(AddClip::new(shared_src, Some(gtr), 0.2).into())
+            .unwrap();
+        let temp_src_track = add(&mut reopened, "Orig MixSrc");
+        reopened
+            .execute(AddClip::new(mix_src, Some(temp_src_track), 0.0).into())
+            .unwrap();
+        let mix = add(&mut reopened, "Mixdown Track");
+        reopened
+            .execute(
+                ArchiveTracksForMixdown {
+                    mix_track: mix,
+                    tracks: vec![temp_src_track],
+                }
+                .into(),
+            )
+            .unwrap();
+
+        reopened
+            .execute(
+                DeleteTracks {
+                    tracks: vec![gtr, mix],
+                    permanent: true,
+                }
+                .into(),
+            )
+            .unwrap();
+        assert!(reopened.project().track(gtr).is_none());
+        assert!(reopened.project().track(mix).is_none());
+        assert!(reopened.project().mixdown_archive(mix).is_none());
+        assert!(reopened.project().source(only_src).is_none());
+        assert!(reopened.project().source(mix_src).is_none());
+        assert!(reopened.project().source(shared_src).is_some());
     }
 }
