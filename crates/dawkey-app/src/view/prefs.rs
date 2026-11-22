@@ -11,7 +11,7 @@ use dawkey_ui::{
 
 use super::{ViewModel, button, text_field, toggle};
 use crate::mcp_http::{McpHttpState, mcp_url};
-use crate::prefs::{AudioChoice, ThemeChoice};
+use crate::prefs::{AudioChoice, LayoutChoice, ThemeChoice};
 use crate::state::{PrefsPage, TextField, ViewState};
 use crate::text_input::format_ms;
 use crate::theme::*;
@@ -169,6 +169,11 @@ pub(super) fn panel(
         ThemeChoice::System => "As the desktop",
         ThemeChoice::Dark => "Dark",
         ThemeChoice::Light => "Light",
+    };
+    let layout = match prefs.layout {
+        LayoutChoice::Standard => "One window",
+        LayoutChoice::MultiMonitor => "A window per monitor",
+        LayoutChoice::Widescreen => "Arrange, Rack and Mixer side by side",
     };
     let mut content = Node::column()
         .id("prefs")
@@ -328,7 +333,11 @@ pub(super) fn panel(
                         format!("{:.0}%", prefs.ui_scale * 100.0),
                     ),
                 ))
-                .child(note("Theme and scale apply immediately."));
+                .child(row(
+                    "Layout",
+                    choice("prefs/layout", "Layout", layout.to_owned()),
+                ))
+                .child(note("Theme and scale apply immediately. A window per monitor needs at least two monitors, and falls back to one window without them."));
         }
         PrefsPage::Mcp => {
             content = content
