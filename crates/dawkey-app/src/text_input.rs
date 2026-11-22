@@ -12,8 +12,8 @@
 //! type nothing).
 
 use dawkey_core::{
-    DEVICE_LATENCY_MS_MAX, RenameClip, RenameTrack, SetPluginParam, SetTempo, SetTimeSignature,
-    SetTrackMidiOutput, TEMPO_BPM_MAX, TEMPO_BPM_MIN,
+    DEVICE_LATENCY_MS_MAX, RenameClip, RenameTrack, SaveDrumPattern, SaveRackPreset,
+    SetPluginParam, SetTempo, SetTimeSignature, SetTrackMidiOutput, TEMPO_BPM_MAX, TEMPO_BPM_MIN,
 };
 use dawkey_ui::Modifiers;
 
@@ -33,6 +33,8 @@ pub(crate) fn field_id(field: &TextField) -> String {
         TextField::McpPort => "prefs/mcp_port".into(),
         TextField::TrackName(track) => format!("track/{track}/name"),
         TextField::ClipName(clip) => format!("clip/{clip}/name"),
+        TextField::RackPresetName(_) => "rack/save_name".into(),
+        TextField::DrumPatternName(_) => "step_seq/save_name".into(),
     }
 }
 
@@ -44,6 +46,8 @@ fn max_len(field: &TextField) -> usize {
         TextField::Tempo(_) | TextField::DeviceLatency(_) | TextField::RecordOffset => 10,
         TextField::PluginParam { .. } => 40,
         TextField::TrackName(_) | TextField::ClipName(_) => 256,
+        TextField::RackPresetName(_) => 64,
+        TextField::DrumPatternName(_) => 64,
     }
 }
 
@@ -51,7 +55,11 @@ fn max_len(field: &TextField) -> usize {
 fn free_text(field: &TextField) -> bool {
     matches!(
         field,
-        TextField::PluginParam { .. } | TextField::TrackName(_) | TextField::ClipName(_)
+        TextField::PluginParam { .. }
+            | TextField::TrackName(_)
+            | TextField::ClipName(_)
+            | TextField::RackPresetName(_)
+            | TextField::DrumPatternName(_)
     )
 }
 
@@ -135,6 +143,7 @@ impl App {
                     .ok_or_else(|| format!("clip {clip} does not exist"))?;
                 clip_label(project, track, c)
             }
+            TextField::RackPresetName(_) | TextField::DrumPatternName(_) => String::new(),
         };
         self.view.text_edit = Some(TextEdit {
             field,
@@ -306,6 +315,32 @@ impl App {
                     RenameClip {
                         clip,
                         name: text.to_owned(),
+                    }
+                    .into(),
+                )
+            }
+            TextField::RackPresetName(track) => {
+                let name = text.trim();
+                if name.is_empty() {
+                    return Ok(());
+                }
+                self.execute(
+                    SaveRackPreset {
+                        track,
+                        name: name.to_owned(),
+                    }
+                    .into(),
+                )
+            }
+            TextField::DrumPatternName(clip) => {
+                let name = text.trim();
+                if name.is_empty() {
+                    return Ok(());
+                }
+                self.execute(
+                    SaveDrumPattern {
+                        clip,
+                        name: name.to_owned(),
                     }
                     .into(),
                 )

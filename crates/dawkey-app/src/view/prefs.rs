@@ -67,7 +67,7 @@ pub(super) fn panel(
             .text(value)
             .width(Sizing::Fill(1.0))
             .height(Sizing::Fixed(26.0))
-            .padding(Insets::xy(10.0, 0.0))
+            .padding(Insets::xy(SPACING.lg, 0.0))
     };
     let switch = |id: &str, label: &str, on: bool| {
         toggle(
@@ -156,15 +156,15 @@ pub(super) fn panel(
         .accessible_label("Preferences")
         .clickable()
         .width(Sizing::Fixed(PANEL_W))
-        .padding(Insets::all(20.0))
-        .gap(2.0)
+        .padding(Insets::all(SPACING.xxl))
+        .gap(SPACING.xs)
         .align(Align::Start)
         .clip()
         .style(|s| {
             s.background = Some(pal().panel);
             s.border = Some((1.0, pal().border));
-            s.radius = [8.0; 4];
-            s.shadow = Some((12.0, pal().shadow));
+            s.radius = [PANEL_RADIUS; 4];
+            s.shadow = Some(ELEVATION.medium());
         })
         .child(
             Node::row()
@@ -231,7 +231,7 @@ pub(super) fn panel(
         .child(row(
             "Serve over HTTP",
             Node::row()
-                .gap(8.0)
+                .gap(SPACING.md)
                 .align(Align::Center)
                 .child(switch(
                     "prefs/mcp_http",
@@ -319,9 +319,9 @@ pub(super) fn panel(
     panel = panel.child(
         Node::row()
             .width(Sizing::Fill(1.0))
-            .gap(6.0)
+            .gap(SPACING.sm)
             .padding(Insets {
-                top: 6.0,
+                top: SPACING.sm,
                 ..Insets::default()
             })
             .child(small(ui, "prefs/plugins/add_clap", "Add CLAP folder…"))
@@ -350,7 +350,7 @@ pub(super) fn panel(
 fn small(ui: &UiState, id: &str, text: &str) -> Node {
     button(id, text, ui, None)
         .text(text)
-        .padding(Insets::xy(10.0, 0.0))
+        .padding(Insets::xy(SPACING.lg, 0.0))
         .height(Sizing::Fixed(26.0))
 }
 
@@ -360,7 +360,7 @@ fn folder_row(ui: &UiState, kind: &str, label: &str, n: usize, folder: &Path) ->
     Node::row()
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(26.0))
-        .gap(8.0)
+        .gap(SPACING.md)
         .align(Align::Center)
         .child(
             Node::label(label.to_owned())
