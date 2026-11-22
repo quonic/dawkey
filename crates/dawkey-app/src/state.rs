@@ -2,6 +2,7 @@
 //! UI state that isn't part of the project: which page is shown, zoom and
 //! scroll, selection, and gestures in progress.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use dawkey_core::{AutomationTarget, ClipId, Controller, NoteId, PluginId, TrackId};
@@ -63,6 +64,8 @@ pub(crate) const AUTO_H: f32 = 44.0;
 pub(crate) const TAKE_H: f32 = 48.0;
 /// Width of a plugin parameter slider in the plugin editor.
 pub(crate) const PARAM_W: f32 = 180.0;
+/// Pointer travel for a full sweep of a rotary rack knob.
+pub(crate) const KNOB_SPAN: f32 = 120.0;
 /// Height of the tempo lane under the ruler.
 pub(crate) const TEMPO_H: f32 = 44.0;
 /// Height of the time signature lane under the tempo lane.
@@ -74,8 +77,12 @@ pub enum Page {
     #[default]
     Arrange,
     Mixer,
+    /// 19-inch studio guitar effects rack for one track.
+    Rack,
     /// The MIDI note editor for one clip.
     PianoRoll,
+    /// The step grid editor for one drum machine clip.
+    StepSequencer,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +98,24 @@ pub(crate) enum Gesture {
         preview_track: TrackId,
         /// Ctrl is held: the clip stays and a copy goes there.
         copy: bool,
+    },
+    /// Dragging one of several selected clips moves them all together,
+    /// keeping their positions relative to each other and to each
+    /// other's track; committed as one `move_clip` per clip, batched into
+    /// a single undo step, on release. Doesn't avoid overlapping other
+    /// clips (unlike a single `Clip` move).
+    GroupMove {
+        /// The clip grabbed; dragging it defines the group's motion.
+        anchor: ClipId,
+        /// Pointer time minus the anchor's start when the drag began.
+        grab_s: f64,
+        /// Every selected clip, with its track's index into
+        /// `Project::tracks` and its start when the drag began.
+        members: Vec<(ClipId, usize, f64)>,
+        /// How far the group has moved so far: seconds, and track rows
+        /// (clamped so every member stays on a track of its own kind).
+        delta_s: f64,
+        delta_rows: i32,
     },
     /// Dragging across a take lane: on release, one `comp_take` makes the
     /// lane play over the range.
@@ -184,6 +209,16 @@ pub(crate) enum Gesture {
         from: (f64, i32),
         to: (f64, i32),
     },
+    /// Dragging a rectangle over the arrange timeline: the clips it
+    /// touches are selected (added to `base`, the selection before, with
+    /// Shift or Ctrl).
+    ClipMarquee {
+        base: Vec<ClipId>,
+        /// Corners as (time in seconds, lane content y: the track rows'
+        /// own unscrolled coordinate space, as `track_rows` returns it).
+        from: (f64, f32),
+        to: (f64, f32),
+    },
     /// Dragging a velocity bar: these notes (with their velocities before)
     /// change by `delta`; one `edit_midi_notes` on release.
     Velocity {
@@ -215,6 +250,7 @@ pub(crate) enum Gesture {
         min: f64,
         max: f64,
         stepped: bool,
+        knob: bool,
         merge_key: String,
     },
     /// Dragging the picker's or editor's scroll bar: the list scrolls by
@@ -286,6 +322,8 @@ pub(crate) enum ClipEdge {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingAction {
+    /// Starting a new, empty project.
+    NewProject,
     /// Opening another project.
     OpenProject,
     /// Closing the window (quitting).
@@ -324,6 +362,12 @@ pub enum TextField {
     TrackName(TrackId),
     /// A clip's name (empty: back to the default).
     ClipName(ClipId),
+    /// A name to save the rack track's current chain as a preset under.
+    RackPresetName(TrackId),
+    /// A name to save a drum clip's current steps as a pattern under.
+    DrumPatternName(ClipId),
+    /// The project's own name, shown in the window title.
+    ProjectName,
 }
 
 /// Slider position (0 to 1, cubic) of a MIDI device latency in ms.
@@ -538,7 +582,135 @@ pub(crate) enum RangeKind {
     Punch,
 }
 
-/// View settings and selection.
+/// Which tracks are shown/targeted by the right-click track context menu in
+/// the arrange view.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct TrackMenu {
+    pub track: TrackId,
+    pub pos: dawkey_ui::Point,
+}
+
+/// A small floating panel anchored on a track, opened from its context menu:
+/// a bus list ("Change Output…") or a color swatch grid ("Color").
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct TrackPopup {
+    pub kind: TrackPopupKind,
+    pub track: TrackId,
+    pub pos: dawkey_ui::Point,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackPopupKind {
+    Output,
+    Color,
+}
+
+/// The confirmation dialog for mixing selected tracks down into one audio
+/// track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MixdownConfirm {
+    pub tracks: Vec<TrackId>,
+    pub remove_originals: bool,
+}
+
+/// The confirmation dialog for deleting selected tracks (non-destructive
+/// archive by default, or permanent deletion when `permanent` is true).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeleteConfirm {
+    pub tracks: Vec<TrackId>,
+    pub permanent: bool,
+}
+
+/// State shared by every view open at once (one window with a page switcher
+/// today; a window or pane per view, once multi-monitor/widescreen layouts
+/// are built). Selection, the clipboard, confirmation/preferences/export
+/// dialogs and the transport's automation-write state are project-wide, not
+/// tied to whichever view is showing them.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SharedViewState {
+    /// Tracks selected in the arrange view (including buses).
+    pub selected_tracks: Vec<TrackId>,
+    /// Anchor track for Shift+click range selection in the arrange view.
+    #[serde(skip)]
+    pub(crate) track_anchor: Option<TrackId>,
+    pub selected_clip: Option<ClipId>,
+    /// Every clip selected in the arrange view, including `selected_clip`
+    /// (its most recently touched one, used for single-target actions
+    /// like rename or split): a click replaces it, Shift toggles a clip
+    /// in or out (Ctrl is reserved for dragging a copy of a clip), and
+    /// dragging a rectangle over empty timeline adds every clip it
+    /// touches. Dragging one of several selected clips moves them all
+    /// together.
+    pub selected_clips: Vec<ClipId>,
+    /// The clip Ctrl+C copied, which Ctrl+V pastes.
+    pub clipboard: Option<ClipId>,
+    /// Open confirmation dialog for mixing down selected tracks.
+    pub mixdown_confirm: Option<MixdownConfirm>,
+    /// Open confirmation dialog for deleting selected tracks.
+    pub delete_confirm: Option<DeleteConfirm>,
+    /// The "save changes?" dialog is open, before doing this.
+    pub confirm: Option<PendingAction>,
+    /// A field being typed in.
+    pub text_edit: Option<TextEdit>,
+    /// Unsaved changes to offer to recover (the dialog is open).
+    pub recovery: Option<dawkey_studio::Recovery>,
+    /// The preferences panel is open.
+    pub prefs_open: bool,
+    /// Current category in the Preferences panel.
+    pub prefs_page: PrefsPage,
+    /// The export dialog is open.
+    pub export_dialog: bool,
+    /// What the export dialog exports (kept between exports).
+    pub export: ExportSettings,
+    /// Moving faders, pan and plugin parameters while playing writes
+    /// automation (the transport's "Auto").
+    pub automation_write: bool,
+    /// How it writes (the button next to "Auto").
+    pub automation_mode: AutomationMode,
+    /// The automation being written: the current gesture's, and in latch
+    /// and write modes every lane written since playback started.
+    #[serde(skip)]
+    pub(crate) writing: Vec<AutomationWrite>,
+    /// The write pass going on (latch and write modes), from the first
+    /// lane it wrote until the transport stops.
+    #[serde(skip)]
+    pub(crate) pass: Option<AutomationPass>,
+    /// Write passes so far, so each has its own undo step.
+    #[serde(skip)]
+    pub(crate) passes: u32,
+}
+
+impl Default for SharedViewState {
+    fn default() -> Self {
+        Self {
+            selected_tracks: Vec::new(),
+            track_anchor: None,
+            selected_clip: None,
+            selected_clips: Vec::new(),
+            clipboard: None,
+            mixdown_confirm: None,
+            delete_confirm: None,
+            confirm: None,
+            text_edit: None,
+            recovery: None,
+            prefs_open: false,
+            prefs_page: PrefsPage::AudioMidi,
+            export_dialog: false,
+            export: ExportSettings::default(),
+            automation_write: false,
+            automation_mode: AutomationMode::default(),
+            writing: Vec::new(),
+            pass: None,
+            passes: 0,
+        }
+    }
+}
+
+/// View settings and selection local to one view (Arrange, Mixer, Rack, …).
+/// `App` holds one today; a window or pane per view will hold one each once
+/// multi-monitor/widescreen layouts are built, all reading the one
+/// [`SharedViewState`].
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ViewState {
     pub page: Page,
@@ -548,9 +720,10 @@ pub struct ViewState {
     pub scroll_s: f64,
     /// Vertical scroll of the track lanes, in logical px.
     pub scroll_y: f32,
-    pub selected_clip: Option<ClipId>,
-    /// The clip Ctrl+C copied, which Ctrl+V pastes.
-    pub clipboard: Option<ClipId>,
+    /// Open right-click context menu on a track header in the arrange view.
+    pub track_menu: Option<TrackMenu>,
+    /// Open "Change Output…" or "Color" popup from the track context menu.
+    pub track_popup: Option<TrackPopup>,
     /// Snap clip moves to beats.
     pub snap: bool,
     /// The MIDI clip open in the piano roll.
@@ -576,6 +749,14 @@ pub struct ViewState {
     pub plugin_editor: Option<PluginId>,
     /// Vertical scroll of the open picker or editor, in logical px.
     pub overlay_scroll: f32,
+    /// Which track's effects rack is shown in `Page::Rack`.
+    pub rack_track: Option<TrackId>,
+    /// Vertical scroll of the 19-inch rack bay, in logical px.
+    pub rack_scroll: f32,
+    /// Current parameter page (0-based, 8 knobs per page) for external
+    /// plugins in the rack.
+    #[serde(skip)]
+    pub(crate) rack_pages: BTreeMap<PluginId, usize>,
     /// Tracks showing their automation lanes.
     pub automation_shown: Vec<TrackId>,
     /// Tracks showing their take lanes.
@@ -594,36 +775,23 @@ pub struct ViewState {
     /// (its bar from 0) is, to find it again by when the project changes.
     #[serde(skip)]
     pub(crate) marker_anchor: f64,
-    /// The "save changes?" dialog is open, before doing this.
-    pub confirm: Option<PendingAction>,
-    /// A field being typed in.
-    pub text_edit: Option<TextEdit>,
-    /// Unsaved changes to offer to recover (the dialog is open).
-    pub recovery: Option<dawkey_studio::Recovery>,
-    /// The preferences panel is open.
-    pub prefs_open: bool,
-    /// The export dialog is open.
-    pub export_dialog: bool,
-    /// What the export dialog exports (kept between exports).
-    pub export: ExportSettings,
-    /// Moving faders, pan and plugin parameters while playing writes
-    /// automation (the transport's "Auto").
-    pub automation_write: bool,
-    /// How it writes (the button next to "Auto").
-    pub automation_mode: AutomationMode,
     #[serde(skip)]
     pub(crate) gesture: Option<Gesture>,
-    /// The automation being written: the current gesture's, and in latch
-    /// and write modes every lane written since playback started.
-    #[serde(skip)]
-    pub(crate) writing: Vec<AutomationWrite>,
-    /// The write pass going on (latch and write modes), from the first
-    /// lane it wrote until the transport stops.
-    #[serde(skip)]
-    pub(crate) pass: Option<AutomationPass>,
-    /// Write passes so far, so each has its own undo step.
-    #[serde(skip)]
-    pub(crate) passes: u32,
+    /// State shared with every other view open at once. See
+    /// [`SharedViewState`]. Flattened so `ViewState`'s JSON shape (over MCP)
+    /// is unchanged by this split.
+    #[serde(flatten)]
+    pub shared: SharedViewState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum PrefsPage {
+    #[default]
+    AudioMidi,
+    Plugins,
+    ProjectSafety,
+    Appearance,
+    Mcp,
 }
 
 /// What the export dialog writes.
@@ -730,8 +898,8 @@ impl Default for ViewState {
             px_per_s: 80.0,
             scroll_s: 0.0,
             scroll_y: 0.0,
-            selected_clip: None,
-            clipboard: None,
+            track_menu: None,
+            track_popup: None,
             snap: true,
             editing_clip: None,
             selected_notes: Vec::new(),
@@ -744,6 +912,9 @@ impl Default for ViewState {
             picker_selected: 0,
             plugin_editor: None,
             overlay_scroll: 0.0,
+            rack_track: None,
+            rack_scroll: 0.0,
+            rack_pages: BTreeMap::new(),
             automation_shown: Vec::new(),
             takes_shown: Vec::new(),
             selected_point: None,
@@ -751,18 +922,8 @@ impl Default for ViewState {
             tempo_shown: false,
             selected_marker: None,
             marker_anchor: 0.0,
-            confirm: None,
-            text_edit: None,
-            recovery: None,
-            prefs_open: false,
-            export_dialog: false,
-            export: ExportSettings::default(),
-            automation_write: false,
-            automation_mode: AutomationMode::default(),
             gesture: None,
-            writing: Vec::new(),
-            pass: None,
-            passes: 0,
+            shared: SharedViewState::default(),
         }
     }
 }

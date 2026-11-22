@@ -4,7 +4,7 @@
 use serde::Serialize;
 
 use crate::geometry::{Color, Point, Rect, Size};
-use crate::node::{Icon, Node, Paint, TextAlign};
+use crate::node::{Direction, Icon, Node, Paint, TextAlign};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +39,16 @@ pub enum Primitive {
         /// Corner radii: top-left, top-right, bottom-right, bottom-left.
         radius: [f32; 4],
         border: Option<(f32, Color)>,
+        clip: Option<Rect>,
+    },
+    /// A linear two-color fill, `start` to `end` along `direction` (`Row`:
+    /// left to right, `Column`: top to bottom). No border.
+    Gradient {
+        rect: Rect,
+        start: Color,
+        end: Color,
+        direction: Direction,
+        radius: [f32; 4],
         clip: Option<Rect>,
     },
     /// A soft drop shadow around `rect`.
@@ -100,7 +110,16 @@ impl Scene {
                 color,
             });
         }
-        if let Some(bg) = style.background {
+        if let (Some(bg), Some((end, direction))) = (style.background, style.gradient) {
+            self.primitives.push(Primitive::Gradient {
+                rect,
+                start: bg,
+                end,
+                direction,
+                radius: style.radius,
+                clip,
+            });
+        } else if let Some(bg) = style.background {
             self.primitives.push(Primitive::Rect {
                 rect,
                 color: bg,
@@ -124,7 +143,17 @@ impl Scene {
                 levels,
                 vertical,
                 background,
-            }) => self.meter(*levels, *vertical, *background, content, clip),
+                low,
+                mid,
+                high,
+            }) => self.meter(
+                *levels,
+                *vertical,
+                *background,
+                (*low, *mid, *high),
+                content,
+                clip,
+            ),
             Some(Paint::Waveform { columns, color }) => {
                 self.waveform(columns, *color, content, clip)
             }
@@ -149,6 +178,17 @@ impl Scene {
                     });
                 }
             }
+            Some(Paint::Knob {
+                value,
+                default,
+                bipolar,
+                accent,
+                body,
+                rim,
+                tick,
+            }) => self.knob(
+                *value, *default, *bipolar, *accent, *body, *rim, *tick, content, clip,
+            ),
             None => {}
         }
         if let Some(text) = &node.text {
@@ -264,6 +304,7 @@ impl Scene {
         levels: [f32; 2],
         vertical: bool,
         background: Color,
+        (low, mid, high): (Color, Color, Color),
         area: Rect,
         clip: Option<Rect>,
     ) {
@@ -286,11 +327,11 @@ impl Scene {
             let level = level.clamp(0.0, 1.0);
             if level > 0.0 {
                 let color = if level > 0.95 {
-                    Color::hex(0xe5484d)
+                    high
                 } else if level > 0.8 {
-                    Color::hex(0xf0b429)
+                    mid
                 } else {
-                    Color::hex(0x3dd68c)
+                    low
                 };
                 let fill = if vertical {
                     let h = track.h * level;
@@ -330,5 +371,100 @@ impl Scene {
                 clip,
             });
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn knob(
+        &mut self,
+        value: f32,
+        default: f32,
+        bipolar: bool,
+        accent: Color,
+        body: Color,
+        rim: Color,
+        tick: Color,
+        area: Rect,
+        clip: Option<Rect>,
+    ) {
+        let value = value.clamp(0.0, 1.0);
+        let default = default.clamp(0.0, 1.0);
+        let c = area.center();
+        let r = (area.w.min(area.h) * 0.5 - 1.0).max(8.0);
+        let knob_r = (r - 4.5).max(5.0);
+        let start_angle = 135.0_f32.to_radians();
+        let sweep = 270.0_f32.to_radians();
+        let angle_at = |u: f32| start_angle + u * sweep;
+
+        // 11 scale ticks around the 270-degree travel.
+        for i in 0..=10 {
+            let t = i as f32 / 10.0;
+            let lit = if bipolar {
+                if value >= 0.5 {
+                    t >= 0.49 && t <= value + 0.02
+                } else {
+                    t <= 0.51 && t >= value - 0.02
+                }
+            } else {
+                t <= value + 0.02 && (value > 0.01 || i == 0)
+            };
+            let a = angle_at(t);
+            let (sin, cos) = a.sin_cos();
+            let p0 = Point::new(c.x + cos * (r - 2.6), c.y + sin * (r - 2.6));
+            let p1 = Point::new(c.x + cos * r, c.y + sin * r);
+            self.line(
+                p0,
+                p1,
+                if lit { 1.6 } else { 1.1 },
+                if lit { accent } else { tick },
+                clip,
+            );
+        }
+
+        // Subtle marker dot at the parameter's default position.
+        let def_a = angle_at(default);
+        let def_dot = Point::new(c.x + def_a.cos() * (r - 1.2), c.y + def_a.sin() * (r - 1.2));
+        self.primitives.push(Primitive::Rect {
+            rect: Rect::new(def_dot.x - 1.0, def_dot.y - 1.0, 2.0, 2.0),
+            color: rim.mix(accent, 0.45),
+            radius: [1.0; 4],
+            border: None,
+            clip,
+        });
+
+        let knob_rect = Rect::new(c.x - knob_r, c.y - knob_r, knob_r * 2.0, knob_r * 2.0);
+        self.primitives.push(Primitive::Shadow {
+            rect: Rect::new(knob_rect.x, knob_rect.y + 1.5, knob_rect.w, knob_rect.h),
+            radius: knob_r,
+            blur: 4.0,
+            color: Color::rgba(0.0, 0.0, 0.0, 0.45),
+        });
+        self.primitives.push(Primitive::Rect {
+            rect: knob_rect,
+            color: body,
+            radius: [knob_r; 4],
+            border: Some((1.5, rim)),
+            clip,
+        });
+
+        let cap_r = knob_r * 0.72;
+        self.primitives.push(Primitive::Rect {
+            rect: Rect::new(c.x - cap_r, c.y - cap_r, cap_r * 2.0, cap_r * 2.0),
+            color: body.mix(rim, 0.2),
+            radius: [cap_r; 4],
+            border: None,
+            clip,
+        });
+
+        let a = angle_at(value);
+        let (sin, cos) = a.sin_cos();
+        let inner = knob_r * 0.20;
+        let outer = knob_r - 1.5;
+        self.line(
+            Point::new(c.x + cos * inner, c.y + sin * inner),
+            Point::new(c.x + cos * outer, c.y + sin * outer),
+            2.0,
+            accent,
+            clip,
+        );
     }
 }

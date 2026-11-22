@@ -4,7 +4,8 @@
 
 use dawkey_core::{GAIN_DB_MAX, GAIN_DB_MIN};
 use dawkey_ui::{
-    Align, FontFamily, FontWeight, Insets, Node, Rect, Role, Sizing, TextAlign, UiState,
+    Align, Color, Direction, FontFamily, FontWeight, Insets, Node, Rect, Role, Sizing, TextAlign,
+    UiState,
 };
 
 use super::{TrackView, ViewModel, button, meter, name_editor, track_buttons};
@@ -263,10 +264,16 @@ fn fader(track: &TrackView, ui: &UiState) -> Node {
         .draggable()
         .size(28.0, FADER_H)
         .child(
-            // Groove.
+            // Groove: a faint vertical shade suggests it's recessed.
             Node::row()
                 .background(pal().panel)
-                .style(|s| s.radius = [2.0; 4])
+                .style(|s| {
+                    s.gradient = Some((
+                        pal().panel.mix(Color::hex(0x000000), 0.18),
+                        Direction::Column,
+                    ));
+                    s.radius = [2.0; 4];
+                })
                 .absolute(Rect::new(12.0, 0.0, 4.0, FADER_H)),
         )
         .child(

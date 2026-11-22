@@ -35,7 +35,7 @@ impl App {
     /// without exiting cleanly kept, of the project it opened, or (with
     /// none) of a never-saved project.
     pub fn offer_recovery(&mut self) {
-        self.view.recovery = match self.studio.session().path() {
+        self.view.shared.recovery = match self.studio.session().path() {
             Some(_) => self.studio.bundle_recovery(),
             None => self.studio.orphan_recovery(),
         };
@@ -47,7 +47,7 @@ impl App {
             ["recover"] | ["recover", "backdrop"] => Ok(()),
             ["recover", "recover"] => self.recover(),
             ["recover", "discard"] => {
-                if let Some(recovery) = self.view.recovery.take() {
+                if let Some(recovery) = self.view.shared.recovery.take() {
                     Studio::discard_recovery(&recovery);
                 }
                 Ok(())
@@ -58,7 +58,7 @@ impl App {
 
     /// While the dialog is open it takes every key: Return recovers.
     pub(crate) fn on_recovery_key(&mut self, key: &str) -> Option<Result<(), String>> {
-        self.view.recovery.as_ref()?;
+        self.view.shared.recovery.as_ref()?;
         Some(match key {
             "return" => self.recover(),
             _ => Ok(()),
@@ -66,15 +66,16 @@ impl App {
     }
 
     fn recover(&mut self) -> Result<(), String> {
-        let Some(recovery) = self.view.recovery.take() else {
+        let Some(recovery) = self.view.shared.recovery.take() else {
             return Ok(());
         };
         self.studio.recover(&recovery).map_err(|e| e.to_string())?;
+        let export = self.view.shared.export;
         self.view = crate::state::ViewState {
             page: self.view.page,
-            export: self.view.export,
             ..Default::default()
         };
+        self.view.shared.export = export;
         self.message = Some("Recovered the unsaved changes".into());
         Ok(())
     }

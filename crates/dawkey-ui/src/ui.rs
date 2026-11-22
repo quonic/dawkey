@@ -416,22 +416,51 @@ impl Ui {
         actions
     }
 
-    /// Simulates a click at the center of widget `id` (for tests and MCP).
-    /// Fails if the widget doesn't exist or isn't clickable there.
+    /// Simulates a click at an unobstructed point of widget `id` (its center,
+    /// or another exposed point inside its rectangle if a child control sits at
+    /// the center). Fails if no point on `id` is clickable.
     pub fn click(
         &mut self,
         id: &str,
         button: MouseButton,
         time_ms: u32,
     ) -> Result<Vec<UiAction>, String> {
-        let pos = self.widget_center(id)?;
-        let hit = self.hit_test(pos).and_then(|n| n.id.clone());
-        if hit.as_ref().map(WidgetId::as_str) != Some(id) {
-            return Err(format!(
-                "widget {id:?} is not clickable at its center (hit: {:?})",
-                hit.map(|h| h.to_string())
-            ));
-        }
+        let center = self.widget_center(id)?;
+        let hits_self = |p: Point| {
+            self.hit_test(p)
+                .and_then(|n| n.id.as_ref())
+                .map(WidgetId::as_str)
+                == Some(id)
+        };
+        let pos = if hits_self(center) {
+            center
+        } else {
+            let rect = self.find(id).expect("checked in widget_center").rect;
+            let mut candidates = vec![
+                Point::new(rect.x + rect.w - 6.0, rect.y + rect.h * 0.5),
+                Point::new(center.x, rect.y + 3.0),
+                Point::new(center.x, rect.y + rect.h - 3.0),
+                Point::new(rect.x + 6.0, center.y),
+            ];
+            for fy in [0.25, 0.5, 0.75] {
+                for fx in [0.15, 0.5, 0.85, 0.95] {
+                    candidates.push(Point::new(rect.x + rect.w * fx, rect.y + rect.h * fy));
+                }
+            }
+            match candidates
+                .into_iter()
+                .find(|&p| rect.contains(p) && hits_self(p))
+            {
+                Some(p) => p,
+                None => {
+                    let hit = self.hit_test(center).and_then(|n| n.id.clone());
+                    return Err(format!(
+                        "widget {id:?} is not clickable at its center (hit: {:?})",
+                        hit.map(|h| h.to_string())
+                    ));
+                }
+            }
+        };
         Ok(self.click_at(pos, button, time_ms))
     }
 

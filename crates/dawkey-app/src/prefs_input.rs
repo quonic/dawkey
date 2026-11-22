@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 
 use crate::App;
 use crate::prefs::{
-    AUTOSAVE_MINUTES, AudioChoice, PluginKind, Preferences, ThemeChoice, UI_SCALES,
+    AUTOSAVE_MINUTES, AudioChoice, LayoutChoice, PluginKind, Preferences, ThemeChoice, UI_SCALES,
 };
-use crate::state::{PlatformRequest, TextField};
+use crate::state::{PlatformRequest, PrefsPage, TextField};
 
 impl App {
     /// Uses `prefs`, saving changes to `path` (`None`: nowhere).
@@ -53,13 +53,16 @@ impl App {
         if all || prefs.theme != before.theme {
             self.apply_theme();
         }
+        if all || prefs.layout != before.layout {
+            self.apply_layout();
+        }
         if all || (prefs.mcp_http, prefs.mcp_http_port) != (before.mcp_http, before.mcp_http_port) {
             self.apply_mcp_http();
         }
     }
 
     /// Changes the preferences with `change`, applies and saves them.
-    fn change_preferences(&mut self, change: impl FnOnce(&mut Preferences)) {
+    pub(crate) fn change_preferences(&mut self, change: impl FnOnce(&mut Preferences)) {
         let before = self.prefs.clone();
         change(&mut self.prefs);
         if self.prefs == before {
@@ -75,7 +78,7 @@ impl App {
 
     pub(crate) fn open_preferences(&mut self) {
         self.close_overlays();
-        self.view.prefs_open = true;
+        self.view.shared.prefs_open = true;
     }
 
     /// Clicks on the preferences panel and the button that opens it.
@@ -91,8 +94,20 @@ impl App {
                 Ok(())
             }
             ["prefs"] => Ok(()),
+            ["prefs", "page", page] => {
+                self.view.shared.prefs_page = match *page {
+                    "audio_midi" => PrefsPage::AudioMidi,
+                    "plugins" => PrefsPage::Plugins,
+                    "project_safety" => PrefsPage::ProjectSafety,
+                    "appearance" => PrefsPage::Appearance,
+                    "mcp" => PrefsPage::Mcp,
+                    _ => return None,
+                };
+                self.view.shared.text_edit = None;
+                Ok(())
+            }
             ["prefs", "close" | "backdrop"] => {
-                self.view.prefs_open = false;
+                self.view.shared.prefs_open = false;
                 Ok(())
             }
             ["prefs", "audio"] => {
@@ -129,6 +144,16 @@ impl App {
                         ThemeChoice::System => ThemeChoice::Dark,
                         ThemeChoice::Dark => ThemeChoice::Light,
                         ThemeChoice::Light => ThemeChoice::System,
+                    }
+                });
+                Ok(())
+            }
+            ["prefs", "layout"] => {
+                self.change_preferences(|p| {
+                    p.layout = match p.layout {
+                        LayoutChoice::Standard => LayoutChoice::MultiMonitor,
+                        LayoutChoice::MultiMonitor => LayoutChoice::Widescreen,
+                        LayoutChoice::Widescreen => LayoutChoice::Standard,
                     }
                 });
                 Ok(())
@@ -203,11 +228,11 @@ impl App {
     /// Keys while the panel is open: Escape closes it, and nothing else
     /// gets through to the window behind it. `None` if it's closed.
     pub(crate) fn on_prefs_key(&mut self, key: &str) -> Option<Result<(), String>> {
-        if !self.view.prefs_open {
+        if !self.view.shared.prefs_open {
             return None;
         }
         if key == "escape" {
-            self.view.prefs_open = false;
+            self.view.shared.prefs_open = false;
         }
         Some(Ok(()))
     }

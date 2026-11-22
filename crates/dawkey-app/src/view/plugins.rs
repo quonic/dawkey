@@ -144,15 +144,15 @@ fn panel(id: &str, label: &str) -> Node {
         .style(|s| {
             s.background = Some(pal().panel);
             s.border = Some((1.0, pal().border));
-            s.radius = [8.0; 4];
-            s.shadow = Some((12.0, pal().shadow));
+            s.radius = [PANEL_RADIUS; 4];
+            s.shadow = Some(ELEVATION.medium());
         })
 }
 
 fn header(title: String, subtitle: String) -> Node {
     Node::column()
         .align(dawkey_ui::Align::Start)
-        .gap(2.0)
+        .gap(SPACING.xs)
         .child(Node::label(title).style(|s| {
             s.color = pal().text;
             s.weight = FontWeight::SemiBold;
@@ -166,7 +166,7 @@ fn header(title: String, subtitle: String) -> Node {
 fn small_button(id: &str, label: &str, text: &str, ui: &UiState) -> Node {
     button(id, label, ui, None)
         .text(text)
-        .padding(Insets::xy(10.0, 0.0))
+        .padding(Insets::xy(SPACING.lg, 0.0))
         .height(Sizing::Fixed(26.0))
 }
 
@@ -197,8 +197,8 @@ fn picker(
     let top = Node::row()
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(HEADER_H))
-        .padding(Insets::xy(14.0, 0.0))
-        .gap(6.0)
+        .padding(Insets::xy(SPACING.xl, 0.0))
+        .gap(SPACING.sm)
         .background(pal().toolbar)
         .child(header(
             "Add a plugin".to_owned(),
@@ -272,8 +272,8 @@ fn picker(
                         s.background = Some(pal().accent.with_alpha(0.25));
                     }
                 })
-                .padding(Insets::xy(10.0, 0.0))
-                .gap(10.0)
+                .padding(Insets::xy(SPACING.lg, 0.0))
+                .gap(SPACING.lg)
                 .absolute(Rect::new(
                     8.0,
                     y,
@@ -330,7 +330,7 @@ fn search(view: &ViewState, found: usize) -> Node {
         .clickable()
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(26.0))
-        .padding(Insets::xy(8.0, 0.0))
+        .padding(Insets::xy(SPACING.md, 0.0))
         .gap(1.0)
         .clip()
         .style(|s| {
@@ -354,8 +354,8 @@ fn search(view: &ViewState, found: usize) -> Node {
     Node::row()
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(SEARCH_H))
-        .padding(Insets::xy(14.0, 0.0))
-        .gap(8.0)
+        .padding(Insets::xy(SPACING.xl, 0.0))
+        .gap(SPACING.md)
         .child(field)
         .child(Node::label(count).style(|s| {
             s.color = pal().text_dim;
@@ -384,7 +384,7 @@ fn routing(model: &ViewModel, ui: &UiState, d: &dawkey_studio::PluginDetails) ->
         .value(text.clone())
         .text(format!("{label}: {text}"))
         .clip()
-        .padding(Insets::xy(8.0, 0.0))
+        .padding(Insets::xy(SPACING.md, 0.0))
         .height(Sizing::Fixed(24.0))
         .style(|s| s.font_size = 11.0)
     };
@@ -392,8 +392,8 @@ fn routing(model: &ViewModel, ui: &UiState, d: &dawkey_studio::PluginDetails) ->
         .id("plugin_editor/routing")
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(ROUTING_H))
-        .padding(Insets::xy(14.0, 0.0))
-        .gap(6.0)
+        .padding(Insets::xy(SPACING.xl, 0.0))
+        .gap(SPACING.sm)
         .clip()
         .style(|s| s.background = Some(pal().toolbar.mix(pal().panel, 0.5)));
     if d.has_sidechain {
@@ -430,8 +430,8 @@ fn editor(
     let top = Node::row()
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(HEADER_H))
-        .padding(Insets::xy(14.0, 0.0))
-        .gap(6.0)
+        .padding(Insets::xy(SPACING.xl, 0.0))
+        .gap(SPACING.sm)
         .background(pal().toolbar)
         .child(header(d.name.clone(), subtitle))
         .child(Node::spacer())
@@ -506,7 +506,7 @@ fn editor(
         };
         let active = ui.is_pressed(&slider_id) || ui.is_hovered(&slider_id);
         let text = p.text.clone();
-        let typing = view.text_edit.as_ref().filter(|e| {
+        let typing = view.shared.text_edit.as_ref().filter(|e| {
             matches!(&e.field, TextField::PluginParam { plugin, param }
                 if *plugin == d.plugin && *param == p.id)
         });
