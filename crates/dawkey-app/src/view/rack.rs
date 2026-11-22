@@ -45,6 +45,35 @@ pub(crate) fn content_height<'a>(unit_ids: impl IntoIterator<Item = &'a str>) ->
     BAY_PAD * 2.0 + units_h + BLANK_H
 }
 
+/// Approximate natural height of the sidebar's content, for clamping
+/// `rack_sidebar_scroll`. Not pixel-exact (it doesn't replicate every
+/// padding and gap the view itself uses), but close enough that scrolling
+/// never gets stuck short of the last button. `track_count` doesn't
+/// include the master (the sidebar always adds one row for it).
+pub(crate) fn sidebar_content_height(track_count: usize, saved_preset_count: usize) -> f32 {
+    const SECTION_H: f32 = 20.0;
+    const SECTION_GAP: f32 = 6.0;
+    let tracks_h = (track_count + 1) as f32 * (24.0 + 3.0);
+    let presets_h = 7.0 * (24.0 + 4.0);
+    let your_presets_h = (saved_preset_count + 1) as f32 * (22.0 + 4.0);
+    let units_h = 6.0 * (22.0 + 3.0);
+    let external_plugin_btn_h = 28.0;
+    10.0 * 2.0
+        + SECTION_H
+        + tracks_h
+        + SECTION_GAP
+        + SECTION_H
+        + presets_h
+        + SECTION_GAP
+        + SECTION_H
+        + your_presets_h
+        + SECTION_GAP
+        + SECTION_H
+        + units_h
+        + SECTION_GAP
+        + external_plugin_btn_h
+}
+
 pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState, content_w: f32) -> Node {
     let bay_inner_w = (content_w - SIDEBAR_W - BAY_PAD * 2.0).max(520.0);
     Node::row()
@@ -305,17 +334,11 @@ fn sidebar(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
                 .child(Node::spacer()),
         );
 
-    Node::column()
-        .id("rack/sidebar")
+    let content_h = sidebar_content_height(model.tracks.len(), model.rack_presets.len());
+    let content = Node::column()
         .width(Sizing::Fixed(SIDEBAR_W))
-        .height(Sizing::Fill(1.0))
         .padding(Insets::all(10.0))
         .gap(6.0)
-        .clip()
-        .style(|s| {
-            s.background = Some(pal().panel);
-            s.border = Some((1.0, pal().border));
-        })
         .child(section("TRACKS & BUSES"))
         .child(tracks_col)
         .child(section("GUITAR RIG PRESETS"))
@@ -324,7 +347,6 @@ fn sidebar(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
         .child(your_presets)
         .child(section("MOUNT STUDIO UNIT"))
         .child(units)
-        .child(Node::spacer())
         .child(
             button("rack/add_plugin", "Mount external plugin", ui, None)
                 .text("+ External Plugin…")
@@ -335,6 +357,24 @@ fn sidebar(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
                     s.weight = FontWeight::SemiBold;
                 }),
         )
+        .absolute(Rect::new(
+            0.0,
+            -view.rack_sidebar_scroll,
+            SIDEBAR_W,
+            content_h,
+        ));
+
+    Node::column()
+        .id("rack/sidebar")
+        .width(Sizing::Fixed(SIDEBAR_W))
+        .height(Sizing::Fill(1.0))
+        .scrollable()
+        .clip()
+        .style(|s| {
+            s.background = Some(pal().panel);
+            s.border = Some((1.0, pal().border));
+        })
+        .child(content)
 }
 
 fn active_track(model: &ViewModel) -> &TrackView {

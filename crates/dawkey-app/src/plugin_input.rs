@@ -587,6 +587,18 @@ impl App {
         self.view.rack_scroll = (self.view.rack_scroll + delta_y).clamp(0.0, max);
     }
 
+    /// Scrolls the rack's sidebar within its content height.
+    pub(crate) fn scroll_rack_sidebar(&mut self, delta_y: f32) {
+        let project = self.studio.session().project();
+        let total_h = crate::view::rack::sidebar_content_height(
+            project.tracks.len(),
+            project.rack_presets.len(),
+        );
+        let visible = self.ui.find("rack/sidebar").map_or(400.0, |n| n.rect().h);
+        let max = (total_h - visible).max(0.0);
+        self.view.rack_sidebar_scroll = (self.view.rack_sidebar_scroll + delta_y).clamp(0.0, max);
+    }
+
     /// Scrolls the picker or editor list. Returns false if `id` is neither.
     pub(crate) fn on_overlay_scroll(&mut self, id: Option<&str>, delta: Point) -> bool {
         let list = match id {

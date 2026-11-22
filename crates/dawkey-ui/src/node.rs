@@ -140,6 +140,8 @@ pub enum Chrome {
 pub enum Cursor {
     /// Dragging moves an edge left or right.
     ResizeHorizontal,
+    /// Dragging moves an edge up or down.
+    ResizeVertical,
 }
 
 /// Vector icons drawn by the renderer.

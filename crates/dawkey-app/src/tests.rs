@@ -3446,6 +3446,31 @@ fn multi_monitor_windows_render_their_own_role_from_the_shared_project() {
 }
 
 #[test]
+fn opening_the_piano_roll_only_takes_over_the_arrange_monitor() {
+    use crate::{ViewRole, WindowInfo};
+    use dawkey_core::ClipId;
+    let mut app = app();
+    let (_track, clip) = add_midi(&mut app, 0.0, &[(60, 0.0, 1.0)]);
+    app.set_window_roles(
+        Some(ViewRole::Arrange),
+        &[ViewRole::MixerAndRack],
+        WindowInfo::headless(),
+    );
+    app.open_piano_roll(ClipId(clip)).unwrap();
+
+    // The Arrange monitor shows the piano roll, full-window.
+    let primary = app.access_tree();
+    assert!(primary.find("piano_roll/grid").is_some());
+
+    // The other monitor isn't affected: it keeps showing Mixer+Rack, not a
+    // second copy of the piano roll.
+    let extra = app.extra_access_tree(0).unwrap();
+    assert!(extra.find("piano_roll/grid").is_none());
+    assert!(extra.find("master/strip").is_some());
+    assert!(extra.find("rack/bay").is_some());
+}
+
+#[test]
 fn widescreen_layout_shows_arrange_rack_and_mixer_at_once() {
     use crate::prefs::LayoutChoice;
     let mut app = app();
@@ -3469,6 +3494,107 @@ fn widescreen_layout_shows_arrange_rack_and_mixer_at_once() {
     assert!(tree.find("rack/bay").is_some());
     assert!(tree.find("master/strip").is_some());
     assert!(tree.find(&format!("track/{track}/lane")).is_some());
+}
+
+#[test]
+fn widescreen_shows_a_new_plugin_in_the_rack_without_switching_pages() {
+    use crate::prefs::LayoutChoice;
+    let (mut app, _dir) = app_with_plugins();
+    let mut prefs = app.preferences().clone();
+    prefs.layout = LayoutChoice::Widescreen;
+    app.set_preferences(prefs, None);
+
+    let track = add_track(&mut app, "Guitar");
+    let outcome = app
+        .studio
+        .execute(
+            dawkey_core::AddPlugin {
+                track: dawkey_core::TrackId(track),
+                plugin: "clap:dawkey.test.gain".into(),
+                index: None,
+            }
+            .into(),
+        )
+        .unwrap();
+    let plugin = outcome.plugin.unwrap();
+
+    // Never touched view/rack: the page stays Arrange, but the rack pane
+    // (always on screen in Widescreen) must show the new plugin anyway.
+    assert_eq!(app.view_state().page, Page::Arrange);
+    let tree = app.access_tree();
+    assert!(tree.find("rack/bay").is_some());
+    assert!(tree.find(&format!("rack/unit/{plugin}")).is_some());
+}
+
+#[test]
+fn the_rack_sidebar_scrolls_when_its_content_overflows() {
+    let mut app = app();
+    // Enough tracks that the sidebar's own content is taller than its view.
+    for i in 0..30 {
+        add_track(&mut app, &format!("Track {i}"));
+    }
+    click(&mut app, "view/rack").unwrap();
+    let sidebar = app.access_tree().find("rack/sidebar").unwrap().bounds;
+    let over_sidebar = Point::new(sidebar.x + 10.0, sidebar.y + 10.0);
+
+    assert_eq!(app.view_state().rack_sidebar_scroll, 0.0);
+    app.scroll(over_sidebar, Point::new(0.0, 100.0), Modifiers::default());
+    assert!(app.view_state().rack_sidebar_scroll > 0.0);
+
+    // Scrolling further doesn't go past the content's actual height.
+    app.scroll(
+        over_sidebar,
+        Point::new(0.0, 10_000.0),
+        Modifiers::default(),
+    );
+    let max = app.view_state().rack_sidebar_scroll;
+    app.scroll(
+        over_sidebar,
+        Point::new(0.0, 10_000.0),
+        Modifiers::default(),
+    );
+    assert_eq!(app.view_state().rack_sidebar_scroll, max);
+}
+
+#[test]
+fn mixer_and_rack_pane_resizes_and_flips_orientation() {
+    use crate::state::SplitOrientation;
+    use crate::{ViewRole, WindowInfo};
+    use dawkey_ui::InputEvent;
+    let mut app = app();
+    app.set_window_roles(Some(ViewRole::MixerAndRack), &[], WindowInfo::headless());
+    assert_eq!(
+        app.view_state().mixer_rack_orientation,
+        SplitOrientation::Stacked
+    );
+    let before = app.view_state().mixer_rack_split;
+
+    // Drag the divider down: Rack (leading, on top) grows and Mixer
+    // (trailing, on the bottom) shrinks by the same amount.
+    let at = app.ui.widget_center("mixer_rack/split").unwrap();
+    app.handle_input(InputEvent::PointerDown {
+        pos: at,
+        button: MouseButton::Left,
+        time_ms: 0,
+    });
+    app.handle_input(InputEvent::PointerMove(Point::new(at.x, at.y + 40.0)));
+    app.handle_input(InputEvent::PointerUp {
+        pos: Point::new(at.x, at.y + 40.0),
+        button: MouseButton::Left,
+    });
+    assert!((app.view_state().mixer_rack_split - before + 40.0).abs() < 0.01);
+
+    // The orientation toggle flips stacked <-> side by side.
+    click(&mut app, "mixer_rack/orientation").unwrap();
+    assert_eq!(
+        app.view_state().mixer_rack_orientation,
+        SplitOrientation::SideBySide
+    );
+    click(&mut app, "mixer_rack/orientation").unwrap();
+    assert_eq!(
+        app.view_state().mixer_rack_orientation,
+        SplitOrientation::Stacked
+    );
 }
 
 #[test]

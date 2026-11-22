@@ -16,6 +16,8 @@ pub(crate) const HEADER_W: f32 = 250.0;
 pub(crate) const RULER_H: f32 = 28.0;
 /// Travel of a mixer fader, in logical px.
 pub(crate) const FADER_H: f32 = 220.0;
+/// Smallest either pane of the Mixer/Rack split can be, in logical px.
+pub(crate) const MIN_SPLIT: f32 = 120.0;
 /// Width of a mixer pan slider.
 pub(crate) const PAN_W: f32 = 76.0;
 /// Width of a send row in the mixer: dragging across it spans the fader's range.
@@ -308,6 +310,15 @@ pub(crate) enum Gesture {
         start_pos: f32,
         merge_key: String,
     },
+    /// Dragging the divider between the Mixer and Rack panes (the
+    /// multi-monitor layout's 2-monitor window): not a project change, so
+    /// it writes `ViewState::mixer_rack_split` live, like `px_per_s`/
+    /// `rack_scroll`, rather than committing anything on release.
+    ResizeSplit {
+        /// `mixer_rack_split` when the drag began; the pointer's delta
+        /// since then is added to it, like `Fader`/`Pan`.
+        start_split: f32,
+    },
 }
 
 /// One of a clip's edges, dragged to trim it.
@@ -494,6 +505,27 @@ impl SynthParam {
         };
         *field = Some(value);
         c
+    }
+}
+
+/// How the Mixer and Rack panes split in the multi-monitor layout's
+/// combined window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitOrientation {
+    /// Rack above Mixer.
+    #[default]
+    Stacked,
+    /// Rack beside Mixer.
+    SideBySide,
+}
+
+impl SplitOrientation {
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::Stacked => Self::SideBySide,
+            Self::SideBySide => Self::Stacked,
+        }
     }
 }
 
@@ -753,6 +785,18 @@ pub struct ViewState {
     pub rack_track: Option<TrackId>,
     /// Vertical scroll of the 19-inch rack bay, in logical px.
     pub rack_scroll: f32,
+    /// Vertical scroll of the rack's sidebar (track list, presets, mount
+    /// buttons), in logical px.
+    pub rack_sidebar_scroll: f32,
+    /// How the Mixer and Rack panes split, in the multi-monitor layout's
+    /// combined Mixer+Rack window: stacked (Rack above Mixer) or side by
+    /// side (Rack beside Mixer).
+    pub mixer_rack_orientation: SplitOrientation,
+    /// The mixer pane's size along the split (height if stacked, width if
+    /// side by side), in logical px; the rack (which leads: above or to
+    /// the left) gets the rest. Clamped to the pane's actual size when
+    /// built, so this survives a window resize.
+    pub mixer_rack_split: f32,
     /// Current parameter page (0-based, 8 knobs per page) for external
     /// plugins in the rack.
     #[serde(skip)]
@@ -914,6 +958,9 @@ impl Default for ViewState {
             overlay_scroll: 0.0,
             rack_track: None,
             rack_scroll: 0.0,
+            rack_sidebar_scroll: 0.0,
+            mixer_rack_orientation: SplitOrientation::default(),
+            mixer_rack_split: 260.0,
             rack_pages: BTreeMap::new(),
             automation_shown: Vec::new(),
             takes_shown: Vec::new(),
