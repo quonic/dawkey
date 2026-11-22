@@ -47,6 +47,7 @@ pub(crate) const RELOAD_PLUGIN: &str = "reload_plugin";
 pub(crate) const SHOW_PLUGIN_GUI: &str = "show_plugin_gui";
 pub(crate) const GET_PLUGIN: &str = "get_plugin";
 pub(crate) const SET_PLUGIN_PROPERTY: &str = "set_plugin_property";
+pub(crate) const SET_DRUM_SAMPLE_KIT: &str = "set_drum_sample_kit";
 pub(crate) const GET_CHANGES: &str = "get_changes";
 pub(crate) const BATCH: &str = "batch";
 
@@ -294,6 +295,22 @@ pub(crate) struct SetPluginProperty {
     /// `/`, `String` for other text, `Int` or `Float` for numbers, `Bool`.
     #[serde(default)]
     pub(crate) kind: Option<String>,
+}
+
+/// Set the drum kit `builtin:drums`' pads play back from real recordings
+/// instead of synthesizing (a pad the kit has no sample for, e.g. Clap in
+/// "acoustic_vcsl", keeps synthesizing). `null`/omitted reverts every pad to
+/// synthesis. Saved with the project; not an undo step (plugin state
+/// isn't). Returns the slot as get_plugin does, without its parameters
+/// (get_plugin's `sample_kit` shows the result).
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetDrumSampleKit {
+    /// The `builtin:drums` slot's ID.
+    pub(crate) plugin: dawkey_core::PluginId,
+    /// The sample kit to play back from, or `null` for synthesis.
+    #[serde(default)]
+    pub(crate) kit: Option<dawkey_studio::SampleKit>,
 }
 
 /// Load a plugin slot's plugin again, from its saved state: one that
@@ -1079,6 +1096,7 @@ pub(crate) fn build_tools() -> Vec<Tool> {
         tool::<ShowPluginGui>(SHOW_PLUGIN_GUI, "", mutating.clone().idempotent(true)),
         tool::<GetPlugin>(GET_PLUGIN, "", read_only.clone()),
         tool::<SetPluginProperty>(SET_PLUGIN_PROPERTY, "", mutating.clone().idempotent(true)),
+        tool::<SetDrumSampleKit>(SET_DRUM_SAMPLE_KIT, "", mutating.clone().idempotent(true)),
         tool::<GetChanges>(GET_CHANGES, "", read_only),
         tool::<crate::batch::Batch>(BATCH, "", mutating),
     ];

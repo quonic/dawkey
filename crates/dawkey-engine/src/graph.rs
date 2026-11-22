@@ -672,7 +672,12 @@ fn route_plugins(order: &[&Track], index: &HashMap<TrackId, usize>, tracks: &mut
                 })
                 .collect();
             let count = routes.iter().map(|r| r.output + 1).max().unwrap_or(0);
-            node.aux = (0..count).map(|_| AuxBuffer::new()).collect();
+            node.aux = (0..count)
+                .map(|output| AuxBuffer {
+                    routed: routes.iter().any(|r| r.output == output),
+                    ..AuxBuffer::new()
+                })
+                .collect();
             node.aux_routes = routes.into();
         }
     }

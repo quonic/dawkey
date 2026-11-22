@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 pub use analysis::{
     Analysis, Analyzer, Bands, SegmentAnalyzers, analyze, analyze_segments, gain_to_db,
 };
-pub use decode::{DecodedFile, decode_file};
+pub use decode::{DecodedFile, decode_bytes, decode_file};
 pub use export::{
     BlockSource, DEFAULT_OPUS_KBPS, DEFAULT_VORBIS_QUALITY, ExportAnalysis, ExportProgress,
     ExportSpec, FileFormat, MemorySource, OPUS_RATE, SampleFormat, export, export_segmented,

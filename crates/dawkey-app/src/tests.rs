@@ -69,6 +69,11 @@ fn tree_has_stable_ids() {
         "master/meter",
         "tracks/empty",
         "status/engine",
+        "status/new_project",
+        "status/open_project",
+        "status/save_project",
+        "status/close_project",
+        "status/preferences",
     ] {
         assert!(tree.find(id).is_some(), "missing {id}");
     }
@@ -526,6 +531,94 @@ fn opening_over_unsaved_changes_asks_first() {
 }
 
 #[test]
+fn project_buttons_in_the_status_bar() {
+    let mut app = app();
+
+    // New, on a clean project, starts right away.
+    click(&mut app, "status/new_project").unwrap();
+    assert_eq!(app.view_state().confirm, None);
+    assert!(app.studio.session().project().tracks.is_empty());
+
+    // New, with unsaved changes, asks first.
+    add_track(&mut app, "Keys");
+    click(&mut app, "status/new_project").unwrap();
+    assert_eq!(app.view_state().confirm, Some(PendingAction::NewProject));
+    click(&mut app, "confirm/cancel").unwrap();
+    assert_eq!(app.studio.session().project().tracks.len(), 1);
+    click(&mut app, "status/new_project").unwrap();
+    click(&mut app, "confirm/discard").unwrap();
+    assert_eq!(app.view_state().confirm, None);
+    assert!(app.studio.session().project().tracks.is_empty());
+    assert!(!app.studio.session().is_dirty());
+
+    // Open, with unsaved changes, asks first (like Ctrl+O).
+    add_track(&mut app, "Keys");
+    click(&mut app, "status/open_project").unwrap();
+    assert_eq!(app.view_state().confirm, Some(PendingAction::OpenProject));
+    click(&mut app, "confirm/discard").unwrap();
+    assert_eq!(
+        app.take_platform_requests(),
+        [PlatformRequest::ChooseProjectToOpen]
+    );
+
+    // Save, without a file yet, asks where (like Ctrl+Shift+S).
+    click(&mut app, "status/save_project").unwrap();
+    assert_eq!(
+        app.take_platform_requests(),
+        [PlatformRequest::ChooseSaveLocation { then: None }]
+    );
+    let dir = tempfile::tempdir().unwrap();
+    app.save_as(&dir.path().join("Song.dawkey")).unwrap();
+    assert!(!app.studio.session().is_dirty());
+
+    // Save, with a file, saves over it in place.
+    add_track(&mut app, "More");
+    click(&mut app, "status/save_project").unwrap();
+    assert!(app.take_platform_requests().is_empty());
+    assert!(!app.studio.session().is_dirty());
+
+    // Close asks first too, like the window's own close button.
+    add_track(&mut app, "Even more");
+    click(&mut app, "status/close_project").unwrap();
+    assert_eq!(app.view_state().confirm, Some(PendingAction::Close));
+    click(&mut app, "confirm/cancel").unwrap();
+    assert_eq!(app.view_state().confirm, None);
+}
+
+#[test]
+fn double_clicking_the_window_title_renames_the_project() {
+    let mut app = app();
+    let shown = |app: &mut App| app.access_tree().find("window/title").unwrap().clone();
+    assert_eq!(shown(&mut app).name.as_deref(), Some("Test — Dawkey"));
+
+    app.double_click("window/title", Modifiers::default())
+        .unwrap();
+    let field = shown(&mut app);
+    assert_eq!(
+        (field.role, field.value.as_deref()),
+        (Role::TextField, Some("Test"))
+    );
+    type_keys(&mut app, &["d", "escape"]);
+    assert_eq!(
+        app.studio.session().project().name,
+        "Test",
+        "escape leaves it as it was"
+    );
+
+    app.double_click("window/title", Modifiers::default())
+        .unwrap();
+    type_keys(&mut app, &["s", "o", "n", "g", "return"]);
+    assert_eq!(app.studio.session().project().name, "song");
+    assert_eq!(shown(&mut app).name.as_deref(), Some("• song — Dawkey"));
+
+    // An empty name is refused.
+    app.double_click("window/title", Modifiers::default())
+        .unwrap();
+    type_keys(&mut app, &["backspace", "return"]);
+    assert_eq!(app.studio.session().project().name, "song");
+}
+
+#[test]
 fn closing_over_unsaved_changes_asks_first() {
     let mut app = app();
     assert!(app.request_close());
@@ -949,6 +1042,49 @@ fn zoom_scroll_ruler_and_drops() {
         app.take_platform_requests()[..],
         [PlatformRequest::ChooseAudioFiles { track: None, .. }]
     ));
+}
+
+#[test]
+fn playback_scrolls_the_arrange_view_to_follow_the_playhead() {
+    let mut app = app();
+    add_track(&mut app, "Drums");
+    app.access_tree();
+    let visible_s = f64::from(app.lanes_rect().w) / f64::from(app.view_state().px_per_s);
+
+    app.studio.play().unwrap();
+    app.tick();
+    assert_eq!(app.view_state().scroll_s, 0.0);
+
+    // Still inside the first page: no scroll yet.
+    app.studio.advance(visible_s * 0.5).unwrap();
+    app.tick();
+    assert_eq!(app.view_state().scroll_s, 0.0);
+
+    // Past it (less the margin kept before the right edge): catches up so
+    // the playhead stays visible.
+    app.studio.advance(visible_s * 0.6).unwrap();
+    app.tick();
+    let scroll = app.view_state().scroll_s;
+    assert!(scroll > 0.0, "{scroll}");
+    let position = app.studio.transport().position_s;
+    assert!(
+        position >= scroll && position <= scroll + visible_s,
+        "{position} not in [{scroll}, {}]",
+        scroll + visible_s
+    );
+
+    // Stopping leaves the scroll position where playback left it.
+    app.studio.stop().unwrap();
+    app.tick();
+    assert_eq!(app.view_state().scroll_s, scroll);
+
+    // It doesn't follow in the mixer.
+    click(&mut app, "view/mixer").unwrap();
+    app.studio.locate(0.0).unwrap();
+    app.studio.play().unwrap();
+    app.studio.advance(visible_s * 2.0).unwrap();
+    app.tick();
+    assert_eq!(app.view_state().scroll_s, scroll);
 }
 
 #[test]
@@ -3436,4 +3572,1055 @@ fn sends_in_the_mixer() {
             .find(&format!("track/{track}/add_send"))
             .is_some()
     );
+}
+
+#[test]
+fn guitar_effects_rack() {
+    let (mut app, _dir) = app_with_plugins();
+    let guitar = add_track(&mut app, "Guitar");
+    let lead_bus = add_track(&mut app, "Lead Aux");
+
+    // Switch via toolbar button and keyboard shortcuts (F4 to Rack, Tab back).
+    assert_eq!(app.view_state().page, Page::Arrange);
+    click(&mut app, "view/rack").unwrap();
+    assert_eq!(app.view_state().page, Page::Rack);
+    app.key("tab", Modifiers::default()).unwrap();
+    assert_eq!(app.view_state().page, Page::Arrange);
+    app.key("f4", Modifiers::default()).unwrap();
+    assert_eq!(app.view_state().page, Page::Rack);
+
+    // Track selection includes regular tracks and Master (track 0).
+    assert_eq!(app.rack_track(), TrackId(guitar));
+    assert_eq!(
+        app.access_tree()
+            .find(&format!("rack/track/{guitar}"))
+            .unwrap()
+            .value
+            .as_deref(),
+        Some("selected")
+    );
+    assert!(app.ui.find("rack/blank").is_some());
+    click(&mut app, &format!("rack/track/{lead_bus}")).unwrap();
+    assert_eq!(app.view_state().rack_track, Some(TrackId(lead_bus)));
+    click(&mut app, "rack/track/0").unwrap();
+    assert_eq!(app.view_state().rack_track, Some(dawkey_core::MASTER));
+    click(&mut app, &format!("rack/track/{guitar}")).unwrap();
+
+    // Presets mount a full studio signal chain in one undo step.
+    click(&mut app, "rack/preset/lead").unwrap();
+    let mounted: Vec<String> = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(guitar))
+        .unwrap()
+        .plugins
+        .iter()
+        .map(|s| s.plugin.clone())
+        .collect();
+    assert_eq!(
+        mounted,
+        [
+            "builtin:gate",
+            "builtin:drive",
+            "builtin:amp",
+            "builtin:eq",
+            "builtin:cab",
+            "builtin:delay",
+            "builtin:reverb",
+        ]
+    );
+    app.studio.undo().unwrap();
+    assert!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(guitar))
+            .unwrap()
+            .plugins
+            .is_empty()
+    );
+    app.studio.redo().unwrap();
+    assert_eq!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(guitar))
+            .unwrap()
+            .plugins
+            .len(),
+        7
+    );
+
+    // Stepped knob click cycles OD-808 voicing (`tight`: 1.0 Tight -> 0.0 Fat).
+    let drive = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(guitar))
+        .unwrap()
+        .plugins[1]
+        .id;
+    let tight_id = format!("plugin/{}/param/tight", drive.0);
+    click(&mut app, &tight_id).unwrap();
+    assert_eq!(app.studio.plugin_param(drive, "tight").unwrap().value, 0.0);
+    click(&mut app, &tight_id).unwrap();
+    assert_eq!(app.studio.plugin_param(drive, "tight").unwrap().value, 1.0);
+
+    // Scrolling the rack bay moves rack_scroll within bounds.
+    let bay_before = app.view_state().rack_scroll;
+    let bay_pos = app.ui.find("rack/bay").unwrap().rect().center();
+    app.scroll(bay_pos, Point::new(0.0, 240.0), Modifiers::default());
+    assert!(app.view_state().rack_scroll > bay_before);
+
+    // Mount units individually on the second track and test unit hardware controls.
+    click(&mut app, &format!("rack/track/{lead_bus}")).unwrap();
+    click(&mut app, "rack/add/amp").unwrap();
+    let amp = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(lead_bus))
+        .unwrap()
+        .plugins[0]
+        .id;
+    assert_eq!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(lead_bus))
+            .unwrap()
+            .plugins[0]
+            .plugin,
+        "builtin:amp"
+    );
+
+    // Toggle bypass & switch channel.
+    click(&mut app, &format!("plugin/{}/bypass", amp.0)).unwrap();
+    assert!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(lead_bus))
+            .unwrap()
+            .plugins[0]
+            .bypass
+    );
+    click(&mut app, &format!("plugin/{}/bypass", amp.0)).unwrap();
+    click(&mut app, &format!("plugin/{}/choice/channel/1", amp.0)).unwrap();
+    assert_eq!(app.studio.plugin_param(amp, "channel").unwrap().value, 1.0);
+
+    // Rotary knob drag up raises Gain as one undo step; CTRL drag moves at fine resolution.
+    let gain_id = format!("plugin/{}/param/gain", amp.0);
+    let initial_gain = app.studio.plugin_param(amp, "gain").unwrap().value;
+    app.drag(
+        DragFrom::Widget(gain_id.clone()),
+        Point::new(0.0, -crate::state::KNOB_SPAN * 0.25),
+        5,
+        Modifiers::default(),
+    )
+    .unwrap();
+    let coarse_gain = app.studio.plugin_param(amp, "gain").unwrap().value;
+    let coarse_delta = coarse_gain - initial_gain;
+    assert!(
+        coarse_delta > 2.0,
+        "expected >2.0 delta, got {coarse_delta}"
+    );
+    app.studio.undo().unwrap();
+    assert!((app.studio.plugin_param(amp, "gain").unwrap().value - initial_gain).abs() < 1e-6);
+
+    app.drag(
+        DragFrom::Widget(gain_id.clone()),
+        Point::new(0.0, -crate::state::KNOB_SPAN * 0.25),
+        5,
+        CTRL,
+    )
+    .unwrap();
+    let fine_delta = app.studio.plugin_param(amp, "gain").unwrap().value - initial_gain;
+    assert!(
+        fine_delta > 0.2 && fine_delta < coarse_delta * 0.5,
+        "expected fine delta < coarse*0.5, fine={fine_delta} coarse={coarse_delta}"
+    );
+
+    // Double-click turns the knob readout into a text field; Enter sets the value.
+    app.double_click(&gain_id, Modifiers::default()).unwrap();
+    assert_eq!(
+        app.access_tree().find(&gain_id).unwrap().role,
+        Role::TextField
+    );
+    type_keys(&mut app, &["3", ".", "5", "return"]);
+    assert!((app.studio.plugin_param(amp, "gain").unwrap().value - 3.5).abs() < 0.05);
+    assert_eq!(app.view_state().text_edit, None);
+
+    // Ctrl-click resets knob to its default (6.0).
+    app.click(&gain_id, MouseButton::Left, CTRL).unwrap();
+    assert!((app.studio.plugin_param(amp, "gain").unwrap().value - 6.0).abs() < 1e-6);
+
+    // Reorder mounted rack units using ▲ / ▼ hardware buttons.
+    click(&mut app, "rack/add/eq").unwrap();
+    let eq = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(lead_bus))
+        .unwrap()
+        .plugins[1]
+        .id;
+    click(&mut app, &format!("plugin/{}/up", eq.0)).unwrap();
+    let ids: Vec<_> = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(lead_bus))
+        .unwrap()
+        .plugins
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(ids, [eq, amp]);
+    click(&mut app, &format!("plugin/{}/down", eq.0)).unwrap();
+    let ids: Vec<_> = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(lead_bus))
+        .unwrap()
+        .plugins
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(ids, [amp, eq]);
+
+    // External CLAP/LV2/VST3 plugins mount directly into the 19" rack without popping
+    // the floating editor open, and can be popped out on demand via "Edit…".
+    click(&mut app, "rack/add_plugin").unwrap();
+    click(&mut app, "plugin_picker/filter/effects").unwrap();
+    click(&mut app, "plugin_picker/item/2").unwrap();
+    let ext = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(lead_bus))
+        .unwrap()
+        .plugins[2]
+        .id;
+    assert_eq!(
+        app.studio
+            .session()
+            .project()
+            .track(TrackId(lead_bus))
+            .unwrap()
+            .plugins[2]
+            .plugin,
+        "clap:dawkey.test.gain"
+    );
+    assert!(app.view_state().plugin_editor.is_none());
+    click(&mut app, &format!("plugin/{}/edit", ext.0)).unwrap();
+    assert_eq!(app.view_state().plugin_editor, Some(ext));
+}
+
+#[test]
+fn more_rack_presets_and_saving_your_own() {
+    let (mut app, _dir) = app_with_plugins();
+    let guitar = add_track(&mut app, "Guitar");
+    click(&mut app, "view/rack").unwrap();
+    click(&mut app, &format!("rack/track/{guitar}")).unwrap();
+
+    // The newer curated presets mount too.
+    for (id, expect_first) in [
+        ("blues", "builtin:gate"),
+        ("metal", "builtin:gate"),
+        ("jazz", "builtin:gate"),
+        ("acoustic", "builtin:gate"),
+        ("bass", "builtin:gate"),
+        ("bass_drive", "builtin:gate"),
+        ("funk", "builtin:comp"),
+        ("reggae", "builtin:comp"),
+        ("funk_drive", "builtin:gate"),
+        ("psychedelic", "builtin:gate"),
+    ] {
+        click(&mut app, &format!("rack/preset/{id}")).unwrap();
+        let plugins = &app
+            .studio
+            .session()
+            .project()
+            .track(TrackId(guitar))
+            .unwrap()
+            .plugins;
+        assert!(!plugins.is_empty(), "{id}");
+        assert_eq!(plugins[0].plugin, expect_first, "{id}");
+    }
+
+    // Tweak the mounted (acoustic) chain, then save it as your own preset.
+    click(&mut app, "rack/preset/crunch").unwrap();
+    let plugins = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(guitar))
+        .unwrap()
+        .plugins
+        .clone();
+    let gate = plugins[0].id;
+    app.studio
+        .execute(dawkey_core::SetPluginParam::new(gate, "threshold", -33.0).into())
+        .unwrap();
+
+    assert!(app.access_tree().find("rack/saved/0").is_none());
+    click(&mut app, "rack/save_as").unwrap();
+    let field = app.access_tree().find("rack/save_name").unwrap().clone();
+    assert_eq!(field.role, Role::TextField);
+    type_keys(&mut app, &["m", "y", "space", "t", "o", "n", "e", "return"]);
+    assert_eq!(
+        app.studio.session().project().rack_presets.len(),
+        1,
+        "{:?}",
+        app.studio.session().project().rack_presets
+    );
+    assert_eq!(
+        app.studio.session().project().rack_presets[0].name,
+        "my tone"
+    );
+    assert_eq!(
+        app.access_tree()
+            .find("rack/saved/0")
+            .and_then(|n| n.name.clone()),
+        Some("Mount \"my tone\"".to_owned())
+    );
+
+    // Mounting it onto another track reproduces the saved chain, including
+    // the tweak.
+    let other = add_track(&mut app, "Other");
+    click(&mut app, &format!("rack/track/{other}")).unwrap();
+    click(&mut app, "rack/saved/0").unwrap();
+    let mounted = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(other))
+        .unwrap()
+        .plugins
+        .clone();
+    assert_eq!(mounted[0].plugin, "builtin:gate");
+    assert_eq!(mounted[0].params["threshold"], -33.0);
+
+    // Removing it clears the list.
+    click(&mut app, "rack/remove_saved/0").unwrap();
+    assert!(app.studio.session().project().rack_presets.is_empty());
+    assert!(app.access_tree().find("rack/saved/0").is_none());
+}
+
+#[test]
+fn the_add_drum_track_button_works() {
+    let mut app = app();
+    click(&mut app, "arrange/add_drum_track").unwrap();
+    let track = app.studio.session().project().tracks[0].id;
+    let project = app.studio.session().project();
+    let track = project.track(track).unwrap();
+    assert_eq!(track.plugins[0].plugin, "builtin:drums");
+    assert_eq!(
+        app.studio.undo().unwrap().as_deref(),
+        Some("add_drum_track")
+    );
+    assert!(app.studio.session().project().tracks.is_empty());
+}
+
+/// A MIDI track with builtin:drums as its first plugin, and an empty
+/// one-bar clip, as add_drum_track would make.
+fn add_drum_clip(app: &mut App) -> (u64, u64) {
+    let outcome = app
+        .studio
+        .execute(dawkey_core::AddDrumTrack::default().into())
+        .unwrap();
+    (outcome.track.unwrap().0, outcome.clip.unwrap().0)
+}
+
+#[test]
+fn drum_clips_open_the_step_sequencer_not_the_piano_roll() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.rebuild();
+    app.double_click(&format!("clip/{clip}"), Modifiers::default())
+        .unwrap();
+    assert_eq!(app.view_state().page, Page::StepSequencer);
+    assert_eq!(app.view_state().editing_clip, Some(ClipId(clip)));
+    click(&mut app, "step_seq/close").unwrap();
+    assert_eq!(app.view_state().page, Page::Arrange);
+
+    // A regular MIDI clip still opens the piano roll.
+    let (_, midi) = add_midi(&mut app, 4.0, &[(60, 0.0, 1.0)]);
+    app.rebuild();
+    app.double_click(&format!("clip/{midi}"), Modifiers::default())
+        .unwrap();
+    assert_eq!(app.view_state().page, Page::PianoRoll);
+}
+
+#[test]
+fn clicking_a_step_toggles_a_note_one_undo_step_at_a_time() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    assert!(notes_of(&app, clip).is_empty());
+
+    // Kick (pad 0) on step 4 (beat 1.0).
+    click(&mut app, "step/0/4").unwrap();
+    assert_eq!(notes_of(&app, clip), [(36, 1.0, 0.25)]);
+    assert_eq!(
+        app.studio.undo().unwrap().as_deref(),
+        Some("add_midi_notes")
+    );
+    assert!(notes_of(&app, clip).is_empty());
+    app.rebuild();
+
+    // Clicking it again removes it.
+    click(&mut app, "step/0/4").unwrap();
+    assert_eq!(notes_of(&app, clip).len(), 1);
+    click(&mut app, "step/0/4").unwrap();
+    assert!(notes_of(&app, clip).is_empty());
+}
+
+#[test]
+fn kit_and_pattern_buttons_in_the_step_sequencer() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+
+    click(&mut app, "step_seq/kit/909").unwrap();
+    let plugins = &app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins;
+    assert_eq!(plugins[0].plugin, "builtin:drums");
+    assert_eq!(plugins[0].params["kick_decay"], 300.0);
+
+    click(&mut app, "step_seq/pattern/four_on_the_floor").unwrap();
+    let notes = notes_of(&app, clip);
+    assert!(notes.contains(&(36, 0.0, 0.25)), "{notes:?}");
+    assert_eq!(notes.len(), 10);
+}
+
+#[test]
+fn the_metal_kit_mounts_a_gate_before_the_compressor() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+
+    click(&mut app, "step_seq/kit/metal").unwrap();
+    let plugins = &app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins;
+    assert_eq!(plugins[0].plugin, "builtin:drums");
+    assert_eq!(
+        plugins
+            .iter()
+            .map(|p| p.plugin.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "builtin:drums",
+            "builtin:gate",
+            "builtin:comp",
+            "builtin:eq",
+            "builtin:drive"
+        ]
+    );
+    assert_eq!(plugins[3].params["mid_gain"], -4.0);
+}
+
+#[test]
+fn the_sound_source_toggle_switches_a_pad_between_synth_and_samples() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins[0]
+        .id;
+    assert!(
+        app.studio
+            .plugin_details(plugin)
+            .unwrap()
+            .sample_kit
+            .is_none()
+    );
+
+    click(&mut app, "step_seq/sound/acoustic_vcsl").unwrap();
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().sample_kit,
+        Some(dawkey_studio::SampleKit::AcousticVcsl)
+    );
+
+    // Each of the other bundled kits is reachable too.
+    for (id, kit) in [
+        ("jazz_virtuosity", dawkey_studio::SampleKit::JazzVirtuosity),
+        ("lofi_virtuosity", dawkey_studio::SampleKit::LofiVirtuosity),
+        ("vintage_vcsl", dawkey_studio::SampleKit::VintageVcsl),
+        ("latin_vcsl", dawkey_studio::SampleKit::LatinVcsl),
+    ] {
+        click(&mut app, &format!("step_seq/sound/{id}")).unwrap();
+        assert_eq!(
+            app.studio.plugin_details(plugin).unwrap().sample_kit,
+            Some(kit)
+        );
+    }
+
+    click(&mut app, "step_seq/sound/synth").unwrap();
+    assert!(
+        app.studio
+            .plugin_details(plugin)
+            .unwrap()
+            .sample_kit
+            .is_none()
+    );
+}
+
+#[test]
+fn clicking_a_drum_effect_preset_keeps_the_chosen_kit() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .track(TrackId(track))
+        .unwrap()
+        .plugins[0]
+        .id;
+
+    click(&mut app, "step_seq/sound/acoustic_vcsl").unwrap();
+    click(&mut app, "step_seq/kit/metal").unwrap();
+
+    // The instrument's slot ID didn't change, so its sample kit survived.
+    assert_eq!(
+        plugin,
+        app.studio
+            .session()
+            .project()
+            .clip(ClipId(clip))
+            .unwrap()
+            .0
+            .plugins[0]
+            .id
+    );
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().sample_kit,
+        Some(dawkey_studio::SampleKit::AcousticVcsl)
+    );
+}
+
+#[test]
+fn the_drum_kits_rack_unit_pages_its_params_instead_of_overflowing() {
+    let mut app = app();
+    let (track, clip) = add_drum_clip(&mut app);
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .clip(ClipId(clip))
+        .unwrap()
+        .0
+        .plugins[0]
+        .id;
+
+    click(&mut app, "view/rack").unwrap();
+    click(&mut app, &format!("rack/track/{track}")).unwrap();
+
+    // The first page shows the first 8 of its 24 params...
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/kick_tone"))
+            .is_some()
+    );
+    // ...not every pad's, which is what overflowed the rack's width.
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/open_hat_level"))
+            .is_none()
+    );
+
+    click(&mut app, &format!("plugin/{plugin}/page_next")).unwrap();
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/kick_tone"))
+            .is_none()
+    );
+    assert!(
+        app.ui
+            .find(&format!("plugin/{plugin}/param/closed_hat_level"))
+            .is_some()
+    );
+}
+
+#[test]
+fn the_pad_patch_button_cycles_master_then_a_bus_then_back() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    let plugin = app
+        .studio
+        .session()
+        .project()
+        .clip(ClipId(clip))
+        .unwrap()
+        .0
+        .plugins[0]
+        .id;
+    let bus = app
+        .studio
+        .execute(
+            dawkey_core::AddTrack {
+                name: Some("Kick Bus".into()),
+                kind: dawkey_core::TrackKind::Bus,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+
+    assert!(
+        app.studio
+            .plugin_details(plugin)
+            .unwrap()
+            .outputs
+            .iter()
+            .all(|o| o.bus.is_none()),
+        "every pad defaults to Master"
+    );
+
+    click(&mut app, "step_seq/pad/0/output").unwrap();
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().outputs[0].bus,
+        Some(TrackId(bus))
+    );
+
+    // Switching Drum Effect Presets keeps the pad patched to its bus.
+    click(&mut app, "step_seq/kit/metal").unwrap();
+    assert_eq!(
+        app.studio.plugin_details(plugin).unwrap().outputs[0].bus,
+        Some(TrackId(bus))
+    );
+
+    click(&mut app, "step_seq/pad/0/output").unwrap();
+    assert!(
+        app.studio.plugin_details(plugin).unwrap().outputs[0]
+            .bus
+            .is_none(),
+        "cycling past the only bus returns to Master"
+    );
+}
+
+#[test]
+fn saving_and_loading_a_drum_pattern_in_the_step_sequencer() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    click(&mut app, "step_seq/pattern/boom_bap").unwrap();
+
+    assert!(app.access_tree().find("step_seq/saved/0").is_none());
+    click(&mut app, "step_seq/save_as").unwrap();
+    let field = app
+        .access_tree()
+        .find("step_seq/save_name")
+        .unwrap()
+        .clone();
+    assert_eq!(field.role, Role::TextField);
+    type_keys(&mut app, &["m", "y", "space", "b", "e", "a", "t", "return"]);
+    assert_eq!(app.studio.session().project().drum_patterns.len(), 1);
+    assert_eq!(
+        app.access_tree()
+            .find("step_seq/saved/0")
+            .and_then(|n| n.name.clone()),
+        Some("Load \"my beat\"".to_owned())
+    );
+
+    // Loading it onto another drum clip reproduces the same steps.
+    let (_, other) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(other)).unwrap();
+    click(&mut app, "step_seq/saved/0").unwrap();
+    assert_eq!(notes_of(&app, other), notes_of(&app, clip));
+
+    // Removing it clears the list.
+    click(&mut app, "step_seq/remove_saved/0").unwrap();
+    assert!(app.studio.session().project().drum_patterns.is_empty());
+    assert!(app.access_tree().find("step_seq/saved/0").is_none());
+}
+
+#[test]
+fn the_step_sequencer_pads_follow_time_signature_changes() {
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    app.rebuild();
+
+    // 4/4: 16 steps (0..=15).
+    assert!(app.ui.find("step/0/15").is_some());
+    assert!(app.ui.find("step/0/16").is_none());
+
+    // 3/4: 12 steps (0..=11).
+    app.studio
+        .execute(dawkey_core::SetTimeSignature::new(3, 4).into())
+        .unwrap();
+    app.rebuild();
+    assert!(app.ui.find("step/0/11").is_some());
+    assert!(app.ui.find("step/0/12").is_none());
+
+    // 5/4: 20 steps (0..=19), and step 16 lands at beat 4.0.
+    app.studio
+        .execute(dawkey_core::SetTimeSignature::new(5, 4).into())
+        .unwrap();
+    app.rebuild();
+    assert!(app.ui.find("step/0/19").is_some());
+    assert!(app.ui.find("step/0/20").is_none());
+    click(&mut app, "step/0/16").unwrap();
+    assert_eq!(notes_of(&app, clip), [(36, 4.0, 0.25)]);
+
+    // 7/8: 14 steps (0..=13).
+    app.studio
+        .execute(dawkey_core::SetTimeSignature::new(7, 8).into())
+        .unwrap();
+    app.rebuild();
+    assert!(app.ui.find("step/0/13").is_some());
+    assert!(app.ui.find("step/0/14").is_none());
+}
+
+#[test]
+fn genre_and_fill_pattern_buttons_in_the_step_sequencer() {
+    use crate::view::step_sequencer::{FILLS, PAD_NOTES, PATTERNS};
+
+    let mut app = app();
+    let (_, clip) = add_drum_clip(&mut app);
+    app.open_step_sequencer(ClipId(clip)).unwrap();
+    app.rebuild();
+
+    let sidebar = app.ui.find("step_seq/sidebar").unwrap().rect();
+    let save_as = app.ui.find("step_seq/save_as").unwrap().rect();
+    assert!(
+        save_as.y + save_as.h <= sidebar.y + sidebar.h,
+        "sidebar buttons should fit without clipping save_as: save_as={save_as:?}, sidebar={sidebar:?}"
+    );
+
+    for &(id, _, _) in PATTERNS {
+        click(&mut app, &format!("step_seq/pattern/{id}")).unwrap();
+        let notes = notes_of(&app, clip);
+        assert!(!notes.is_empty(), "pattern {id} should produce notes");
+        assert!(
+            notes.iter().all(|(pitch, _, _)| PAD_NOTES.contains(pitch)),
+            "pattern {id} emitted non-pad pitch: {notes:?}"
+        );
+    }
+
+    // Applying a 5/4 pattern resizes the step grid to 20 steps.
+    click(&mut app, "step_seq/pattern/take_five").unwrap();
+    assert!(app.ui.find("step/0/19").is_some());
+    assert!(app.ui.find("step/0/20").is_none());
+
+    // Header meter quick-buttons resize the grid and stay within the view.
+    let root = app.ui.find("step_seq").unwrap().rect();
+    let close = app.ui.find("step_seq/close").unwrap().rect();
+    assert!(close.x + close.w <= root.x + root.w);
+
+    click(&mut app, "step_seq/meter/3_4").unwrap();
+    assert!(app.ui.find("step/0/11").is_some());
+    assert!(app.ui.find("step/0/12").is_none());
+    click(&mut app, "step_seq/pattern/fill_snare_roll").unwrap();
+    assert!(
+        notes_of(&app, clip)
+            .iter()
+            .any(|&(pitch, start_beats, _)| pitch == 49 && (start_beats - 2.75).abs() < 1e-6),
+        "3/4 fill crash should end-align to step 11 (beat 2.75)"
+    );
+
+    click(&mut app, "step_seq/meter/4_4").unwrap();
+    assert!(app.ui.find("step/0/15").is_some());
+    assert!(app.ui.find("step/0/16").is_none());
+
+    for &(id, _, _) in FILLS {
+        click(&mut app, &format!("step_seq/pattern/{id}")).unwrap();
+        let notes = notes_of(&app, clip);
+        assert!(!notes.is_empty(), "fill {id} should produce notes");
+        assert!(
+            notes.iter().all(|(pitch, _, _)| PAD_NOTES.contains(pitch)),
+            "fill {id} emitted non-pad pitch: {notes:?}"
+        );
+        assert!(
+            notes.iter().any(|&(_, start_beats, _)| start_beats >= 3.0),
+            "fill {id} should land in the final beat (steps 12..=15): {notes:?}"
+        );
+    }
+}
+
+#[test]
+fn multi_select_tracks_and_mixdown_from_context_menu() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app();
+    app.studio.set_recording_dir(dir.path().to_owned());
+
+    let (t1, _) = add_clip(&mut app, 0.0);
+    let t2 = app
+        .studio
+        .execute(
+            AddTrack {
+                name: Some("Lead Synth".into()),
+                kind: TrackKind::Midi,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+    app.studio
+        .execute(
+            AddMidiClip {
+                track: Some(TrackId(t2)),
+                position_s: 0.0,
+                notes: vec![NoteSpec {
+                    pitch: 64,
+                    start_beats: 0.0,
+                    length_beats: 1.0,
+                    velocity: 100,
+                }],
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap();
+    let bus = app
+        .studio
+        .execute(
+            AddTrack {
+                name: Some("FX Bus".into()),
+                kind: TrackKind::Bus,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+    app.rebuild();
+
+    // Plain click selects one track; Ctrl+click adds the bus; Shift+click selects the range.
+    click(&mut app, &format!("track/{t1}")).unwrap();
+    assert_eq!(app.view.selected_tracks, vec![TrackId(t1)]);
+
+    app.click(&format!("track/{bus}"), MouseButton::Left, CTRL)
+        .unwrap();
+    assert_eq!(app.view.selected_tracks, vec![TrackId(t1), TrackId(bus)]);
+
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Left,
+        Modifiers::default(),
+    )
+    .unwrap();
+    app.click(&format!("track/{bus}"), MouseButton::Left, shift)
+        .unwrap();
+    assert_eq!(
+        app.view.selected_tracks,
+        vec![TrackId(t1), TrackId(t2), TrackId(bus)]
+    );
+
+    // Right-clicking any selected track opens the context menu keeping multi-selection.
+    app.click(
+        &format!("track/{t2}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert!(app.ui.find("track_menu").is_some());
+    assert!(app.ui.find("track_menu/mixdown").is_some());
+
+    // Open the Mix Down confirmation dialog and toggle its checkbox off and back on.
+    click(&mut app, "track_menu/mixdown").unwrap();
+    assert!(app.ui.find("mixdown_confirm").is_some());
+    assert_eq!(
+        app.access_tree()
+            .find("mixdown_confirm/remove_originals")
+            .unwrap()
+            .checked,
+        Some(true)
+    );
+    click(&mut app, "mixdown_confirm/remove_originals").unwrap();
+    assert_eq!(
+        app.access_tree()
+            .find("mixdown_confirm/remove_originals")
+            .unwrap()
+            .checked,
+        Some(false)
+    );
+    click(&mut app, "mixdown_confirm/remove_originals").unwrap();
+    click(&mut app, "mixdown_confirm/confirm").unwrap();
+
+    // Original tracks (and unused bus) were archived into the new Mixdown 1 audio track.
+    assert!(app.ui.find("mixdown_confirm").is_none());
+    let project = app.studio.session().project();
+    assert_eq!(project.tracks.len(), 1);
+    let mix_track = project.tracks[0].id;
+    assert_eq!(project.tracks[0].name, "Mixdown 1");
+    assert!(project.mixdown_archive(mix_track).is_some());
+
+    // Right-clicking the mixdown track offers Restore Mixed-Down Tracks, which brings them back.
+    app.click(
+        &format!("track/{mix_track}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert!(app.ui.find("track_menu/restore_mixdown").is_some());
+    click(&mut app, "track_menu/restore_mixdown").unwrap();
+
+    let project = app.studio.session().project();
+    assert_eq!(project.tracks.len(), 3);
+    assert!(project.track(TrackId(t1)).is_some());
+    assert!(project.track(TrackId(t2)).is_some());
+    assert!(project.track(TrackId(bus)).is_some());
+    assert!(project.track(mix_track).is_none());
+}
+
+#[test]
+fn delete_track_context_menu_archives_by_default_and_can_permanently_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let rec_dir = dir.path().join("recordings");
+    std::fs::create_dir_all(&rec_dir).unwrap();
+    let mut app = app();
+    app.studio.set_recording_dir(rec_dir.clone());
+
+    let (t1, _) = add_clip(&mut app, 0.0);
+    let t2 = app
+        .studio
+        .execute(
+            AddTrack {
+                name: Some("Audio 2".into()),
+                kind: TrackKind::Audio,
+                ..Default::default()
+            }
+            .into(),
+        )
+        .unwrap()
+        .track
+        .unwrap()
+        .0;
+    let wav = rec_dir.join("delete_me.wav");
+    dawkey_media::write_wav(&wav, &[vec![0.2; 1024]], 48_000).unwrap();
+    let src2 = app.studio.add_source(
+        &wav,
+        DecodedFile {
+            audio: AudioData::new(vec![vec![0.2; 1024]]),
+            source_rate: 48_000,
+        },
+    );
+    app.studio
+        .execute(AddClip::new(src2, Some(TrackId(t2)), 0.0).into())
+        .unwrap();
+    app.rebuild();
+
+    // Right-click track 2 -> Delete Track… (checkbox unchecked by default -> non-destructive).
+    app.click(
+        &format!("track/{t2}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert!(app.ui.find("track_menu/delete").is_some());
+    click(&mut app, "track_menu/delete").unwrap();
+    assert!(app.ui.find("delete_confirm").is_some());
+    assert_eq!(
+        app.access_tree()
+            .find("delete_confirm/permanent")
+            .unwrap()
+            .checked,
+        Some(false)
+    );
+    click(&mut app, "delete_confirm/confirm").unwrap();
+
+    assert!(app.ui.find("delete_confirm").is_none());
+    let project = app.studio.session().project();
+    assert!(project.track(TrackId(t2)).is_none());
+    assert_eq!(project.deleted_track_archives.len(), 1);
+    assert!(project.source(src2).is_some());
+    assert!(wav.exists());
+    assert!(app.ui.find("arrange/restore_deleted").is_some());
+
+    // Restore from track 1's context menu.
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    assert!(app.ui.find("track_menu/restore_deleted").is_some());
+    click(&mut app, "track_menu/restore_deleted").unwrap();
+
+    assert!(app.studio.session().project().track(TrackId(t2)).is_some());
+    assert!(
+        app.studio
+            .session()
+            .project()
+            .deleted_track_archives
+            .is_empty()
+    );
+    assert!(app.ui.find("arrange/restore_deleted").is_none());
+
+    // Delete both tracks non-destructively -> Restore button in arrange header restores even when empty.
+    click(&mut app, &format!("track/{t1}")).unwrap();
+    app.click(&format!("track/{t2}"), MouseButton::Left, CTRL)
+        .unwrap();
+    app.click(
+        &format!("track/{t1}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/delete").unwrap();
+    click(&mut app, "delete_confirm/confirm").unwrap();
+    assert!(app.studio.session().project().tracks.is_empty());
+    assert!(app.ui.find("arrange/restore_deleted").is_some());
+    click(&mut app, "arrange/restore_deleted").unwrap();
+    assert_eq!(app.studio.session().project().tracks.len(), 2);
+
+    // Check "Permanently delete" -> permanently removes track 2, its source, and its WAV file.
+    app.click(
+        &format!("track/{t2}"),
+        MouseButton::Right,
+        Modifiers::default(),
+    )
+    .unwrap();
+    click(&mut app, "track_menu/delete").unwrap();
+    click(&mut app, "delete_confirm/permanent").unwrap();
+    assert_eq!(
+        app.access_tree()
+            .find("delete_confirm/permanent")
+            .unwrap()
+            .checked,
+        Some(true)
+    );
+    click(&mut app, "delete_confirm/confirm").unwrap();
+
+    let project = app.studio.session().project();
+    assert!(project.track(TrackId(t2)).is_none());
+    assert!(project.deleted_track_archives.is_empty());
+    assert!(project.source(src2).is_none());
+    assert!(!wav.exists());
 }
