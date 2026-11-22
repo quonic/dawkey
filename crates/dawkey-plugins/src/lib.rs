@@ -20,6 +20,7 @@
 //! channels). Inputs beyond those get silence.
 
 mod bridge;
+mod builtin;
 mod clap;
 mod expression;
 mod gtk;
@@ -40,6 +41,8 @@ use dawkey_engine::PluginProcessor;
 use serde::{Deserialize, Serialize};
 
 pub use bridge::{BridgeProgram, Sandbox, run_plugin_host};
+pub use builtin::{DRUMS_ID, SampleKit, builtin_plugin, builtin_plugins};
+pub use dawkey_dsp::{cab_response_db, eq_response_db};
 pub use lv2::{StateProperty, StateValue, lv2_state_properties, lv2_state_set};
 pub use scan::{
     Catalog, ScanFailure, SearchPath, clap_files, run_plugin_scanner, scan, scan_clap_file,
@@ -49,6 +52,7 @@ pub use scan::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginFormat {
+    Builtin,
     Clap,
     Lv2,
     Vst3,
@@ -301,6 +305,7 @@ impl GuiKind {
 pub struct Instance(InstanceKind);
 
 enum InstanceKind {
+    Builtin,
     Clap(Box<clap::ClapInstance>),
     Lv2(Box<lv2::Lv2Instance>),
     Vst3(Box<vst3::Vst3Instance>),
@@ -311,6 +316,7 @@ enum InstanceKind {
 impl std::fmt::Debug for Instance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self.0 {
+            InstanceKind::Builtin => "Instance(builtin)",
             InstanceKind::Clap(_) => "Instance(clap)",
             InstanceKind::Lv2(_) => "Instance(lv2)",
             InstanceKind::Vst3(_) => "Instance(vst3)",
@@ -392,6 +398,14 @@ impl Host {
         paths: &StatePaths,
         offline: bool,
     ) -> Result<Loaded, PluginError> {
+        if info.format == PluginFormat::Builtin {
+            let processor = builtin::load(info, self.sample_rate, state)?;
+            return Ok(Loaded {
+                instance: Instance(InstanceKind::Builtin),
+                processor: Box::new(processor),
+                latency: 0,
+            });
+        }
         if let Some(program) = &self.bridge {
             let (instance, processor, latency) = bridge::load(
                 &mut self.processes,
@@ -411,6 +425,7 @@ impl Host {
             });
         }
         match info.format {
+            PluginFormat::Builtin => unreachable!("handled above"),
             PluginFormat::Clap => {
                 let (instance, processor, latency) = clap::load(info, self.sample_rate, state)?;
                 Ok(Loaded {
@@ -449,8 +464,8 @@ impl Instance {
     pub fn param_text(&mut self, info: &PluginInfo, index: usize, value: f64) -> Option<String> {
         let param = info.params.get(index)?;
         let own = match &mut self.0 {
+            InstanceKind::Builtin | InstanceKind::Lv2(_) => None,
             InstanceKind::Clap(clap) => clap.param_text(&param.id, value),
-            InstanceKind::Lv2(_) => None,
             InstanceKind::Vst3(vst3) => vst3.param_text(param, value),
             InstanceKind::Bridged(bridged) => bridged.param_text(index, value),
         };
@@ -463,8 +478,8 @@ impl Instance {
     pub fn param_value(&mut self, info: &PluginInfo, index: usize, text: &str) -> Option<f64> {
         let param = info.params.get(index)?;
         let own = match &mut self.0 {
+            InstanceKind::Builtin | InstanceKind::Lv2(_) => None,
             InstanceKind::Clap(clap) => clap.param_value(&param.id, text),
-            InstanceKind::Lv2(_) => None,
             InstanceKind::Vst3(vst3) => vst3.param_value(param, text),
             InstanceKind::Bridged(bridged) => bridged.param_value(index, text),
         };
@@ -476,6 +491,7 @@ impl Instance {
     /// called while the processor runs.
     pub fn save_state(&mut self, paths: &StatePaths) -> Result<Option<Vec<u8>>, PluginError> {
         match &mut self.0 {
+            InstanceKind::Builtin => Ok(None),
             InstanceKind::Clap(clap) => clap.save_state(),
             InstanceKind::Lv2(lv2) => lv2.save_state(paths),
             InstanceKind::Vst3(vst3) => vst3.save_state(),
@@ -487,6 +503,7 @@ impl Instance {
     /// [`save_state`](Self::save_state).
     pub fn state_dirty(&self) -> bool {
         match &self.0 {
+            InstanceKind::Builtin => false,
             InstanceKind::Clap(clap) => clap.state_dirty(),
             InstanceKind::Lv2(lv2) => lv2.state_dirty(),
             InstanceKind::Vst3(vst3) => vst3.state_dirty(),
@@ -494,11 +511,23 @@ impl Instance {
         }
     }
 
+    /// It asked to be reloaded since the last call (a VST3 plugin whose
+    /// latency or buses changed: `kLatencyChanged`, `kReloadComponent`,
+    /// `kIoChanged`). Reloading it loads a fresh instance from its saved
+    /// state, the way a crashed plugin's `reload_plugin` does.
+    pub fn wants_reload(&mut self) -> bool {
+        match &mut self.0 {
+            InstanceKind::Vst3(vst3) => vst3.take_wants_reload(),
+            InstanceKind::Bridged(bridged) => bridged.take_wants_reload(),
+            InstanceKind::Builtin | InstanceKind::Clap(_) | InstanceKind::Lv2(_) => false,
+        }
+    }
+
     /// Control-thread housekeeping the plugin asked for. Call it regularly.
     pub fn idle(&mut self) {
         match &mut self.0 {
+            InstanceKind::Builtin | InstanceKind::Lv2(_) => {}
             InstanceKind::Clap(clap) => clap.idle(),
-            InstanceKind::Lv2(_) => {}
             InstanceKind::Vst3(vst3) => vst3.idle(),
             InstanceKind::Bridged(bridged) => bridged.idle(),
         }
@@ -507,6 +536,7 @@ impl Instance {
     /// Parameters the plugin changed itself since the last call, in order.
     pub fn take_param_changes(&mut self) -> Vec<ParamChange> {
         match &mut self.0 {
+            InstanceKind::Builtin => Vec::new(),
             InstanceKind::Clap(clap) => clap.take_param_changes(),
             InstanceKind::Lv2(lv2) => lv2.take_param_changes(),
             InstanceKind::Vst3(vst3) => vst3.take_param_changes(),
@@ -548,7 +578,7 @@ impl Instance {
             InstanceKind::Clap(clap) => clap.gui_mode().map(GuiKind::Clap),
             InstanceKind::Lv2(lv2) => lv2.gui_kind(),
             InstanceKind::Vst3(vst3) => vst3.gui_kind(),
-            InstanceKind::Bridged(_) => None,
+            InstanceKind::Builtin | InstanceKind::Bridged(_) => None,
         }
     }
 
@@ -578,7 +608,7 @@ impl Instance {
             InstanceKind::Clap(clap) => clap.gui_close(),
             InstanceKind::Lv2(lv2) => lv2.gui_close(),
             InstanceKind::Vst3(vst3) => vst3.gui_close(),
-            InstanceKind::Bridged(_) => {}
+            InstanceKind::Builtin | InstanceKind::Bridged(_) => {}
         }
     }
 
@@ -609,7 +639,7 @@ impl Instance {
             }
             InstanceKind::Lv2(lv2) => lv2.gui_idle(values),
             InstanceKind::Vst3(vst3) => vst3.gui_requests(),
-            InstanceKind::Bridged(_) => (None, false),
+            InstanceKind::Builtin | InstanceKind::Bridged(_) => (None, false),
         }
     }
 
@@ -691,7 +721,7 @@ impl Instance {
             InstanceKind::Clap(clap) => clap.unload(processor),
             // The processor owns the LV2 instance and deactivates it when
             // dropped.
-            InstanceKind::Lv2(_) => drop(processor),
+            InstanceKind::Builtin | InstanceKind::Lv2(_) => drop(processor),
             InstanceKind::Vst3(vst3) => vst3.unload(processor),
             InstanceKind::Bridged(bridged) => {
                 drop(processor);

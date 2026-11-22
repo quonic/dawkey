@@ -2,6 +2,7 @@
 //! UI state that isn't part of the project: which page is shown, zoom and
 //! scroll, selection, and gestures in progress.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use dawkey_core::{AutomationTarget, ClipId, Controller, NoteId, PluginId, TrackId};
@@ -63,6 +64,8 @@ pub(crate) const AUTO_H: f32 = 44.0;
 pub(crate) const TAKE_H: f32 = 48.0;
 /// Width of a plugin parameter slider in the plugin editor.
 pub(crate) const PARAM_W: f32 = 180.0;
+/// Pointer travel for a full sweep of a rotary rack knob.
+pub(crate) const KNOB_SPAN: f32 = 120.0;
 /// Height of the tempo lane under the ruler.
 pub(crate) const TEMPO_H: f32 = 44.0;
 /// Height of the time signature lane under the tempo lane.
@@ -74,8 +77,12 @@ pub enum Page {
     #[default]
     Arrange,
     Mixer,
+    /// 19-inch studio guitar effects rack for one track.
+    Rack,
     /// The MIDI note editor for one clip.
     PianoRoll,
+    /// The step grid editor for one drum machine clip.
+    StepSequencer,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -215,6 +222,7 @@ pub(crate) enum Gesture {
         min: f64,
         max: f64,
         stepped: bool,
+        knob: bool,
         merge_key: String,
     },
     /// Dragging the picker's or editor's scroll bar: the list scrolls by
@@ -324,6 +332,10 @@ pub enum TextField {
     TrackName(TrackId),
     /// A clip's name (empty: back to the default).
     ClipName(ClipId),
+    /// A name to save the rack track's current chain as a preset under.
+    RackPresetName(TrackId),
+    /// A name to save a drum clip's current steps as a pattern under.
+    DrumPatternName(ClipId),
 }
 
 /// Slider position (0 to 1, cubic) of a MIDI device latency in ms.
@@ -538,6 +550,30 @@ pub(crate) enum RangeKind {
     Punch,
 }
 
+/// Which tracks are shown/targeted by the right-click track context menu in
+/// the arrange view.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct TrackMenu {
+    pub track: TrackId,
+    pub pos: dawkey_ui::Point,
+}
+
+/// The confirmation dialog for mixing selected tracks down into one audio
+/// track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MixdownConfirm {
+    pub tracks: Vec<TrackId>,
+    pub remove_originals: bool,
+}
+
+/// The confirmation dialog for deleting selected tracks (non-destructive
+/// archive by default, or permanent deletion when `permanent` is true).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeleteConfirm {
+    pub tracks: Vec<TrackId>,
+    pub permanent: bool,
+}
+
 /// View settings and selection.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ViewState {
@@ -548,6 +584,17 @@ pub struct ViewState {
     pub scroll_s: f64,
     /// Vertical scroll of the track lanes, in logical px.
     pub scroll_y: f32,
+    /// Tracks selected in the arrange view (including buses).
+    pub selected_tracks: Vec<TrackId>,
+    /// Anchor track for Shift+click range selection in the arrange view.
+    #[serde(skip)]
+    pub(crate) track_anchor: Option<TrackId>,
+    /// Open right-click context menu on a track header in the arrange view.
+    pub track_menu: Option<TrackMenu>,
+    /// Open confirmation dialog for mixing down selected tracks.
+    pub mixdown_confirm: Option<MixdownConfirm>,
+    /// Open confirmation dialog for deleting selected tracks.
+    pub delete_confirm: Option<DeleteConfirm>,
     pub selected_clip: Option<ClipId>,
     /// The clip Ctrl+C copied, which Ctrl+V pastes.
     pub clipboard: Option<ClipId>,
@@ -576,6 +623,14 @@ pub struct ViewState {
     pub plugin_editor: Option<PluginId>,
     /// Vertical scroll of the open picker or editor, in logical px.
     pub overlay_scroll: f32,
+    /// Which track's effects rack is shown in `Page::Rack`.
+    pub rack_track: Option<TrackId>,
+    /// Vertical scroll of the 19-inch rack bay, in logical px.
+    pub rack_scroll: f32,
+    /// Current parameter page (0-based, 8 knobs per page) for external
+    /// plugins in the rack.
+    #[serde(skip)]
+    pub(crate) rack_pages: BTreeMap<PluginId, usize>,
     /// Tracks showing their automation lanes.
     pub automation_shown: Vec<TrackId>,
     /// Tracks showing their take lanes.
@@ -730,6 +785,11 @@ impl Default for ViewState {
             px_per_s: 80.0,
             scroll_s: 0.0,
             scroll_y: 0.0,
+            selected_tracks: Vec::new(),
+            track_anchor: None,
+            track_menu: None,
+            mixdown_confirm: None,
+            delete_confirm: None,
             selected_clip: None,
             clipboard: None,
             snap: true,
@@ -744,6 +804,9 @@ impl Default for ViewState {
             picker_selected: 0,
             plugin_editor: None,
             overlay_scroll: 0.0,
+            rack_track: None,
+            rack_scroll: 0.0,
+            rack_pages: BTreeMap::new(),
             automation_shown: Vec::new(),
             takes_shown: Vec::new(),
             selected_point: None,
