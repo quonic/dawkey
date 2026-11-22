@@ -160,6 +160,11 @@ impl Change {
             Edit::SetMeter { .. } => self.also.push("meter"),
             Edit::SetLoop(_) => self.also.push("loop"),
             Edit::SetPunch(_) => self.also.push("punch"),
+            Edit::SetRackPresets(_) => self.also.push("rack_presets"),
+            Edit::SetDrumPatterns(_) => self.also.push("drum_patterns"),
+            Edit::SetMixdownArchives(_) => self.also.push("mixdown_archives"),
+            Edit::SetDeletedTrackArchives(_) => self.also.push("deleted_track_archives"),
+            Edit::SetSources(_) => self.also.push("sources"),
         }
     }
 

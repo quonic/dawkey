@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Opening another project and closing the window ask first when there are
-//! unsaved changes: save them, discard them, or cancel.
+//! Starting a new project, opening another one, and closing the window ask
+//! first when there are unsaved changes: save them, discard them, or cancel.
+
+use dawkey_core::Project;
+use dawkey_studio::LoadedProject;
 
 use crate::App;
 use crate::state::{PendingAction, PlatformRequest};
@@ -46,6 +49,12 @@ impl App {
     pub fn proceed(&mut self, action: PendingAction) {
         self.view.confirm = None;
         match action {
+            PendingAction::NewProject => {
+                let project = Project::new("Untitled");
+                if let Err(e) = self.studio.replace(LoadedProject::new(project)) {
+                    self.message = Some(e.to_string());
+                }
+            }
             PendingAction::OpenProject => self
                 .platform_requests
                 .push(PlatformRequest::ChooseProjectToOpen),

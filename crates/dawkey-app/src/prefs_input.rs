@@ -9,7 +9,7 @@ use crate::App;
 use crate::prefs::{
     AUTOSAVE_MINUTES, AudioChoice, PluginKind, Preferences, ThemeChoice, UI_SCALES,
 };
-use crate::state::{PlatformRequest, TextField};
+use crate::state::{PlatformRequest, PrefsPage, TextField};
 
 impl App {
     /// Uses `prefs`, saving changes to `path` (`None`: nowhere).
@@ -91,6 +91,18 @@ impl App {
                 Ok(())
             }
             ["prefs"] => Ok(()),
+            ["prefs", "page", page] => {
+                self.view.prefs_page = match *page {
+                    "audio_midi" => PrefsPage::AudioMidi,
+                    "plugins" => PrefsPage::Plugins,
+                    "project_safety" => PrefsPage::ProjectSafety,
+                    "appearance" => PrefsPage::Appearance,
+                    "mcp" => PrefsPage::Mcp,
+                    _ => return None,
+                };
+                self.view.text_edit = None;
+                Ok(())
+            }
             ["prefs", "close" | "backdrop"] => {
                 self.view.prefs_open = false;
                 Ok(())

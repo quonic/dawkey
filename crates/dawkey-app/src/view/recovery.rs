@@ -32,7 +32,7 @@ pub(super) fn dialog(view: &ViewState, ui: &UiState, area: Rect, radius: f32) ->
     let action_button = |id: &str, text: &str, active: Option<Color>| {
         button(id, text, ui, active)
             .text(text)
-            .padding(Insets::xy(14.0, 0.0))
+            .padding(Insets::xy(SPACING.xl, 0.0))
             .height(Sizing::Fixed(30.0))
             .style(|s| s.weight = FontWeight::SemiBold)
     };
@@ -42,14 +42,14 @@ pub(super) fn dialog(view: &ViewState, ui: &UiState, area: Rect, radius: f32) ->
         .accessible_label("Recover unsaved changes?")
         .clickable()
         .width(Sizing::Fixed(PANEL_W))
-        .padding(Insets::all(20.0))
-        .gap(6.0)
+        .padding(Insets::all(SPACING.xxl))
+        .gap(SPACING.sm)
         .align(Align::Start)
         .style(|s| {
             s.background = Some(pal().panel);
             s.border = Some((1.0, pal().border));
-            s.radius = [8.0; 4];
-            s.shadow = Some((12.0, pal().shadow));
+            s.radius = [PANEL_RADIUS; 4];
+            s.shadow = Some(ELEVATION.medium());
         })
         .child(Node::label("Recover unsaved changes?").style(|s| {
             s.color = pal().text;
@@ -64,9 +64,9 @@ pub(super) fn dialog(view: &ViewState, ui: &UiState, area: Rect, radius: f32) ->
         .child(
             Node::row()
                 .width(Sizing::Fill(1.0))
-                .gap(8.0)
+                .gap(SPACING.md)
                 .padding(Insets {
-                    top: 14.0,
+                    top: SPACING.xl,
                     ..Insets::default()
                 })
                 .child(action_button("recover/discard", "Discard", None))
