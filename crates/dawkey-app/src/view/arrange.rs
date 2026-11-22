@@ -2,9 +2,10 @@
 //! The arrange view: track headers on the left; a ruler, track lanes with
 //! clips and waveforms, and the playhead on the right.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use dawkey_core::TrackKind;
+use dawkey_core::{ClipId, TrackId, TrackKind};
 use dawkey_ui::{
     Align, Color, Cursor, FontFamily, FontWeight, Insets, Node, Paint, Point, Rect, Role, Sizing,
     TextAlign, UiState,
@@ -58,7 +59,34 @@ pub(super) fn build(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
 }
 
 fn headers(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
-    let top = Node::row()
+    let extra_row = Node::row()
+        .width(Sizing::Fill(1.0))
+        .height(Sizing::Fixed(RULER_H))
+        .padding(Insets::xy(10.0, 0.0))
+        .style(|s| s.background = Some(pal().toolbar))
+        .children(model.deleted_archive_summary.as_deref().map(|summary| {
+            button("arrange/restore_deleted", summary, ui, None)
+                .text("Restore")
+                .padding(Insets::xy(6.0, 0.0))
+                .height(Sizing::Fixed(20.0))
+                .style(|s| s.font_size = 11.0)
+        }))
+        .child(Node::spacer())
+        .child(
+            button(
+                "arrange/add_drum_track",
+                "Add a drum machine track: the synthesized drum kit \
+                 instrument loaded with a starter kit, and an empty clip \
+                 ready for step programming",
+                ui,
+                None,
+            )
+            .text("+ Drum")
+            .padding(Insets::xy(6.0, 0.0))
+            .height(Sizing::Fixed(20.0))
+            .style(|s| s.font_size = 11.0),
+        );
+    let buttons_row = Node::row()
         .width(Sizing::Fill(1.0))
         .height(Sizing::Fixed(RULER_H))
         .padding(Insets::xy(10.0, 0.0))
@@ -70,6 +98,20 @@ fn headers(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
                 .padding(Insets::xy(6.0, 0.0))
                 .height(Sizing::Fixed(20.0))
                 .style(|s| s.font_size = 11.0),
+        )
+        .child(Node::row().width(Sizing::Fixed(4.0)))
+        .child(
+            button(
+                "arrange/add_guitar_track",
+                "Add a guitar track: armed, monitoring, and listening to \
+                 one input channel, ready to plug in and play",
+                ui,
+                None,
+            )
+            .text("+ Gtr")
+            .padding(Insets::xy(6.0, 0.0))
+            .height(Sizing::Fixed(20.0))
+            .style(|s| s.font_size = 11.0),
         )
         .child(Node::row().width(Sizing::Fixed(4.0)))
         .child(
@@ -101,6 +143,11 @@ fn headers(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
             .height(Sizing::Fixed(20.0))
             .style(|s| s.font_size = 11.0),
         );
+    let top = Node::column()
+        .width(Sizing::Fill(1.0))
+        .height(Sizing::Fixed(RULER_H * 2.0))
+        .child(extra_row)
+        .child(buttons_row);
     let layout = rows(model, view);
     let rows = model.tracks.iter().enumerate().flat_map(|(i, track)| {
         let (top, takes, lanes) = layout[i];
@@ -240,6 +287,7 @@ pub(crate) fn lane_value(points: &[(f64, f64)], t: f64) -> Option<f64> {
 
 fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> Node {
     let id = track.id;
+    let selected = view.shared.selected_tracks.contains(&id);
     let kind = match track.kind {
         TrackKind::Audio => "Audio",
         TrackKind::Midi => "MIDI",
@@ -249,6 +297,7 @@ fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> No
         .id(format!("track/{id}"))
         .role(Role::ListItem)
         .accessible_label(track.name.clone())
+        .clickable()
         .padding(Insets {
             left: 14.0,
             right: 10.0,
@@ -257,11 +306,20 @@ fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> No
         })
         .gap(6.0)
         .align(Align::Start)
-        .style(|s| s.background = Some(pal().track))
+        .style(|s| {
+            s.background = Some(if selected {
+                pal().track.mix(pal().accent, 0.18)
+            } else {
+                pal().track
+            });
+            if selected {
+                s.border = Some((1.0, pal().accent));
+            }
+        })
         // A color tab matching the track's clips.
         .child(
             Node::row()
-                .style(|s| s.background = Some(track_color(index)))
+                .style(|s| s.background = Some(track.color.unwrap_or_else(|| track_color(index))))
                 .absolute(Rect::new(-14.0, -8.0, 4.0, LANE_H - 1.0)),
         )
         .child(
@@ -295,6 +353,22 @@ fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> No
                     )
                 }))
                 .children((track.kind == TrackKind::Audio).then(|| {
+                    button(
+                        &format!("track/{id}/input"),
+                        "Input channel: click to cycle stereo, left or right",
+                        ui,
+                        None,
+                    )
+                    .value(track.input.label())
+                    .text(track.input.label())
+                    .padding(Insets::xy(6.0, 0.0))
+                    .height(Sizing::Fixed(18.0))
+                    .style(|s| {
+                        s.font_size = 10.0;
+                        s.color = pal().text_dim;
+                    })
+                }))
+                .children((track.kind == TrackKind::Audio).then(|| {
                     small_toggle(
                         &format!("track/{id}/monitor"),
                         "Input monitoring",
@@ -303,6 +377,13 @@ fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> No
                         pal().monitor_on,
                         ui,
                     )
+                }))
+                .children((track.has_mixdown_archive).then(|| {
+                    Node::label("Mix").style(|s| {
+                        s.color = pal().accent;
+                        s.font_size = 10.0;
+                        s.weight = FontWeight::SemiBold;
+                    })
                 }))
                 .child(Node::label(kind).style(|s| {
                     s.color = pal().text_dim;
@@ -363,6 +444,7 @@ fn timeline(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
         .role(Role::Timeline)
         .accessible_label("Timeline")
         .clickable()
+        .draggable()
         .scrollable()
         .fill()
         .clip()
@@ -376,17 +458,34 @@ fn timeline(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
         );
     }
     let layout = rows(model, view);
+    // Dragging one of several selected clips: every member's preview
+    // track and position, keyed by clip.
+    let group_preview: Option<HashMap<ClipId, (TrackId, f64)>> = match &view.gesture {
+        Some(Gesture::GroupMove {
+            members,
+            delta_s,
+            delta_rows,
+            ..
+        }) => Some(
+            members
+                .iter()
+                .filter_map(|&(clip, idx, start_s)| {
+                    let new_idx = usize::try_from(idx as i32 + delta_rows).ok()?;
+                    let track = model.tracks.get(new_idx)?;
+                    Some((clip, (track.id, start_s + delta_s)))
+                })
+                .collect(),
+        ),
+        _ => None,
+    };
     for (i, track) in model.tracks.iter().enumerate() {
         let (top, takes, shown) = layout[i];
         let y = top - view.scroll_y;
-        lanes = lanes.child(
-            lane(model, view, ui, track, i, takes > 0).absolute(Rect::new(
-                0.0,
-                y,
-                LANES_EXTENT,
-                LANE_H - 1.0,
-            )),
-        );
+        lanes =
+            lanes.child(
+                lane(model, view, ui, track, i, takes > 0, group_preview.as_ref())
+                    .absolute(Rect::new(0.0, y, LANES_EXTENT, LANE_H - 1.0)),
+            );
         for k in 0..takes {
             let ly = y + LANE_H + k as f32 * TAKE_H;
             lanes = lanes.child(take_lane(model, view, ui, track, i, k).absolute(Rect::new(
@@ -445,6 +544,42 @@ fn timeline(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
             );
         }
     }
+    // Group members moving to a different track are drawn in their
+    // target lane too; one staying on its own track is drawn inline by
+    // `lane` instead.
+    if let Some(Gesture::GroupMove {
+        members,
+        delta_s,
+        delta_rows,
+        ..
+    }) = &view.gesture
+    {
+        for &(clip, idx, start_s) in members {
+            let Ok(new_idx) = usize::try_from(idx as i32 + delta_rows) else {
+                continue;
+            };
+            if new_idx == idx {
+                continue;
+            }
+            let Some(c) = model
+                .tracks
+                .get(idx)
+                .and_then(|t| t.clips.iter().find(|c| c.id == clip))
+            else {
+                continue;
+            };
+            let Some(&(top, ..)) = layout.get(new_idx) else {
+                continue;
+            };
+            let y = top - view.scroll_y;
+            let node = clip_node(model, view, ui, c, idx, start_s + delta_s, Look::Moving);
+            lanes = lanes.child(
+                Node::row()
+                    .absolute(Rect::new(0.0, y, LANES_EXTENT, LANE_H - 1.0))
+                    .child(node),
+            );
+        }
+    }
     // While recording, armed lanes show what's being captured.
     if model.recording
         && let Some(start) = model.record_start_s
@@ -465,6 +600,21 @@ fn timeline(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
             }
         }
     }
+    if let Some(Gesture::ClipMarquee { from, to, .. }) = &view.gesture {
+        let (x0, x1) = (x_of(view, from.0.min(to.0)), x_of(view, from.0.max(to.0)));
+        let (y0, y1) = (
+            from.1.min(to.1) - view.scroll_y,
+            from.1.max(to.1) - view.scroll_y,
+        );
+        lanes = lanes.child(
+            Node::row()
+                .style(|s| {
+                    s.background = Some(pal().text.with_alpha(0.08));
+                    s.border = Some((1.0, pal().text.with_alpha(0.6)));
+                })
+                .absolute(Rect::new(x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0))),
+        );
+    }
     let playhead_x = x_of(view, model.position_s);
     lanes = lanes.child(Node::row().background(pal().accent).absolute(Rect::new(
         playhead_x - 1.0,
@@ -475,6 +625,15 @@ fn timeline(model: &ViewModel, view: &ViewState, ui: &UiState) -> Node {
     Node::column()
         .fill()
         .clip()
+        .child(
+            Node::row()
+                .width(Sizing::Fill(1.0))
+                .height(Sizing::Fixed(RULER_H))
+                .style(|s| {
+                    s.background = Some(pal().toolbar);
+                    s.border = Some((1.0, pal().border));
+                }),
+        )
         .child(ruler(model, view))
         .children(
             view.tempo_shown
@@ -498,7 +657,7 @@ fn automation_lane(
     k: usize,
     lane: &LaneView,
 ) -> Node {
-    let color = track_color(index);
+    let color = track.color.unwrap_or_else(|| track_color(index));
     let h = AUTO_H - 1.0;
     let y_of = |value: f64| 4.0 + (1.0 - lane.kind.unit(value)) * (h - 8.0);
     // The point being dragged shows where it's going.
@@ -585,6 +744,7 @@ fn lane(
     track: &TrackView,
     index: usize,
     comp_only: bool,
+    group_preview: Option<&HashMap<ClipId, (TrackId, f64)>>,
 ) -> Node {
     let bg = if index.is_multiple_of(2) {
         pal().lane_a
@@ -620,6 +780,23 @@ fn lane(
         .filter(|c| !(comp_only && c.muted))
         .flat_map(|c| {
             let mut nodes = Vec::new();
+            // Being dragged as part of a multi-selection: drawn here only
+            // if it hasn't also moved to a different track (then the
+            // overlay in `timeline` draws it there instead).
+            if let Some(&(target_track, new_start)) = group_preview.and_then(|m| m.get(&c.id)) {
+                if target_track == track.id {
+                    nodes.push(clip_node(
+                        model,
+                        view,
+                        ui,
+                        c,
+                        index,
+                        new_start,
+                        Look::Moving,
+                    ));
+                }
+                return nodes;
+            }
             match (dragged, trimmed) {
                 // Copying: the clip stays.
                 (Some((id, to, start, true)), _) if id == c.id => {
@@ -803,8 +980,14 @@ fn clip_node(
     let moving = matches!(look, Look::Moving | Look::Repeat);
     // Drawn only: the clip's widget is elsewhere.
     let ghost = matches!(look, Look::Original | Look::Repeat);
-    let selected = view.selected_clip == Some(clip.id) && !ghost;
-    let color = track_color(track_index);
+    let selected = (view.shared.selected_clips.contains(&clip.id)
+        || view.shared.selected_clip == Some(clip.id))
+        && !ghost;
+    let color = model
+        .tracks
+        .get(track_index)
+        .and_then(|t| t.color)
+        .unwrap_or_else(|| track_color(track_index));
     let color = if clip.muted {
         color.mix(pal().panel, if look == Look::Take { 0.75 } else { 0.6 })
     } else {

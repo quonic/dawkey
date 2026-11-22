@@ -40,6 +40,31 @@ pub(crate) struct Palette {
     pub(crate) lane_b: Color,
     /// Under a meter's bars.
     pub(crate) meter: Color,
+    /// 19" studio rack hardware colors.
+    pub(crate) rack_rail: Color,
+    pub(crate) rack_ear: Color,
+    pub(crate) rack_screw: Color,
+    pub(crate) rack_screen_bg: Color,
+    pub(crate) rack_screen_fg: Color,
+    pub(crate) rack_led_on: Color,
+    pub(crate) rack_led_off: Color,
+    pub(crate) rack_gate: Color,
+    pub(crate) rack_comp: Color,
+    pub(crate) rack_drive: Color,
+    pub(crate) rack_amp: Color,
+    pub(crate) rack_amp_accent: Color,
+    pub(crate) rack_eq: Color,
+    pub(crate) rack_cab: Color,
+    pub(crate) rack_chorus: Color,
+    pub(crate) rack_delay: Color,
+    pub(crate) rack_reverb: Color,
+    pub(crate) rack_autowah: Color,
+    pub(crate) rack_phaser: Color,
+    pub(crate) rack_drums: Color,
+    pub(crate) rack_ext: Color,
+    pub(crate) knob_body: Color,
+    pub(crate) knob_rim: Color,
+    pub(crate) knob_tick: Color,
 }
 
 impl Palette {
@@ -66,6 +91,30 @@ impl Palette {
         lane_a: Color::hex(0x1d1f24),
         lane_b: Color::hex(0x202228),
         meter: Color::hex(0x1b1d22),
+        rack_rail: Color::hex(0x111317),
+        rack_ear: Color::hex(0x1b1e24),
+        rack_screw: Color::hex(0x666d7a),
+        rack_screen_bg: Color::hex(0x0c1216),
+        rack_screen_fg: Color::hex(0x3ee8b5),
+        rack_led_on: Color::hex(0x3dd68c),
+        rack_led_off: Color::hex(0x3a3d45),
+        rack_gate: Color::hex(0x22252b),
+        rack_comp: Color::hex(0x2d3138),
+        rack_drive: Color::hex(0x1c3528),
+        rack_amp: Color::hex(0x201c17),
+        rack_amp_accent: Color::hex(0xd4a84f),
+        rack_eq: Color::hex(0x1b2538),
+        rack_cab: Color::hex(0x2b241f),
+        rack_chorus: Color::hex(0x261f38),
+        rack_delay: Color::hex(0x17191d),
+        rack_reverb: Color::hex(0x1e2b2f),
+        rack_autowah: Color::hex(0x2a1f30),
+        rack_phaser: Color::hex(0x1f2a30),
+        rack_drums: Color::hex(0x2e2220),
+        rack_ext: Color::hex(0x252830),
+        knob_body: Color::hex(0x15171b),
+        knob_rim: Color::hex(0x525866),
+        knob_tick: Color::hex(0x687080),
     };
 
     pub(crate) const LIGHT: Self = Self {
@@ -91,6 +140,30 @@ impl Palette {
         lane_a: Color::hex(0xeef0f3),
         lane_b: Color::hex(0xe8eaee),
         meter: Color::hex(0xd5d8dd),
+        rack_rail: Color::hex(0xcfd4dc),
+        rack_ear: Color::hex(0xdde1e7),
+        rack_screw: Color::hex(0x8b93a1),
+        rack_screen_bg: Color::hex(0x132026),
+        rack_screen_fg: Color::hex(0x4af0c0),
+        rack_led_on: Color::hex(0x23a86b),
+        rack_led_off: Color::hex(0xb6bcc6),
+        rack_gate: Color::hex(0xe6e8ec),
+        rack_comp: Color::hex(0xdcdfe5),
+        rack_drive: Color::hex(0xd8e6dd),
+        rack_amp: Color::hex(0xebe3d5),
+        rack_amp_accent: Color::hex(0xb37d1b),
+        rack_eq: Color::hex(0xdce3f0),
+        rack_cab: Color::hex(0xeae2da),
+        rack_chorus: Color::hex(0xe3ddf0),
+        rack_delay: Color::hex(0xe1e4ea),
+        rack_reverb: Color::hex(0xdce8eb),
+        rack_autowah: Color::hex(0xe6ddea),
+        rack_phaser: Color::hex(0xdde7ea),
+        rack_drums: Color::hex(0xede0d8),
+        rack_ext: Color::hex(0xe4e7ec),
+        knob_body: Color::hex(0x343842),
+        knob_rim: Color::hex(0x7e8694),
+        knob_tick: Color::hex(0x6b7280),
     };
 }
 
@@ -144,16 +217,76 @@ pub const SHADOW_MARGIN: f32 = 16.0;
 pub(crate) const SHADOW_BLUR: f32 = 12.0;
 pub(crate) const WINDOW_RADIUS: f32 = 10.0;
 pub(crate) const TITLEBAR_HEIGHT: f32 = 38.0;
-/// Track colors, cycled by track position (the same in either theme).
+
+/// A `(blur, color)` pair for `Style::shadow`, so every floating surface
+/// (dialogs, popovers, the window itself) picks from the same depth scale
+/// instead of inventing its own blur radius.
+pub(crate) type ElevationShadow = (f32, Color);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Elevation {
+    /// A dialog or picker panel.
+    pub(crate) medium: f32,
+    /// The window itself, the highest surface.
+    pub(crate) high: f32,
+}
+
+pub(crate) const ELEVATION: Elevation = Elevation {
+    medium: 12.0,
+    high: SHADOW_BLUR,
+};
+
+impl Elevation {
+    pub(crate) fn medium(self) -> ElevationShadow {
+        (self.medium, pal().shadow)
+    }
+
+    pub(crate) fn high(self) -> ElevationShadow {
+        (self.high, pal().shadow)
+    }
+}
+
+/// The spacing scale the floating dialogs (export, confirm, recovery,
+/// prefs, the plugin picker/editor) already share, so their padding and
+/// gaps come from one place instead of repeated literals.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Spacing {
+    pub(crate) xs: f32,
+    pub(crate) sm: f32,
+    pub(crate) md: f32,
+    pub(crate) lg: f32,
+    pub(crate) xl: f32,
+    pub(crate) xxl: f32,
+}
+
+pub(crate) const SPACING: Spacing = Spacing {
+    xs: 2.0,
+    sm: 6.0,
+    md: 8.0,
+    lg: 10.0,
+    xl: 14.0,
+    xxl: 20.0,
+};
+
+/// Corner radius those same dialogs already share.
+pub(crate) const PANEL_RADIUS: f32 = 8.0;
+
+/// Track colors, cycled by track position (the same in either theme), as
+/// `0xRRGGBB`; the swatch picker and `set_track_color` use these same
+/// values so a user-picked color round-trips through the project file.
+pub(crate) const TRACK_COLOR_HEX: [u32; 8] = [
+    0x4c8dff, 0x3dd68c, 0xf0b429, 0xe5484d, 0xb072ff, 0x2ec4c4, 0xff8a3d, 0xe864b5,
+];
+
 pub(crate) const TRACK_COLORS: [Color; 8] = [
-    Color::hex(0x4c8dff),
-    Color::hex(0x3dd68c),
-    Color::hex(0xf0b429),
-    Color::hex(0xe5484d),
-    Color::hex(0xb072ff),
-    Color::hex(0x2ec4c4),
-    Color::hex(0xff8a3d),
-    Color::hex(0xe864b5),
+    Color::hex(TRACK_COLOR_HEX[0]),
+    Color::hex(TRACK_COLOR_HEX[1]),
+    Color::hex(TRACK_COLOR_HEX[2]),
+    Color::hex(TRACK_COLOR_HEX[3]),
+    Color::hex(TRACK_COLOR_HEX[4]),
+    Color::hex(TRACK_COLOR_HEX[5]),
+    Color::hex(TRACK_COLOR_HEX[6]),
+    Color::hex(TRACK_COLOR_HEX[7]),
 ];
 
 impl crate::App {
