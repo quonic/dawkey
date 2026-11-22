@@ -13,7 +13,7 @@ const PANEL_W: f32 = 480.0;
 
 /// The dialog over `area` (the window below its title bar), if it's open.
 pub(super) fn dialog(view: &ViewState, ui: &UiState, area: Rect, radius: f32) -> Option<Node> {
-    let recovery = view.recovery.as_ref()?;
+    let recovery = view.shared.recovery.as_ref()?;
     let what = match &recovery.bundle {
         Some(bundle) => {
             let name = bundle

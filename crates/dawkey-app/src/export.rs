@@ -39,7 +39,7 @@ impl App {
     /// Clicks on the export dialog and the status bar's cancel button.
     /// `None` if `parts` isn't one of theirs.
     pub(crate) fn on_export_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
-        let settings = &mut self.view.export;
+        let settings = &mut self.view.shared.export;
         Some(match parts {
             ["toolbar", "export"] => {
                 self.open_export_dialog();
@@ -47,7 +47,7 @@ impl App {
             }
             ["export"] => Ok(()),
             ["export", "cancel"] | ["export", "backdrop"] => {
-                self.view.export_dialog = false;
+                self.view.shared.export_dialog = false;
                 Ok(())
             }
             ["export", "format"] => {
@@ -122,13 +122,13 @@ impl App {
     /// Keys while the export dialog is open: Return exports, Escape closes
     /// it. `None` if it's closed.
     pub(crate) fn on_export_key(&mut self, key: &str) -> Option<Result<(), String>> {
-        if !self.view.export_dialog {
+        if !self.view.shared.export_dialog {
             return None;
         }
         Some(match key {
             "return" => self.choose_export_location(),
             "escape" => {
-                self.view.export_dialog = false;
+                self.view.shared.export_dialog = false;
                 Ok(())
             }
             _ => Ok(()),
@@ -137,7 +137,7 @@ impl App {
 
     pub(crate) fn open_export_dialog(&mut self) {
         self.close_overlays();
-        self.view.export_dialog = true;
+        self.view.shared.export_dialog = true;
     }
 
     /// The dialog's "Export…": closes it and asks where to.
@@ -145,12 +145,12 @@ impl App {
         self.export_range()?;
         // Settings the format can't take (FLAC at the project's 192 kHz)
         // are refused before asking where to.
-        self.export_spec(self.view.export.format).check()?;
+        self.export_spec(self.view.shared.export.format).check()?;
         if self.export.is_some() {
             return Err("an export is already running".into());
         }
-        self.view.export_dialog = false;
-        let format = self.view.export.format;
+        self.view.shared.export_dialog = false;
+        let format = self.view.shared.export.format;
         let name = format!(
             "{}.{}",
             self.studio.session().project().name,
@@ -164,7 +164,7 @@ impl App {
     /// The range the settings cover, in seconds, tail included.
     fn export_range(&self) -> Result<(f64, f64), String> {
         let project = self.studio.session().project();
-        let settings = &self.view.export;
+        let settings = &self.view.shared.export;
         let (start, end) = match settings.range {
             ExportRange::Song => (0, project.end()),
             // The loop range, whether looping is on or not.
@@ -187,7 +187,7 @@ impl App {
 
     /// What the export settings ask for, as a `file`.
     fn export_spec(&self, file: FileFormat) -> ExportSpec {
-        let settings = self.view.export;
+        let settings = self.view.shared.export;
         let project = self.studio.session().project();
         ExportSpec {
             quality: settings.quality,
@@ -208,7 +208,8 @@ impl App {
             return Err("an export is already running".into());
         }
         let (start_s, end_s) = self.export_range()?;
-        let spec = self.export_spec(FileFormat::from_path(path).unwrap_or(self.view.export.format));
+        let spec =
+            self.export_spec(FileFormat::from_path(path).unwrap_or(self.view.shared.export.format));
         spec.check()?;
         let job = self
             .studio

@@ -78,7 +78,7 @@ impl App {
 
     pub(crate) fn open_preferences(&mut self) {
         self.close_overlays();
-        self.view.prefs_open = true;
+        self.view.shared.prefs_open = true;
     }
 
     /// Clicks on the preferences panel and the button that opens it.
@@ -95,7 +95,7 @@ impl App {
             }
             ["prefs"] => Ok(()),
             ["prefs", "page", page] => {
-                self.view.prefs_page = match *page {
+                self.view.shared.prefs_page = match *page {
                     "audio_midi" => PrefsPage::AudioMidi,
                     "plugins" => PrefsPage::Plugins,
                     "project_safety" => PrefsPage::ProjectSafety,
@@ -103,11 +103,11 @@ impl App {
                     "mcp" => PrefsPage::Mcp,
                     _ => return None,
                 };
-                self.view.text_edit = None;
+                self.view.shared.text_edit = None;
                 Ok(())
             }
             ["prefs", "close" | "backdrop"] => {
-                self.view.prefs_open = false;
+                self.view.shared.prefs_open = false;
                 Ok(())
             }
             ["prefs", "audio"] => {
@@ -228,11 +228,11 @@ impl App {
     /// Keys while the panel is open: Escape closes it, and nothing else
     /// gets through to the window behind it. `None` if it's closed.
     pub(crate) fn on_prefs_key(&mut self, key: &str) -> Option<Result<(), String>> {
-        if !self.view.prefs_open {
+        if !self.view.shared.prefs_open {
             return None;
         }
         if key == "escape" {
-            self.view.prefs_open = false;
+            self.view.shared.prefs_open = false;
         }
         Some(Ok(()))
     }

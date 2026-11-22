@@ -22,10 +22,10 @@ pub(super) fn dialog(
     area: Rect,
     radius: f32,
 ) -> Option<Node> {
-    if !view.export_dialog {
+    if !view.shared.export_dialog {
         return None;
     }
-    let settings = &view.export;
+    let settings = &view.shared.export;
     let format = match settings.format {
         FileFormat::Wav => "WAV",
         FileFormat::Flac => "FLAC",

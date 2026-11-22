@@ -51,7 +51,7 @@ pub use multi_window::{MonitorInfo, ViewRole, WIDESCREEN_ROLES, plan_windows};
 pub use prefs::{AudioChoice, LayoutChoice, PluginKind, Preferences, ThemeChoice};
 pub use state::{
     ExportRange, ExportSettings, ImportRequest, Marker, Page, PendingAction, PlatformRequest,
-    RollLane, ViewState,
+    RollLane, SharedViewState, ViewState,
 };
 pub use theme::{SHADOW_MARGIN, Theme};
 
@@ -402,14 +402,16 @@ impl App {
             self.view.plugin_picker = None;
         }
         self.view
+            .shared
             .selected_tracks
             .retain(|&id| project.tracks.iter().any(|t| t.id == id));
         if self
             .view
+            .shared
             .track_anchor
             .is_some_and(|id| project.tracks.iter().all(|t| t.id != id))
         {
-            self.view.track_anchor = self.view.selected_tracks.first().copied();
+            self.view.shared.track_anchor = self.view.shared.selected_tracks.first().copied();
         }
         if self
             .view
@@ -418,20 +420,20 @@ impl App {
         {
             self.view.track_menu = None;
         }
-        if let Some(confirm) = &mut self.view.mixdown_confirm {
+        if let Some(confirm) = &mut self.view.shared.mixdown_confirm {
             confirm
                 .tracks
                 .retain(|&id| project.tracks.iter().any(|t| t.id == id));
             if confirm.tracks.is_empty() {
-                self.view.mixdown_confirm = None;
+                self.view.shared.mixdown_confirm = None;
             }
         }
-        if let Some(confirm) = &mut self.view.delete_confirm {
+        if let Some(confirm) = &mut self.view.shared.delete_confirm {
             confirm
                 .tracks
                 .retain(|&id| project.tracks.iter().any(|t| t.id == id));
             if confirm.tracks.is_empty() {
-                self.view.delete_confirm = None;
+                self.view.shared.delete_confirm = None;
             }
         }
         if self
@@ -686,14 +688,15 @@ impl App {
     /// Replaces the open project (from the open dialog).
     pub fn replace_project(&mut self, loaded: LoadedProject) -> Result<(), String> {
         self.studio.replace(loaded).map_err(|e| e.to_string())?;
+        let export = self.view.shared.export;
         self.view = ViewState {
             page: self.view.page,
-            export: self.view.export,
             ..ViewState::default()
         };
+        self.view.shared.export = export;
         // Opened in the window: changes a crash kept are offered back.
         if self.platform == Platform::Wayland {
-            self.view.recovery = self.studio.bundle_recovery();
+            self.view.shared.recovery = self.studio.bundle_recovery();
         }
         self.rebuild();
         Ok(())
@@ -1064,7 +1067,7 @@ impl App {
             rack_presets,
             drum_patterns,
             scanning,
-            automation_write: self.view.automation_write,
+            automation_write: self.view.shared.automation_write,
             song_end_s: project.frames_to_seconds(project.end()),
             prefs: self.prefs.clone(),
             mcp_http: self.mcp_http_state.clone(),

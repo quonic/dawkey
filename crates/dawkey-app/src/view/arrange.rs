@@ -287,7 +287,7 @@ pub(crate) fn lane_value(points: &[(f64, f64)], t: f64) -> Option<f64> {
 
 fn header(track: &TrackView, index: usize, ui: &UiState, view: &ViewState) -> Node {
     let id = track.id;
-    let selected = view.selected_tracks.contains(&id);
+    let selected = view.shared.selected_tracks.contains(&id);
     let kind = match track.kind {
         TrackKind::Audio => "Audio",
         TrackKind::Midi => "MIDI",
@@ -980,8 +980,9 @@ fn clip_node(
     let moving = matches!(look, Look::Moving | Look::Repeat);
     // Drawn only: the clip's widget is elsewhere.
     let ghost = matches!(look, Look::Original | Look::Repeat);
-    let selected =
-        (view.selected_clips.contains(&clip.id) || view.selected_clip == Some(clip.id)) && !ghost;
+    let selected = (view.shared.selected_clips.contains(&clip.id)
+        || view.shared.selected_clip == Some(clip.id))
+        && !ghost;
     let color = model
         .tracks
         .get(track_index)

@@ -58,7 +58,7 @@ impl App {
             .ok_or_else(|| format!("clip {clip} does not exist"))?;
         let (track, lane) = (track.id, c.lane);
         let anchor_s = self.comp_time(origin.x, modifiers);
-        self.view.selected_clip = Some(clip);
+        self.view.shared.selected_clip = Some(clip);
         self.view.selected_marker = None;
         Ok(Some(Gesture::Comp {
             track,
@@ -154,7 +154,7 @@ impl App {
                 .into(),
             )
             .map_err(|e| e.to_string())?;
-        self.view.selected_clip = outcome.clip;
+        self.view.shared.selected_clip = outcome.clip;
         self.view.selected_marker = None;
         Ok(())
     }

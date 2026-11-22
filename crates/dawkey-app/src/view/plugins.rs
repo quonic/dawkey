@@ -506,7 +506,7 @@ fn editor(
         };
         let active = ui.is_pressed(&slider_id) || ui.is_hovered(&slider_id);
         let text = p.text.clone();
-        let typing = view.text_edit.as_ref().filter(|e| {
+        let typing = view.shared.text_edit.as_ref().filter(|e| {
             matches!(&e.field, TextField::PluginParam { plugin, param }
                 if *plugin == d.plugin && *param == p.id)
         });

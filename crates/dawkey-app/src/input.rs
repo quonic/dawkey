@@ -83,15 +83,15 @@ impl App {
         let parts: Vec<&str> = id.split('/').collect();
         if button == MouseButton::Right {
             if self.view.page == Page::Arrange
-                && self.view.confirm.is_none()
-                && self.view.mixdown_confirm.is_none()
-                && self.view.delete_confirm.is_none()
+                && self.view.shared.confirm.is_none()
+                && self.view.shared.mixdown_confirm.is_none()
+                && self.view.shared.delete_confirm.is_none()
                 && let ["track", track, ..] = parts[..]
                 && let Ok(track) = parse_track(track)
                 && track != dawkey_core::MASTER
                 && self.studio.session().project().track(track).is_some()
             {
-                if !self.view.selected_tracks.contains(&track) {
+                if !self.view.shared.selected_tracks.contains(&track) {
                     self.select_track(track, Modifiers::default())?;
                 }
                 self.view.track_menu = Some(TrackMenu { track, pos });
@@ -230,7 +230,7 @@ impl App {
             ["transport", "loop"] => self.toggle_region(RangeKind::Loop),
             ["transport", "punch"] => self.toggle_region(RangeKind::Punch),
             ["transport", "automation"] => {
-                self.view.automation_write = !self.view.automation_write;
+                self.view.shared.automation_write = !self.view.shared.automation_write;
                 Ok(())
             }
             ["transport", "automation_mode"] => {
@@ -323,8 +323,8 @@ impl App {
             }
             ["timeline", "ruler"] => self.locate_at(pos.x),
             ["timeline", "lanes"] => {
-                self.view.selected_clip = None;
-                self.view.selected_clips.clear();
+                self.view.shared.selected_clip = None;
+                self.view.shared.selected_clips.clear();
                 self.view.selected_marker = None;
                 // Double-clicking an empty MIDI lane makes a clip there.
                 if count == 2
@@ -569,8 +569,8 @@ impl App {
                         selected.push(id);
                     }
                 }
-                self.view.selected_clips = selected.clone();
-                self.view.selected_clip = selected.last().copied();
+                self.view.shared.selected_clips = selected.clone();
+                self.view.shared.selected_clip = selected.last().copied();
                 self.view.gesture = (!end).then_some(Gesture::ClipMarquee { base, from, to });
                 Ok(())
             }
@@ -762,7 +762,7 @@ impl App {
             return gesture;
         }
         if let Some(gesture) = self.start_tempo_gesture(&parts, origin) {
-            self.view.selected_clip = None;
+            self.view.shared.selected_clip = None;
             return gesture;
         }
         if let ["take", clip] = parts[..] {
@@ -797,14 +797,15 @@ impl App {
                 // Grabbing a clip already in a multi-selection keeps the
                 // whole selection and moves it as a group; grabbing any
                 // other one selects just it.
-                if !self.view.selected_clips.contains(&clip) {
+                if !self.view.shared.selected_clips.contains(&clip) {
                     self.select_clip(clip, modifiers);
                 }
                 self.view.selected_marker = None;
-                if self.view.selected_clips.len() > 1 {
+                if self.view.shared.selected_clips.len() > 1 {
                     let project = self.studio.session().project();
                     let members: Vec<(ClipId, usize, f64)> = self
                         .view
+                        .shared
                         .selected_clips
                         .iter()
                         .filter_map(|&id| {
@@ -895,12 +896,12 @@ impl App {
                     self.lane_content_y(origin.y),
                 );
                 let base = if modifiers.shift || modifiers.ctrl {
-                    self.view.selected_clips.clone()
+                    self.view.shared.selected_clips.clone()
                 } else {
                     Vec::new()
                 };
-                self.view.selected_clips = base.clone();
-                self.view.selected_clip = base.last().copied();
+                self.view.shared.selected_clips = base.clone();
+                self.view.shared.selected_clip = base.last().copied();
                 Some(Gesture::ClipMarquee {
                     base,
                     from: at,
@@ -1010,10 +1011,12 @@ impl App {
                 Some(clip) => self.open_piano_roll(clip),
                 None => Ok(()),
             },
-            ("f2", false, _) if self.view.page == Page::Arrange => match self.view.selected_clip {
-                Some(clip) => self.start_text_edit(TextField::ClipName(clip)),
-                None => Ok(()),
-            },
+            ("f2", false, _) if self.view.page == Page::Arrange => {
+                match self.view.shared.selected_clip {
+                    Some(clip) => self.start_text_edit(TextField::ClipName(clip)),
+                    None => Ok(()),
+                }
+            }
             ("space", false, _) => if self.studio.transport().playing {
                 self.studio.stop()
             } else {
@@ -1060,17 +1063,21 @@ impl App {
                 Ok(())
             }
             ("c", true, false) if self.view.page == Page::Arrange => {
-                let clip = self.view.selected_clip.ok_or("select a clip to copy")?;
-                self.view.clipboard = Some(clip);
+                let clip = self
+                    .view
+                    .shared
+                    .selected_clip
+                    .ok_or("select a clip to copy")?;
+                self.view.shared.clipboard = Some(clip);
                 Ok(())
             }
             ("v", true, false) if self.view.page == Page::Arrange => self.paste_clip(),
             ("delete" | "backspace", false, _) => {
-                let mut clips = std::mem::take(&mut self.view.selected_clips);
+                let mut clips = std::mem::take(&mut self.view.shared.selected_clips);
                 if clips.is_empty() {
-                    clips.extend(self.view.selected_clip.take());
+                    clips.extend(self.view.shared.selected_clip.take());
                 } else {
-                    self.view.selected_clip = None;
+                    self.view.shared.selected_clip = None;
                 }
                 for clip in clips {
                     self.execute(RemoveClip { clip }.into())?;
@@ -1099,10 +1106,10 @@ impl App {
                 Ok(())
             }
             ("escape", ..) => {
-                self.view.selected_clip = None;
-                self.view.selected_clips.clear();
-                self.view.selected_tracks.clear();
-                self.view.track_anchor = None;
+                self.view.shared.selected_clip = None;
+                self.view.shared.selected_clips.clear();
+                self.view.shared.selected_tracks.clear();
+                self.view.shared.track_anchor = None;
                 Ok(())
             }
             _ => Ok(()),
@@ -1308,15 +1315,21 @@ impl App {
         // Ctrl is reserved for dragging a copy of a clip, so only Shift
         // toggles it in the multi-selection here.
         if modifiers.shift {
-            if let Some(pos) = self.view.selected_clips.iter().position(|&c| c == clip) {
-                self.view.selected_clips.remove(pos);
+            if let Some(pos) = self
+                .view
+                .shared
+                .selected_clips
+                .iter()
+                .position(|&c| c == clip)
+            {
+                self.view.shared.selected_clips.remove(pos);
             } else {
-                self.view.selected_clips.push(clip);
+                self.view.shared.selected_clips.push(clip);
             }
         } else {
-            self.view.selected_clips = vec![clip];
+            self.view.shared.selected_clips = vec![clip];
         }
-        self.view.selected_clip = self.view.selected_clips.last().copied();
+        self.view.shared.selected_clip = self.view.shared.selected_clips.last().copied();
     }
 
     /// Selects track `track` in the arrange view (`Ctrl` toggles, `Shift`
@@ -1333,8 +1346,9 @@ impl App {
         if modifiers.shift {
             let anchor = self
                 .view
+                .shared
                 .track_anchor
-                .or_else(|| self.view.selected_tracks.first().copied())
+                .or_else(|| self.view.shared.selected_tracks.first().copied())
                 .filter(|&id| project.track(id).is_some())
                 .unwrap_or(track);
             let Some(a) = project.track_index(anchor) else {
@@ -1347,26 +1361,32 @@ impl App {
             let range: Vec<TrackId> = project.tracks[lo..=hi].iter().map(|t| t.id).collect();
             if modifiers.ctrl {
                 for id in range {
-                    if !self.view.selected_tracks.contains(&id) {
-                        self.view.selected_tracks.push(id);
+                    if !self.view.shared.selected_tracks.contains(&id) {
+                        self.view.shared.selected_tracks.push(id);
                     }
                 }
             } else {
-                self.view.selected_tracks = range;
+                self.view.shared.selected_tracks = range;
             }
-            if self.view.track_anchor.is_none() {
-                self.view.track_anchor = Some(anchor);
+            if self.view.shared.track_anchor.is_none() {
+                self.view.shared.track_anchor = Some(anchor);
             }
         } else if modifiers.ctrl {
-            if let Some(pos) = self.view.selected_tracks.iter().position(|&id| id == track) {
-                self.view.selected_tracks.remove(pos);
+            if let Some(pos) = self
+                .view
+                .shared
+                .selected_tracks
+                .iter()
+                .position(|&id| id == track)
+            {
+                self.view.shared.selected_tracks.remove(pos);
             } else {
-                self.view.selected_tracks.push(track);
+                self.view.shared.selected_tracks.push(track);
             }
-            self.view.track_anchor = Some(track);
+            self.view.shared.track_anchor = Some(track);
         } else {
-            self.view.selected_tracks = vec![track];
-            self.view.track_anchor = Some(track);
+            self.view.shared.selected_tracks = vec![track];
+            self.view.shared.track_anchor = Some(track);
         }
         self.view.rack_track = Some(track);
         Ok(())
@@ -1378,7 +1398,7 @@ impl App {
             .tracks
             .iter()
             .map(|t| t.id)
-            .filter(|id| self.view.selected_tracks.contains(id))
+            .filter(|id| self.view.shared.selected_tracks.contains(id))
             .collect();
         if tracks.is_empty() {
             tracks.push(fallback);
@@ -1397,7 +1417,7 @@ impl App {
             ["track_menu", "mixdown"] => {
                 let tracks = self.menu_tracks(menu.track);
                 self.view.track_menu = None;
-                self.view.mixdown_confirm = Some(MixdownConfirm {
+                self.view.shared.mixdown_confirm = Some(MixdownConfirm {
                     tracks,
                     remove_originals: true,
                 });
@@ -1416,7 +1436,7 @@ impl App {
             ["track_menu", "delete"] => {
                 let tracks = self.menu_tracks(menu.track);
                 self.view.track_menu = None;
-                self.view.delete_confirm = Some(DeleteConfirm {
+                self.view.shared.delete_confirm = Some(DeleteConfirm {
                     tracks,
                     permanent: false,
                 });
@@ -1430,13 +1450,13 @@ impl App {
                 let tracks = self.menu_tracks(menu.track);
                 self.view.track_menu = None;
                 let project = self.studio.session().project();
-                self.view.selected_clips = project
+                self.view.shared.selected_clips = project
                     .tracks
                     .iter()
                     .filter(|t| tracks.contains(&t.id))
                     .flat_map(|t| t.clips.iter().map(|c| c.id))
                     .collect();
-                self.view.selected_clip = self.view.selected_clips.last().copied();
+                self.view.shared.selected_clip = self.view.shared.selected_clips.last().copied();
                 Ok(())
             }
             ["track_menu", "rename"] => {
@@ -1480,8 +1500,8 @@ impl App {
                 match self.studio.duplicate_track(menu.track) {
                     Ok(outcome) => {
                         if let Some(track) = outcome.track {
-                            self.view.selected_tracks = vec![track];
-                            self.view.track_anchor = Some(track);
+                            self.view.shared.selected_tracks = vec![track];
+                            self.view.shared.track_anchor = Some(track);
                         }
                         Ok(())
                     }
@@ -1566,15 +1586,15 @@ impl App {
     }
 
     fn on_mixdown_confirm_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
-        self.view.mixdown_confirm.as_ref()?;
+        self.view.shared.mixdown_confirm.as_ref()?;
         Some(match parts {
             ["mixdown_confirm"] => Ok(()),
             ["mixdown_confirm", "cancel"] | ["mixdown_confirm", "backdrop"] => {
-                self.view.mixdown_confirm = None;
+                self.view.shared.mixdown_confirm = None;
                 Ok(())
             }
             ["mixdown_confirm", "remove_originals"] => {
-                if let Some(confirm) = &mut self.view.mixdown_confirm {
+                if let Some(confirm) = &mut self.view.shared.mixdown_confirm {
                     confirm.remove_originals = !confirm.remove_originals;
                 }
                 Ok(())
@@ -1585,15 +1605,15 @@ impl App {
     }
 
     fn on_delete_confirm_click(&mut self, parts: &[&str]) -> Option<Result<(), String>> {
-        self.view.delete_confirm.as_ref()?;
+        self.view.shared.delete_confirm.as_ref()?;
         Some(match parts {
             ["delete_confirm"] => Ok(()),
             ["delete_confirm", "cancel"] | ["delete_confirm", "backdrop"] => {
-                self.view.delete_confirm = None;
+                self.view.shared.delete_confirm = None;
                 Ok(())
             }
             ["delete_confirm", "permanent"] => {
-                if let Some(confirm) = &mut self.view.delete_confirm {
+                if let Some(confirm) = &mut self.view.shared.delete_confirm {
                     confirm.permanent = !confirm.permanent;
                 }
                 Ok(())
@@ -1604,20 +1624,20 @@ impl App {
     }
 
     fn on_mixdown_key(&mut self, key: &str) -> Option<Result<(), String>> {
-        if self.view.mixdown_confirm.is_some() {
+        if self.view.shared.mixdown_confirm.is_some() {
             return Some(match key {
                 "escape" => {
-                    self.view.mixdown_confirm = None;
+                    self.view.shared.mixdown_confirm = None;
                     Ok(())
                 }
                 "return" => self.confirm_mixdown(),
                 _ => Ok(()),
             });
         }
-        if self.view.delete_confirm.is_some() {
+        if self.view.shared.delete_confirm.is_some() {
             return Some(match key {
                 "escape" => {
-                    self.view.delete_confirm = None;
+                    self.view.shared.delete_confirm = None;
                     Ok(())
                 }
                 "return" => self.confirm_delete_tracks(),
@@ -1636,7 +1656,7 @@ impl App {
     }
 
     fn confirm_mixdown(&mut self) -> Result<(), String> {
-        let Some(confirm) = self.view.mixdown_confirm.take() else {
+        let Some(confirm) = self.view.shared.mixdown_confirm.take() else {
             return Ok(());
         };
         let outcome = self
@@ -1644,22 +1664,22 @@ impl App {
             .mixdown_tracks(&confirm.tracks, None, confirm.remove_originals)
             .map_err(|e| e.to_string())?;
         if let Some(new_track) = outcome.track {
-            self.view.selected_tracks = vec![new_track];
-            self.view.track_anchor = Some(new_track);
+            self.view.shared.selected_tracks = vec![new_track];
+            self.view.shared.track_anchor = Some(new_track);
             self.view.rack_track = Some(new_track);
         }
         Ok(())
     }
 
     fn confirm_delete_tracks(&mut self) -> Result<(), String> {
-        let Some(confirm) = self.view.delete_confirm.take() else {
+        let Some(confirm) = self.view.shared.delete_confirm.take() else {
             return Ok(());
         };
         self.studio
             .delete_tracks(&confirm.tracks, confirm.permanent)
             .map_err(|e| e.to_string())?;
-        self.view.selected_tracks.clear();
-        self.view.track_anchor = None;
+        self.view.shared.selected_tracks.clear();
+        self.view.shared.track_anchor = None;
         Ok(())
     }
 
@@ -1669,8 +1689,8 @@ impl App {
             .execute(RestoreDeletedTracks { index: None }.into())
             .map_err(|e| e.to_string())?;
         if let Some(restored) = outcome.track {
-            self.view.selected_tracks = vec![restored];
-            self.view.track_anchor = Some(restored);
+            self.view.shared.selected_tracks = vec![restored];
+            self.view.shared.track_anchor = Some(restored);
             self.view.rack_track = Some(restored);
         }
         Ok(())
@@ -1684,6 +1704,7 @@ impl App {
             .filter(|c| self.clip_kind(*c) == Some(TrackKind::Midi))
             .or(self
                 .view
+                .shared
                 .selected_clip
                 .filter(|c| self.clip_kind(*c) == Some(TrackKind::Midi)))
     }

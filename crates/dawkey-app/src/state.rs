@@ -622,29 +622,18 @@ pub struct DeleteConfirm {
     pub permanent: bool,
 }
 
-/// View settings and selection.
+/// State shared by every view open at once (one window with a page switcher
+/// today; a window or pane per view, once multi-monitor/widescreen layouts
+/// are built). Selection, the clipboard, confirmation/preferences/export
+/// dialogs and the transport's automation-write state are project-wide, not
+/// tied to whichever view is showing them.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ViewState {
-    pub page: Page,
-    /// Timeline zoom.
-    pub px_per_s: f32,
-    /// Time at the left edge of the timeline.
-    pub scroll_s: f64,
-    /// Vertical scroll of the track lanes, in logical px.
-    pub scroll_y: f32,
+pub struct SharedViewState {
     /// Tracks selected in the arrange view (including buses).
     pub selected_tracks: Vec<TrackId>,
     /// Anchor track for Shift+click range selection in the arrange view.
     #[serde(skip)]
     pub(crate) track_anchor: Option<TrackId>,
-    /// Open right-click context menu on a track header in the arrange view.
-    pub track_menu: Option<TrackMenu>,
-    /// Open "Change Output…" or "Color" popup from the track context menu.
-    pub track_popup: Option<TrackPopup>,
-    /// Open confirmation dialog for mixing down selected tracks.
-    pub mixdown_confirm: Option<MixdownConfirm>,
-    /// Open confirmation dialog for deleting selected tracks.
-    pub delete_confirm: Option<DeleteConfirm>,
     pub selected_clip: Option<ClipId>,
     /// Every clip selected in the arrange view, including `selected_clip`
     /// (its most recently touched one, used for single-target actions
@@ -656,6 +645,85 @@ pub struct ViewState {
     pub selected_clips: Vec<ClipId>,
     /// The clip Ctrl+C copied, which Ctrl+V pastes.
     pub clipboard: Option<ClipId>,
+    /// Open confirmation dialog for mixing down selected tracks.
+    pub mixdown_confirm: Option<MixdownConfirm>,
+    /// Open confirmation dialog for deleting selected tracks.
+    pub delete_confirm: Option<DeleteConfirm>,
+    /// The "save changes?" dialog is open, before doing this.
+    pub confirm: Option<PendingAction>,
+    /// A field being typed in.
+    pub text_edit: Option<TextEdit>,
+    /// Unsaved changes to offer to recover (the dialog is open).
+    pub recovery: Option<dawkey_studio::Recovery>,
+    /// The preferences panel is open.
+    pub prefs_open: bool,
+    /// Current category in the Preferences panel.
+    pub prefs_page: PrefsPage,
+    /// The export dialog is open.
+    pub export_dialog: bool,
+    /// What the export dialog exports (kept between exports).
+    pub export: ExportSettings,
+    /// Moving faders, pan and plugin parameters while playing writes
+    /// automation (the transport's "Auto").
+    pub automation_write: bool,
+    /// How it writes (the button next to "Auto").
+    pub automation_mode: AutomationMode,
+    /// The automation being written: the current gesture's, and in latch
+    /// and write modes every lane written since playback started.
+    #[serde(skip)]
+    pub(crate) writing: Vec<AutomationWrite>,
+    /// The write pass going on (latch and write modes), from the first
+    /// lane it wrote until the transport stops.
+    #[serde(skip)]
+    pub(crate) pass: Option<AutomationPass>,
+    /// Write passes so far, so each has its own undo step.
+    #[serde(skip)]
+    pub(crate) passes: u32,
+}
+
+impl Default for SharedViewState {
+    fn default() -> Self {
+        Self {
+            selected_tracks: Vec::new(),
+            track_anchor: None,
+            selected_clip: None,
+            selected_clips: Vec::new(),
+            clipboard: None,
+            mixdown_confirm: None,
+            delete_confirm: None,
+            confirm: None,
+            text_edit: None,
+            recovery: None,
+            prefs_open: false,
+            prefs_page: PrefsPage::AudioMidi,
+            export_dialog: false,
+            export: ExportSettings::default(),
+            automation_write: false,
+            automation_mode: AutomationMode::default(),
+            writing: Vec::new(),
+            pass: None,
+            passes: 0,
+        }
+    }
+}
+
+/// View settings and selection local to one view (Arrange, Mixer, Rack, …).
+/// `App` holds one today; a window or pane per view will hold one each once
+/// multi-monitor/widescreen layouts are built, all reading the one
+/// [`SharedViewState`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ViewState {
+    pub page: Page,
+    /// Timeline zoom.
+    pub px_per_s: f32,
+    /// Time at the left edge of the timeline.
+    pub scroll_s: f64,
+    /// Vertical scroll of the track lanes, in logical px.
+    pub scroll_y: f32,
+    /// Open right-click context menu on a track header in the arrange view.
+    pub track_menu: Option<TrackMenu>,
+    /// Open "Change Output…" or "Color" popup from the track context menu.
+    pub track_popup: Option<TrackPopup>,
     /// Snap clip moves to beats.
     pub snap: bool,
     /// The MIDI clip open in the piano roll.
@@ -707,38 +775,13 @@ pub struct ViewState {
     /// (its bar from 0) is, to find it again by when the project changes.
     #[serde(skip)]
     pub(crate) marker_anchor: f64,
-    /// The "save changes?" dialog is open, before doing this.
-    pub confirm: Option<PendingAction>,
-    /// A field being typed in.
-    pub text_edit: Option<TextEdit>,
-    /// Unsaved changes to offer to recover (the dialog is open).
-    pub recovery: Option<dawkey_studio::Recovery>,
-    /// The preferences panel is open.
-    pub prefs_open: bool,
-    /// Current category in the Preferences panel.
-    pub prefs_page: PrefsPage,
-    /// The export dialog is open.
-    pub export_dialog: bool,
-    /// What the export dialog exports (kept between exports).
-    pub export: ExportSettings,
-    /// Moving faders, pan and plugin parameters while playing writes
-    /// automation (the transport's "Auto").
-    pub automation_write: bool,
-    /// How it writes (the button next to "Auto").
-    pub automation_mode: AutomationMode,
     #[serde(skip)]
     pub(crate) gesture: Option<Gesture>,
-    /// The automation being written: the current gesture's, and in latch
-    /// and write modes every lane written since playback started.
-    #[serde(skip)]
-    pub(crate) writing: Vec<AutomationWrite>,
-    /// The write pass going on (latch and write modes), from the first
-    /// lane it wrote until the transport stops.
-    #[serde(skip)]
-    pub(crate) pass: Option<AutomationPass>,
-    /// Write passes so far, so each has its own undo step.
-    #[serde(skip)]
-    pub(crate) passes: u32,
+    /// State shared with every other view open at once. See
+    /// [`SharedViewState`]. Flattened so `ViewState`'s JSON shape (over MCP)
+    /// is unchanged by this split.
+    #[serde(flatten)]
+    pub shared: SharedViewState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
@@ -855,15 +898,8 @@ impl Default for ViewState {
             px_per_s: 80.0,
             scroll_s: 0.0,
             scroll_y: 0.0,
-            selected_tracks: Vec::new(),
-            track_anchor: None,
             track_menu: None,
             track_popup: None,
-            mixdown_confirm: None,
-            delete_confirm: None,
-            selected_clip: None,
-            selected_clips: Vec::new(),
-            clipboard: None,
             snap: true,
             editing_clip: None,
             selected_notes: Vec::new(),
@@ -886,19 +922,8 @@ impl Default for ViewState {
             tempo_shown: false,
             selected_marker: None,
             marker_anchor: 0.0,
-            confirm: None,
-            text_edit: None,
-            recovery: None,
-            prefs_open: false,
-            prefs_page: PrefsPage::AudioMidi,
-            export_dialog: false,
-            export: ExportSettings::default(),
-            automation_write: false,
-            automation_mode: AutomationMode::default(),
             gesture: None,
-            writing: Vec::new(),
-            pass: None,
-            passes: 0,
+            shared: SharedViewState::default(),
         }
     }
 }

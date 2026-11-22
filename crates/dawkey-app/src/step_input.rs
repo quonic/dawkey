@@ -30,7 +30,7 @@ impl App {
         }
         self.view.page = Page::StepSequencer;
         self.view.editing_clip = Some(clip);
-        self.view.selected_clip = Some(clip);
+        self.view.shared.selected_clip = Some(clip);
         self.view.selected_notes.clear();
         self.view.selected_control = None;
         Ok(())

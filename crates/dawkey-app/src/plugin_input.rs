@@ -695,11 +695,11 @@ impl App {
     }
 
     pub(crate) fn close_overlays(&mut self) {
-        self.view.export_dialog = false;
-        self.view.prefs_open = false;
+        self.view.shared.export_dialog = false;
+        self.view.shared.prefs_open = false;
         self.view.track_menu = None;
-        self.view.mixdown_confirm = None;
-        self.view.delete_confirm = None;
+        self.view.shared.mixdown_confirm = None;
+        self.view.shared.delete_confirm = None;
         self.view.plugin_picker = None;
         self.view.picker_query.clear();
         self.view.picker_selected = 0;
