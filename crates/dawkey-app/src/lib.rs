@@ -768,6 +768,21 @@ impl App {
             .unwrap_or_else(|| project.tracks.first().map_or(dawkey_core::MASTER, |t| t.id))
     }
 
+    /// Whether the rack is showing somewhere right now: the page switcher's
+    /// on `Page::Rack`, the Widescreen layout always shows it, or it's one
+    /// of the multi-monitor layout's windows' fixed roles.
+    pub(crate) fn rack_visible(&self) -> bool {
+        self.view.page == Page::Rack
+            || self.prefs.layout == crate::prefs::LayoutChoice::Widescreen
+            || self
+                .primary_role
+                .is_some_and(|r| matches!(r, ViewRole::Rack | ViewRole::MixerAndRack))
+            || self
+                .extra_windows
+                .iter()
+                .any(|w| matches!(w.role, ViewRole::Rack | ViewRole::MixerAndRack))
+    }
+
     fn view_model(&mut self) -> ViewModel {
         let meters = self.studio.display_meters();
         let status = self.studio.engine_status();
@@ -791,7 +806,7 @@ impl App {
             self.studio.plugin_details_window(id, first, count)
         });
         let rack_track = self.rack_track();
-        let rack_units = if self.view.page == Page::Rack {
+        let rack_units = if self.rack_visible() {
             let ids: Vec<dawkey_core::PluginId> = self
                 .studio
                 .session()

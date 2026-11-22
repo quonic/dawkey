@@ -722,17 +722,28 @@ impl Gui {
     /// `App` about it. Called whenever the `layout` preference or the known
     /// monitors might have changed.
     fn sync_layout(&mut self) {
+        tracing::info!(
+            "sync_layout: {} known monitor(s), layout={:?}",
+            self.outputs.len(),
+            self.app.preferences().layout
+        );
         match self.desired_plan() {
             Some((primary_role, primary_output, extras)) => {
+                tracing::info!(
+                    "placing primary ({primary_role:?}) on {:?}, {} extra window(s)",
+                    primary_output.id(),
+                    extras.len()
+                );
                 self.window.set_fullscreen(Some(&primary_output));
                 while self.extras.len() > extras.len() {
                     self.extras.pop();
                 }
-                for (i, (_, output)) in extras.iter().enumerate() {
+                for (i, (role, output)) in extras.iter().enumerate() {
                     if i >= self.extras.len() {
                         let extra = self.create_extra_window();
                         self.extras.push(extra);
                     }
+                    tracing::info!("placing extra window {i} ({role:?}) on {:?}", output.id());
                     self.extras[i].window.set_fullscreen(Some(output));
                 }
                 let roles: Vec<ViewRole> = extras.iter().map(|(role, _)| *role).collect();
@@ -754,10 +765,12 @@ impl Gui {
     /// `desired_plan`.
     fn update_monitor(&mut self, output: wl_output::WlOutput) {
         let Some(info) = self.output_state.info(&output) else {
+            tracing::warn!("no OutputInfo yet for a monitor");
             return;
         };
         let x = info.logical_position.unwrap_or(info.location).0;
         let name = info.name.unwrap_or_else(|| format!("output-{}", info.id));
+        tracing::info!("monitor {name:?} at x={x}");
         let monitor = MonitorInfo { name, x };
         match self.outputs.iter_mut().find(|(o, _)| o == &output) {
             Some((_, m)) => *m = monitor,

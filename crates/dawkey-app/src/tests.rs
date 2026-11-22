@@ -3472,6 +3472,36 @@ fn widescreen_layout_shows_arrange_rack_and_mixer_at_once() {
 }
 
 #[test]
+fn widescreen_shows_a_new_plugin_in_the_rack_without_switching_pages() {
+    use crate::prefs::LayoutChoice;
+    let (mut app, _dir) = app_with_plugins();
+    let mut prefs = app.preferences().clone();
+    prefs.layout = LayoutChoice::Widescreen;
+    app.set_preferences(prefs, None);
+
+    let track = add_track(&mut app, "Guitar");
+    let outcome = app
+        .studio
+        .execute(
+            dawkey_core::AddPlugin {
+                track: dawkey_core::TrackId(track),
+                plugin: "clap:dawkey.test.gain".into(),
+                index: None,
+            }
+            .into(),
+        )
+        .unwrap();
+    let plugin = outcome.plugin.unwrap();
+
+    // Never touched view/rack: the page stays Arrange, but the rack pane
+    // (always on screen in Widescreen) must show the new plugin anyway.
+    assert_eq!(app.view_state().page, Page::Arrange);
+    let tree = app.access_tree();
+    assert!(tree.find("rack/bay").is_some());
+    assert!(tree.find(&format!("rack/unit/{plugin}")).is_some());
+}
+
+#[test]
 fn preferences_apply_at_once_and_are_saved() {
     use crate::prefs::{AudioChoice, PluginKind, Preferences};
     let dir = tempfile::tempdir().unwrap();
