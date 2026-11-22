@@ -12,9 +12,9 @@ use dawkey_ui::{ChromeAction, DragPhase, Modifiers, MouseButton, Point, Rect, Ui
 
 use crate::App;
 use crate::state::{
-    ClipEdge, DeleteConfirm, FADER_H, Gesture, ImportRequest, MAX_ZOOM, MIN_ZOOM, MixdownConfirm,
-    PAN_W, Page, PendingAction, PlatformRequest, RangeKind, SEND_W, TextField, TrackMenu,
-    TrackPopup, TrackPopupKind, takes_shown, track_tops,
+    ClipEdge, DeleteConfirm, FADER_H, Gesture, ImportRequest, MAX_ZOOM, MIN_SPLIT, MIN_ZOOM,
+    MixdownConfirm, PAN_W, Page, PendingAction, PlatformRequest, RangeKind, SEND_W,
+    SplitOrientation, TextField, TrackMenu, TrackPopup, TrackPopupKind, takes_shown, track_tops,
 };
 use crate::view::{db_from_position, position_from_db};
 
@@ -179,6 +179,10 @@ impl App {
             },
             ["toolbar", "snap"] => {
                 self.view.snap = !self.view.snap;
+                Ok(())
+            }
+            ["mixer_rack", "orientation"] => {
+                self.view.mixer_rack_orientation = self.view.mixer_rack_orientation.toggled();
                 Ok(())
             }
             ["toolbar", "split"] => self.split_selected(),
@@ -490,6 +494,23 @@ impl App {
             }
             Gesture::TrimClip { .. } => self.on_trim_drag(gesture, pos, end, modifiers),
             Gesture::Repeat { .. } => self.on_repeat_drag(gesture, pos, end, modifiers),
+            Gesture::ResizeSplit { start_split } => {
+                let delta = if self.view.mixer_rack_orientation == SplitOrientation::Stacked {
+                    pos.y - origin.y
+                } else {
+                    pos.x - origin.x
+                };
+                // Rack leads (top/left) and Mixer trails (bottom/right), so
+                // dragging the divider forward grows Rack at Mixer's
+                // expense: the mixer's own size shrinks by the delta.
+                self.view.mixer_rack_split = (start_split - delta).max(MIN_SPLIT);
+                if end {
+                    self.view.gesture = None;
+                } else {
+                    self.view.gesture = Some(Gesture::ResizeSplit { start_split });
+                }
+                Ok(())
+            }
             Gesture::Fader {
                 track,
                 start_db,
@@ -770,6 +791,9 @@ impl App {
         }
         let project = self.studio.session().project();
         Ok(match parts[..] {
+            ["mixer_rack", "split"] => Some(Gesture::ResizeSplit {
+                start_split: self.view.mixer_rack_split,
+            }),
             ["clip", clip, "end"] if modifiers.ctrl => {
                 Some(self.start_repeat(ClipId(parse_id(clip)?), origin)?)
             }
@@ -921,6 +945,10 @@ impl App {
 
     fn on_scroll(&mut self, id: Option<&str>, pos: Point, delta: Point, modifiers: Modifiers) {
         if self.on_overlay_scroll(id, delta) {
+            return;
+        }
+        if id == Some("rack/sidebar") {
+            self.scroll_rack_sidebar(delta.y);
             return;
         }
         if id == Some("rack/bay") || (id.is_none() && self.view.page == Page::Rack) {

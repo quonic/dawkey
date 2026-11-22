@@ -847,6 +847,7 @@ impl Gui {
             Some(ResizeEdge::BottomRight) => CursorIcon::SeResize,
             _ => match self.app.cursor() {
                 Some(Cursor::ResizeHorizontal) => CursorIcon::EwResize,
+                Some(Cursor::ResizeVertical) => CursorIcon::NsResize,
                 None => CursorIcon::Default,
             },
         };
@@ -858,6 +859,7 @@ impl Gui {
     fn update_extra_cursor(&mut self, index: usize, _pos: Point) {
         let icon = match self.app.extra_cursor(index) {
             Some(Cursor::ResizeHorizontal) => CursorIcon::EwResize,
+            Some(Cursor::ResizeVertical) => CursorIcon::NsResize,
             None => CursorIcon::Default,
         };
         self.set_cursor(icon, false);

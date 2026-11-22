@@ -3502,6 +3502,77 @@ fn widescreen_shows_a_new_plugin_in_the_rack_without_switching_pages() {
 }
 
 #[test]
+fn the_rack_sidebar_scrolls_when_its_content_overflows() {
+    let mut app = app();
+    // Enough tracks that the sidebar's own content is taller than its view.
+    for i in 0..30 {
+        add_track(&mut app, &format!("Track {i}"));
+    }
+    click(&mut app, "view/rack").unwrap();
+    let sidebar = app.access_tree().find("rack/sidebar").unwrap().bounds;
+    let over_sidebar = Point::new(sidebar.x + 10.0, sidebar.y + 10.0);
+
+    assert_eq!(app.view_state().rack_sidebar_scroll, 0.0);
+    app.scroll(over_sidebar, Point::new(0.0, 100.0), Modifiers::default());
+    assert!(app.view_state().rack_sidebar_scroll > 0.0);
+
+    // Scrolling further doesn't go past the content's actual height.
+    app.scroll(
+        over_sidebar,
+        Point::new(0.0, 10_000.0),
+        Modifiers::default(),
+    );
+    let max = app.view_state().rack_sidebar_scroll;
+    app.scroll(
+        over_sidebar,
+        Point::new(0.0, 10_000.0),
+        Modifiers::default(),
+    );
+    assert_eq!(app.view_state().rack_sidebar_scroll, max);
+}
+
+#[test]
+fn mixer_and_rack_pane_resizes_and_flips_orientation() {
+    use crate::state::SplitOrientation;
+    use crate::{ViewRole, WindowInfo};
+    use dawkey_ui::InputEvent;
+    let mut app = app();
+    app.set_window_roles(Some(ViewRole::MixerAndRack), &[], WindowInfo::headless());
+    assert_eq!(
+        app.view_state().mixer_rack_orientation,
+        SplitOrientation::Stacked
+    );
+    let before = app.view_state().mixer_rack_split;
+
+    // Drag the divider down: Rack (leading, on top) grows and Mixer
+    // (trailing, on the bottom) shrinks by the same amount.
+    let at = app.ui.widget_center("mixer_rack/split").unwrap();
+    app.handle_input(InputEvent::PointerDown {
+        pos: at,
+        button: MouseButton::Left,
+        time_ms: 0,
+    });
+    app.handle_input(InputEvent::PointerMove(Point::new(at.x, at.y + 40.0)));
+    app.handle_input(InputEvent::PointerUp {
+        pos: Point::new(at.x, at.y + 40.0),
+        button: MouseButton::Left,
+    });
+    assert!((app.view_state().mixer_rack_split - before + 40.0).abs() < 0.01);
+
+    // The orientation toggle flips stacked <-> side by side.
+    click(&mut app, "mixer_rack/orientation").unwrap();
+    assert_eq!(
+        app.view_state().mixer_rack_orientation,
+        SplitOrientation::SideBySide
+    );
+    click(&mut app, "mixer_rack/orientation").unwrap();
+    assert_eq!(
+        app.view_state().mixer_rack_orientation,
+        SplitOrientation::Stacked
+    );
+}
+
+#[test]
 fn preferences_apply_at_once_and_are_saved() {
     use crate::prefs::{AudioChoice, PluginKind, Preferences};
     let dir = tempfile::tempdir().unwrap();

@@ -34,8 +34,8 @@ use dawkey_core::{
 use dawkey_media::Peaks;
 use dawkey_studio::PluginDetails;
 use dawkey_ui::{
-    Chrome, Color, Direction, FontFamily, FontWeight, Icon, Insets, Node, Paint, Role, Sizing,
-    UiState,
+    Chrome, Color, Cursor, Direction, FontFamily, FontWeight, Icon, Insets, Node, Paint, Role,
+    Sizing, UiState,
 };
 
 pub(crate) use mixer::{db_from_position, position_from_db};
@@ -44,7 +44,7 @@ pub(crate) use piano_roll::{edited, lane_value, marquee_notes};
 pub(crate) use piano_roll::{x_of as roll_x, y_of as roll_y};
 
 use crate::WindowInfo;
-use crate::state::{Page, TextField, ViewState};
+use crate::state::{MIN_SPLIT, Page, SplitOrientation, TextField, ViewState};
 use crate::theme::*;
 
 /// Everything the view shows, gathered from the studio.
@@ -437,7 +437,7 @@ pub(crate) fn build(
             build_widescreen(model, view, ui, area.w)
         }
         (WindowContent::Window(role), Page::Arrange | Page::Mixer | Page::Rack) => {
-            build_for_role(model, view, ui, role, area.w)
+            build_for_role(model, view, ui, role, area)
         }
         (_, Page::Arrange) => arrange::build(model, view, ui),
         (_, Page::Mixer) => mixer::build(model, view, ui),
@@ -492,22 +492,92 @@ pub(crate) fn build_widescreen(
 
 /// What one monitor's window shows in the multi-monitor layout: always
 /// `role`, from the same shared [`ViewState`] every window reads.
+/// Width or height of the drag handle between the Mixer and Rack panes.
+const SPLIT_DIVIDER: f32 = 20.0;
+
 fn build_for_role(
     model: &ViewModel,
     view: &ViewState,
     ui: &UiState,
     role: crate::multi_window::ViewRole,
-    content_w: f32,
+    area: dawkey_ui::Rect,
 ) -> Node {
     use crate::multi_window::ViewRole;
     match role {
         ViewRole::Arrange => arrange::build(model, view, ui),
         ViewRole::Mixer => mixer::build(model, view, ui),
-        ViewRole::Rack => rack::build(model, view, ui, content_w),
-        ViewRole::MixerAndRack => Node::column()
+        ViewRole::Rack => rack::build(model, view, ui, area.w),
+        ViewRole::MixerAndRack => build_mixer_and_rack(model, view, ui, area),
+    }
+}
+
+/// Rack then Mixer, stacked (Rack on top) or side by side (Rack on the
+/// left) with a draggable divider between them (the multi-monitor
+/// layout's 2-monitor window). `mixer_rack_split` is the mixer pane's size
+/// (height if stacked, width if side by side) in logical px, clamped here
+/// to the pane's actual size so a window resize never hides either pane;
+/// `mixer_rack_orientation` picks the direction.
+fn build_mixer_and_rack(
+    model: &ViewModel,
+    view: &ViewState,
+    ui: &UiState,
+    area: dawkey_ui::Rect,
+) -> Node {
+    let stacked = view.mixer_rack_orientation == SplitOrientation::Stacked;
+    let extent = if stacked { area.h } else { area.w } - SPLIT_DIVIDER;
+    let min = MIN_SPLIT.min(extent / 2.0);
+    let mixer_size = view.mixer_rack_split.clamp(min, (extent - min).max(min));
+    // The orientation toggle sits at the divider's own far end, inside its
+    // reserved strip, so it never covers either pane's content.
+    let toggle_label = if stacked { "=" } else { "||" };
+    let toggle_orientation = button(
+        "mixer_rack/orientation",
+        "Switch between Rack above Mixer and side by side",
+        ui,
+        None,
+    )
+    .text(toggle_label)
+    .size(SPLIT_DIVIDER, SPLIT_DIVIDER)
+    .absolute(dawkey_ui::Rect::new(
+        if stacked { area.w - SPLIT_DIVIDER } else { 0.0 },
+        0.0,
+        SPLIT_DIVIDER,
+        SPLIT_DIVIDER,
+    ));
+    let divider = Node::row()
+        .id("mixer_rack/split")
+        .accessible_label("Resize the Mixer and Rack panes")
+        .clickable()
+        .draggable()
+        .cursor(if stacked {
+            Cursor::ResizeVertical
+        } else {
+            Cursor::ResizeHorizontal
+        })
+        .style(|s| {
+            s.background = Some(pal().border);
+        })
+        .child(toggle_orientation);
+    if stacked {
+        Node::column()
             .fill()
-            .child(mixer::build(model, view, ui))
-            .child(rack::build(model, view, ui, content_w)),
+            .child(rack::build(model, view, ui, area.w).height(Sizing::Fill(1.0)))
+            .child(
+                divider
+                    .width(Sizing::Fill(1.0))
+                    .height(Sizing::Fixed(SPLIT_DIVIDER)),
+            )
+            .child(mixer::build(model, view, ui).height(Sizing::Fixed(mixer_size)))
+    } else {
+        Node::row()
+            .fill()
+            .child(rack::build(model, view, ui, extent - mixer_size).width(Sizing::Fill(1.0)))
+            .child(
+                divider
+                    .width(Sizing::Fixed(SPLIT_DIVIDER))
+                    .height(Sizing::Fill(1.0)),
+            )
+            .child(mixer::build(model, view, ui).width(Sizing::Fixed(mixer_size)))
     }
 }
 
